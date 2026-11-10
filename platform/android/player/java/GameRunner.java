@@ -4,6 +4,7 @@ import android.os.Handler;
 import android.content.Context;
 import android.content.SharedPreferences;
 import android.graphics.Bitmap;
+import android.graphics.Canvas;
 import android.os.HandlerThread;
 import android.os.SystemClock;
 import android.util.Log;
@@ -130,6 +131,11 @@ final class GameRunner {
             frame.setPixels(pixels,0,width,0,0,width,height);
             return frame;
         }
+    }
+    static final class SlotPreview {
+        final Frame frame;
+        final Bitmap overlay;
+        SlotPreview(Frame frame,Bitmap overlay){this.frame=frame;this.overlay=overlay;}
     }
     interface Listener {
         void frame(Frame frame,int initialVisible);
@@ -654,7 +660,7 @@ final class GameRunner {
         Future<?> previousWrite=autoWrite;
         autoWrite=null;
         try{
-            CompletableFuture<Void> currentWrite=queueSlotWrite(SaveSlots.AUTO,false,null,0);
+            CompletableFuture<Void> currentWrite=queueSlotWrite(SaveSlots.AUTO,false,null,0,null);
             if(currentWrite!=null){
                 writeReadLines();
                 saveResult(currentWrite);
@@ -851,7 +857,7 @@ final class GameRunner {
         postProgressFlush(()->{
             active=false;
             tasks.removeCallbacks(ticker);stopSound();writeGallery();
-            CompletableFuture<Void> saving=save(SaveSlots.AUTO,false,null,0);
+            CompletableFuture<Void> saving=save(SaveSlots.AUTO,false,null,0,null);
             return saving==null?writeReadLines():saving;
         });
     }
@@ -1448,7 +1454,9 @@ final class GameRunner {
     });}
     SaveSlots.Entry[] slotEntries(){return slots.entries();}
     Integer lastSelectedSlot(){return slots.lastSelectedSlot();}
-    void saveSlot(int slot){tasks.post(() -> save(slot,true,()->playPanelSound(uiAssets.save,"saveSound",0),1));}
+    void saveSlot(int slot,SlotPreview preview){
+        tasks.post(()->save(slot,true,()->playPanelSound(uiAssets.save,"saveSound",0),1,preview));
+    }
     void loadSlot(int slot){loadSlot(slot,null);}
     void loadSlot(int slot,java.util.function.Consumer<Boolean> done){tasks.post(()->loadSlot(slot,false,done));}
     private void loadSlot(int slot,boolean quick,java.util.function.Consumer<Boolean> done){
@@ -1469,9 +1477,9 @@ final class GameRunner {
             if(done!=null)done.accept(success);
         }
     }
-    void quickSave(){tasks.post(() -> {
+    void quickSave(SlotPreview preview){tasks.post(() -> {
         if(!onTitle&&quickEnabled(true))
-            save(SaveSlots.QUICK,true,()->quickNotice(true),uiAssets.save.number("quickSetLastFlag",0));
+            save(SaveSlots.QUICK,true,()->quickNotice(true),uiAssets.save.number("quickSetLastFlag",0),preview);
     });}
     void quickLoad(){tasks.post(() -> {if(!onTitle&&quickEnabled(false))loadSlot(SaveSlots.QUICK,true,null);});}
     private boolean quickEnabled(boolean saving){
@@ -1495,7 +1503,7 @@ final class GameRunner {
         if(closing)return;
         try{
             if(!initialized)initialize();
-            else if(replaceResume){open(null,false);save(SaveSlots.AUTO,false,null,0);}
+            else if(replaceResume){open(null,false);save(SaveSlots.AUTO,false,null,0,null);}
         }catch(Exception|LinkageError e){broken(e);}
     });}
     void recoverCorruptProgress(){tasks.post(()->{
@@ -1505,16 +1513,16 @@ final class GameRunner {
             initialize();
         }catch(Exception|LinkageError e){broken(e);}
     });}
-    private CompletableFuture<Void> save(int slot,boolean notify,Runnable feedback,int marker){
+    private CompletableFuture<Void> save(int slot,boolean notify,Runnable feedback,int marker,SlotPreview preview){
         try{
-            CompletableFuture<Void> write=queueSlotWrite(slot,notify,feedback,marker);
+            CompletableFuture<Void> write=queueSlotWrite(slot,notify,feedback,marker,preview);
             if(write==null)return null;
             if(slot==SaveSlots.AUTO)autoWrite=write;
             write.whenComplete((unused,error)->{if(error!=null)saveFailed(error);});
             return writeReadLines();
         }catch(IOException|RuntimeException e){saveFailed(e);return null;}
     }
-    private CompletableFuture<Void> queueSlotWrite(int slot,boolean notify,Runnable feedback,int marker) throws IOException {
+    private CompletableFuture<Void> queueSlotWrite(int slot,boolean notify,Runnable feedback,int marker,SlotPreview preview) throws IOException {
         if(handle==0||failed||onTitle||history==null||!history.writable()||meta[0]==NativeGame.MOVIE||
             (meta[0]==NativeGame.MODAL&&!NativeGame.modalSavable(handle))||meta[0]==NativeGame.END){
             if(notify)ui.notice("当前无法保存进度");
@@ -1524,7 +1532,7 @@ final class GameRunner {
         if(feedback!=null)feedback.run();
         GameSave.Loaded data=history.capture(slot,handle,meta,current==null?"":current.speaker,current==null?"":current.body);
         Integer art=slotArtwork(slot);
-        Capture picture=slotPicture();
+        Capture picture=slotPicture(preview);
         long captureMs=SystemClock.uptimeMillis()-started;
         return CompletableFuture.runAsync(()->{
             try{writeSlot(data,picture,captureMs,art,marker);}
@@ -1536,12 +1544,28 @@ final class GameRunner {
         try{return NativeGame.saveSlotArt(handle);}
         catch(RuntimeException|LinkageError e){Log.w("SystemNNN","Unable to read save slot artwork number",e);return null;}
     }
-    private Capture slotPicture(){
+    private Capture slotPicture(SlotPreview preview){
+        int w=SaveSlots.pictureDimension(uiAssets.dataFile,"picSizeX",182);
+        int h=SaveSlots.pictureDimension(uiAssets.dataFile,"picSizeY",102);
+        Capture picture;
+        try{picture=new Capture(NativeGame.saveThumbnail(handle,w,h),w,h);}
+        catch(RuntimeException|OutOfMemoryError e){
+            Log.w("SystemNNN","Unable to capture slot preview",e);
+            return null;
+        }
+        // Only combine the message plane with the script state that supplied it.
+        if(preview==null||preview.frame!=current)return picture;
+        Bitmap composed=null;
         try{
-            int w=Math.max(1,Math.min(512,uiAssets.dataFile.number("picSizeX",182)));
-            int h=Math.max(1,Math.min(512,uiAssets.dataFile.number("picSizeY",102)));
-            return new Capture(NativeGame.saveThumbnail(handle,w,h),w,h);
-        }catch(RuntimeException e){Log.w("SystemNNN","Unable to capture slot preview",e);return null;}
+            composed=picture.mutableBitmap();
+            new Canvas(composed).drawBitmap(preview.overlay,0f,0f,null);
+            composed.getPixels(picture.pixels,0,w,0,0,w,h);
+        }catch(RuntimeException|OutOfMemoryError e){
+            Log.w("SystemNNN","Unable to composite slot preview",e);
+        }finally{
+            if(composed!=null)composed.recycle();
+        }
+        return picture;
     }
     private void writeSlot(GameSave.Loaded data,Capture picture,long captureMs,Integer art,int marker) throws IOException {
         long started=SystemClock.uptimeMillis();

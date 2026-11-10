@@ -241,7 +241,7 @@ final class GameSlotsPanel extends GameUiPanel {
         private final Bitmap preview,base;
         private final Rect artworkTile;
         private final int serial;
-        private final String time;
+        private final String time,summary;
         private final Paint p=new Paint(Paint.ANTI_ALIAS_FLAG|Paint.FILTER_BITMAP_FLAG);
         SlotCard(SaveSlots.Entry e,int serial){
             super(GameSlotsPanel.this.getContext());this.e=e;this.serial=serial;setSoundEffectsEnabled(false);
@@ -252,7 +252,9 @@ final class GameSlotsPanel extends GameUiPanel {
             base=data.number("basePrintFlag",1)!=0?sprite(image):null;
             preview=e.picture;
             artworkTile=artworkSource(e.artwork);
-            setContentDescription(e.label()+" · "+(e.corrupt?"存档无法读取":!e.exists?"空槽位":time+" · "+e.script+" · 第 "+e.line+" 句 · "+e.speaker+" · "+e.summary));
+            summary=e.displaySummary();
+            setContentDescription(e.label()+" · "+(e.corrupt?"存档无法读取":
+                !e.exists?"空槽位":time+(summary.isEmpty()?"":" · "+summary)));
         }
         @Override public CharSequence getAccessibilityClassName(){return "android.widget.Button";}
         @Override protected void drawableStateChanged(){super.drawableStateChanged();invalidate();}
@@ -295,19 +297,15 @@ final class GameSlotsPanel extends GameUiPanel {
             timestamp(c);
             if(e.slot!=SaveSlots.AUTO)serialNumber(c,false);
             int x=data.number("textPrintX",210),y=data.number("textPrintY",87),size=limit(data.number("textFontSize",16),8,40);
-            int positionY=data.number("addPicPrintY",46);
-            if(artworkTile==null){
-                String position=e.script+" · 第 "+e.line+" 句";
-                if(e.slot==SaveSlots.AUTO)position="自动存档 · "+position;
-                line(c,position,data.number("addPicPrintX",x),positionY,14,0xffb7cddb);
-            }
-            if(data.number("textPrintFlag",1)!=0){
+            int artworkY=data.number("addPicPrintY",46);
+            if(e.slot==SaveSlots.AUTO&&artworkTile==null)
+                line(c,e.label(),data.number("addPicPrintX",x),artworkY,14,0xffb7cddb);
+            if(data.number("textPrintFlag",0)!=0&&!summary.isEmpty()){
                 int color=Color.rgb(data.number("textColorR",128)&255,data.number("textColorG",224)&255,data.number("textColorB",224)&255);
-                String summary=e.speaker.isEmpty()?e.summary:e.speaker+"　"+e.summary;
                 if(e.slot==SaveSlots.QUICK&&base!=null){
                     // The quick-slot plate already has a label in the comment box.
                     int small=Math.min(size,13),top=y-small-10;
-                    if(top>=positionY+16)line(c,summary,x,top,small,color);
+                    if(top>=artworkY+16)line(c,summary,x,top,small,color);
                     return;
                 }
                 int n=line(c,summary,x,y,size,color);

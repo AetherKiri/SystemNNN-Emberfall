@@ -76,25 +76,25 @@ final class SaveSlots {
         }
     }
     static final class Entry {
-        final int slot,line;
+        final int slot;
         final boolean exists,corrupt;
         final long savedAt;
-        final String script,speaker,summary;
+        final String speaker,summary;
         final Bitmap picture;
         final Integer artwork;
         final boolean lastSaved;
-        Entry(int slot,boolean exists,boolean corrupt,long savedAt,String script,int line,String speaker,String summary,Bitmap picture) {
-            this(slot,exists,corrupt,savedAt,script,line,speaker,summary,picture,null,false);
+        Entry(int slot,boolean exists,boolean corrupt,long savedAt,String speaker,String summary,Bitmap picture) {
+            this(slot,exists,corrupt,savedAt,speaker,summary,picture,null,false);
         }
-        private Entry(int slot,boolean exists,boolean corrupt,long savedAt,String script,int line,String speaker,String summary,
+        private Entry(int slot,boolean exists,boolean corrupt,long savedAt,String speaker,String summary,
                       Bitmap picture,Integer artwork,boolean lastSaved) {
             this.slot=slot; this.exists=exists; this.corrupt=corrupt; this.savedAt=savedAt;
-            this.script=script; this.line=line; this.speaker=speaker; this.summary=summary;
+            this.speaker=speaker; this.summary=summary;
             this.picture=picture;
             this.artwork=artwork;this.lastSaved=lastSaved;
         }
         private Entry withoutPicture(){
-            return new Entry(slot,exists,corrupt,savedAt,script,line,speaker,summary,null,artwork,lastSaved);
+            return new Entry(slot,exists,corrupt,savedAt,speaker,summary,null,artwork,lastSaved);
         }
         private Entry withUi(SlotUi state){
             if(!exists||corrupt)return this;
@@ -102,9 +102,12 @@ final class SaveSlots {
             Integer number=art!=null&&art.savedAt==savedAt?art.number:null;
             boolean marked=slot!=AUTO&&state.lastSaved==slot&&state.lastSavedAt==savedAt;
             if(number==null&&!marked)return this;
-            return new Entry(slot,exists,corrupt,savedAt,script,line,speaker,summary,picture,number,marked);
+            return new Entry(slot,exists,corrupt,savedAt,speaker,summary,picture,number,marked);
         }
         String label() { return labelFor(slot); }
+        String displaySummary() {
+            return speaker.isEmpty()||summary.isEmpty()?speaker+summary:speaker+"　"+summary;
+        }
     }
     SaveSlots(GameSavePaths paths) {
         this.paths=paths;
@@ -255,9 +258,9 @@ final class SaveSlots {
             return slot!=AUTO&&valid(slot)&&in.read()==-1?slot:null;
         }catch(IOException|RuntimeException ignored){return null;}
     }
-    private static Entry empty(int slot){return new Entry(slot,false,false,0,"",0,"","",null);}
+    private static Entry empty(int slot){return new Entry(slot,false,false,0,"","",null);}
     private static Entry entry(int slot,GameSave.Metadata m,Bitmap picture){
-        return new Entry(slot,true,false,m.savedAt,m.script,m.line,m.speaker,m.legacy?"旧版存档":m.summary,picture);
+        return new Entry(slot,true,false,m.savedAt,m.speaker,m.legacy?"旧版存档":m.summary,picture);
     }
     private Entry readEntry(int slot,int remainingPixels) {
         File file=file(slot);
@@ -267,10 +270,13 @@ final class SaveSlots {
             if (!m.legacy && m.slot!=slot) throw new IOException("存档编号不匹配");
             return entry(slot,m,m.legacy||remainingPixels<=0?null:readPicture(slot,m.savedAt,remainingPixels));
         } catch (IOException | RuntimeException e) {
-            return new Entry(slot,true,true,Math.max(0,file.lastModified()),"",0,"","存档损坏",null);
+            return new Entry(slot,true,true,Math.max(0,file.lastModified()),"","存档损坏",null);
         }
     }
     private File pictureFile(int slot){return paths.file(suffix(slot)+GameSavePaths.THUMB);}
+    static int pictureDimension(GameUiAssets.Config data,String field,int fallback){
+        return Math.max(1,Math.min(MAX_PICTURE_SIZE,data.number(field,fallback)));
+    }
     private static boolean pictureSize(int w,int h){return w>0&&h>0&&w<=MAX_PICTURE_SIZE&&h<=MAX_PICTURE_SIZE;}
     private Bitmap readPicture(int slot,long savedAt,int remainingPixels) {
         try(DataInputStream in=new DataInputStream(new BufferedInputStream(new AtomicFile(pictureFile(slot)).openRead()))){

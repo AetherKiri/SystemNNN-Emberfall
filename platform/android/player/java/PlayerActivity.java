@@ -73,6 +73,7 @@ public final class PlayerActivity extends Activity implements GameRunner.Listene
     private SceneEntrance sceneEntrance;
     private MoviePlayback moviePlayback;
     private GameSlotsPanel gameSlots;
+    private GameRunner.SlotPreview slotPreview;
     private GalleryCatalog.Page galleryPage,replayReturn;
     private long galleryRequest;
     private int galleryCgPage;
@@ -534,6 +535,7 @@ public final class PlayerActivity extends Activity implements GameRunner.Listene
                 currentFrame.word!=frame.word || !currentFrame.script.equals(frame.script) ||
                 !currentFrame.body.equals(frame.body) || !currentFrame.speaker.equals(frame.speaker) || currentFrame.nameWindow!=frame.nameWindow;
             currentFrame=drawnStoryFrame=frame;
+            if(slotPreview!=null&&slotPreview.frame!=frame)slotPreview=null;
             dialoguePanel.scriptCursorVariant(frame.scriptCursor);
             dialoguePanel.storyBody(frame.hasDialogueText());
             dialoguePanel.passive(frame.wait==NativeGame.DRAW);
@@ -606,7 +608,7 @@ public final class PlayerActivity extends Activity implements GameRunner.Listene
                 case BACKLOG:showBacklog();break;
                 case SAVE:runner.suspendScriptAudio();showSlots(true);break;
                 case LOAD:runner.suspendScriptAudio();showSlots(false);break;
-                case QUICK_SAVE:runner.quickSave();break;
+                case QUICK_SAVE:runner.quickSave(captureSlotPreview());break;
                 case QUICK_LOAD:runner.quickLoad();break;
                 case AUTO:runner.auto(target);break;
                 case SKIP:runner.skip(target);break;
@@ -883,7 +885,7 @@ public final class PlayerActivity extends Activity implements GameRunner.Listene
             if(titleModel!=model||returningToTitle)modeUnderPanel=null;
             if(returningToTitle){returningToTitle=false;closeOriginalPanel(false);}
             if(previous!=null){closeOriginalPanel(false);titlePrevious=previous.bitmap();}
-            typing=false;currentFrame=drawnStoryFrame=null;fullBody="";uiHidden=false;refreshAfterLoad=false;
+            typing=false;currentFrame=drawnStoryFrame=null;slotPreview=null;fullBody="";uiHidden=false;refreshAfterLoad=false;
             if(titlePanel!=null)stage.removeView(titlePanel);
             titleModel=model;if(w>0&&h>0){width=w;height=h;}layoutStage();
             storyScreen.clear();
@@ -1066,6 +1068,8 @@ public final class PlayerActivity extends Activity implements GameRunner.Listene
             if(!choices.menuAllowed()){if(choices.backlogAllowed())showBacklog();return;}
         }else if(currentFrame!=null&&!currentFrame.optionsAllowed)return;
         if(controls!=null)controls.cancelClick();
+        // Keep the story message plane before the system menu hides it.
+        slotPreview=captureSlotPreview();
         if(uiAssets!=null&&uiAssets.system.has("Menu1Button1FileName")){showOriginalMenu();return;}
         AlertDialog dialog=new AlertDialog.Builder(this).setTitle("游戏菜单")
             .setItems(new String[]{"继续游戏","保存进度","读取存档","环境设置","回看台词","返回标题",fromTyn?"返回 TYN":"退出游戏"},(d,item) -> {
@@ -1219,6 +1223,27 @@ public final class PlayerActivity extends Activity implements GameRunner.Listene
             return base;
         }
         return UiOpening.snapshot(stage,picture.bitmap(),canvas->drawStorySnapshot(canvas,withUi,true));
+    }
+    private GameRunner.SlotPreview captureSlotPreview(){
+        GameRunner.Frame frame=drawnStoryFrame;
+        if(frame==null||frame!=currentFrame||uiAssets==null||moviePlayback!=null)return null;
+        if(panelsOpen!=0)return slotPreview;
+        if(storyScreen.getVisibility()!=View.VISIBLE||stage.getWidth()<=0||stage.getHeight()<=0)return null;
+        String hideFlag=frame.wait==NativeGame.DIALOGUE?"messageMiniCGNoMessageFlag":
+            frame.wait==NativeGame.CHOICE?"selectMiniCGNoMessageFlag":null;
+        if(hideFlag!=null&&uiAssets.game.number(hideFlag,0)!=0)return null;
+        Bitmap overlay=null;
+        try{
+            int w=SaveSlots.pictureDimension(uiAssets.dataFile,"picSizeX",182);
+            int h=SaveSlots.pictureDimension(uiAssets.dataFile,"picSizeY",102);
+            overlay=Bitmap.createBitmap(w,h,Bitmap.Config.ARGB_8888);
+            UiOpening.drawOnto(stage,overlay,canvas->drawStorySnapshot(canvas,true,false));
+            return new GameRunner.SlotPreview(frame,overlay);
+        }catch(RuntimeException|OutOfMemoryError e){
+            if(overlay!=null)overlay.recycle();
+            Log.w("SystemNNN","Unable to capture the message plane for the save preview",e);
+            return null;
+        }
     }
     private void drawStorySnapshot(Canvas canvas,boolean withUi,boolean withFloatingUi){
         boolean screenComposited=storyScreen.paint(canvas,withUi,withFloatingUi,false);
@@ -1796,11 +1821,12 @@ public final class PlayerActivity extends Activity implements GameRunner.Listene
     });}
     private void showSlots(boolean saving) {
         if(runner==null)return;savingSlots=saving;
+        if(saving)slotPreview=captureSlotPreview();
         if(uiAssets!=null){
             GameUiAssets.Config config=saving?uiAssets.save:uiAssets.load;
             Runnable back=()->leaveOriginalPanel(config);
             gameSlots=new GameSlotsPanel(this,uiAssets,saving,runner.slotEntries(),runner.lastSelectedSlot(),this::systemClick,back,slot->{
-                if(saving)runner.saveSlot(slot);
+                if(saving)runner.saveSlot(slot,slotPreview);
                 else{
                     GameUiPanel panel=gamePanel;
                     panel.leave(config,false,(picture,filled)->{
@@ -1831,7 +1857,7 @@ public final class PlayerActivity extends Activity implements GameRunner.Listene
         DateFormat format=DateFormat.getDateTimeInstance(DateFormat.SHORT,DateFormat.SHORT);
         for(int i=0;i<entries.size();i++){
             SaveSlots.Entry entry=entries.get(i);
-            labels[i]=entry.label()+" · "+format.format(new Date(entry.savedAt))+"\n"+entry.summary;
+            labels[i]=entry.label()+" · "+format.format(new Date(entry.savedAt))+"\n"+entry.displaySummary();
         }
         showPanel(new AlertDialog.Builder(this).setTitle("其他存档").setItems(labels,(dialog,index)->{
             if(panel==gamePanel){systemClick();panel.loadOther(entries.get(index).slot);}
@@ -1845,16 +1871,16 @@ public final class PlayerActivity extends Activity implements GameRunner.Listene
         if(slotRows==null || slotsDialog==null || !slotsDialog.isShowing())return;slotRows.removeAllViews();
         TextView hint=label(savingSlots?"选择一个槽位保存。自动存档由游戏维护。":"选择存档继续游戏。",14);hint.setPadding(0,0,0,dp(10));slotRows.addView(hint);
         for(SaveSlots.Entry entry:runner.slotEntries()){
+            String summary=entry.displaySummary();
             String detail=entry.corrupt?"存档无法读取":!entry.exists?"空槽位":DateFormat.getDateTimeInstance(DateFormat.SHORT,DateFormat.SHORT).format(new Date(entry.savedAt))+
-                "\n"+entry.script+" · 第 "+entry.line+" 句"+
-                (entry.speaker.isEmpty()?"":"  ·  "+entry.speaker)+(entry.summary.isEmpty()?"":"\n"+entry.summary);
+                (summary.isEmpty()?"":"\n"+summary);
             Button button=new Button(this);button.setAllCaps(false);button.setGravity(Gravity.START|Gravity.CENTER_VERTICAL);
             button.setPadding(dp(14),dp(8),dp(14),dp(8));button.setText(entry.label()+"\n"+detail);
             button.setEnabled(savingSlots?entry.slot!=SaveSlots.AUTO:entry.exists&&!entry.corrupt);
             button.setSoundEffectsEnabled(false);button.setOnClickListener(clicked(v -> {
                 if(savingSlots && entry.exists){AlertDialog confirm=new AlertDialog.Builder(this).setTitle("覆盖"+entry.label()+"？").setMessage(detail)
-                    .setNegativeButton("取消",dialogClick(null)).setPositiveButton("覆盖保存",dialogClick((d,which) -> runner.saveSlot(entry.slot))).create();showPanel(confirm);}
-                else if(savingSlots)runner.saveSlot(entry.slot);
+                    .setNegativeButton("取消",dialogClick(null)).setPositiveButton("覆盖保存",dialogClick((d,which) -> runner.saveSlot(entry.slot,slotPreview))).create();showPanel(confirm);}
+                else if(savingSlots)runner.saveSlot(entry.slot,slotPreview);
                 else {runner.loadSlot(entry.slot);slotsDialog.dismiss();}
             }));slotRows.addView(button,new LinearLayout.LayoutParams(-1,-2));
         }
