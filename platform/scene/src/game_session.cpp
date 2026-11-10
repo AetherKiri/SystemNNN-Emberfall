@@ -3193,14 +3193,11 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         SetVarData(id,value);
     }
 
-    void restore_pc_audio(const pc::Status& status,bool best_effort=false) {
+    void restore_pc_audio(const pc::Status& status) {
         const auto submit=[&](const nnn::SystemEvent& cue) {
             const auto error=cue.opcode==nnn::audio::voice ? playback.submit_pc_voice(cue,frame.script,frame.word) :
                 playback.submit(cue,frame.script,frame.word);
-            if (!error.empty()) {
-                if (!best_effort) throw std::runtime_error("PC save audio: "+error);
-                warn("SELECTCHART restored audio: "+error);
-            }
+            if (!error.empty()) warn("PC save audio: "+error);
         };
         if (status.bgm_number>=0) {
             if (status.bgm_number==INT32_MAX || status.bgm_plays<0 || status.bgm_volume<0 || status.bgm_volume>100)
@@ -3210,7 +3207,7 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
             cue.opcode=nnn::audio::music;
             cue.parameters={status.bgm_number+1,status.bgm_plays,status.bgm_volume-volume,0,0};
             submit(cue);
-        } else if (best_effort) {
+        } else {
             nnn::SystemEvent cue;
             cue.opcode=nnn::audio::music;
             cue.parameters={-1,0};
@@ -3414,7 +3411,7 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         }
         preview_story_dirty=true;
         playback.stop_script_audio();
-        restore_pc_audio(status,true);
+        restore_pc_audio(status);
         return true;
     }
     void load_pc_save(const std::vector<nnn::Byte>& bytes) {

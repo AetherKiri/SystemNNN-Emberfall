@@ -1357,6 +1357,26 @@ int main(){
         require(exported.log && exported.log->layout==scene::pc::LogLayout::MultiVoice && exported.log->voice_count==1,
             "native snapshot forgot the imported single-voice layout");
     });
+    suite.test("PC slot restores dialogue when the saved BGM is missing",[]{
+        Model model;model.message=true;model.code.print(1);model.code.print(2);model.code.end();
+        TempGame temp(model);
+        temp.text("spt/bgmlist.xtx","missing,Missing track\n");
+        temp.text("wgq/missing.mml","missing_intro [0: missing_loop]\n");
+        scene::GameSession game(temp.root,test_options());
+        require(game.step_frame(0).wait==scene::Wait::Dialogue,"first dialogue");
+        auto saved=scene::pc::parse_save(game.export_pc_save(),"SAVEDATA",scene::pc::first_extension_code);
+        saved.status.bgm_number=0;
+        saved.status.bgm_volume=70;
+        scene::InputState advance;advance.advance=true;
+        require(game.step_frame(0,advance).dialogue.message_id==2,"second dialogue");
+        game.restore_pc_save(scene::pc::write_save(saved));
+        require(game.state().wait==scene::Wait::Dialogue && game.state().dialogue.message_id==1,
+            "missing BGM prevented dialogue restore");
+        const auto& warnings=game.warnings();
+        require(std::any_of(warnings.begin(),warnings.end(),[](const std::string& message){
+            return message.find("PC save audio: Missing WGQ segment: missing_intro")!=std::string::npos;
+        }),"missing BGM was not recorded");
+    });
     suite.test("backlog jump validates the cursor and truncates future dialogue",[]{
         Model model;model.message=true;model.code.print(1);model.code.print(2);model.code.end();
         TempGame temp(model);temp.text("init/game.xtx","JumpFlag 1\n");
