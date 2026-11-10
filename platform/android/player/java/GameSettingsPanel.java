@@ -318,7 +318,7 @@ final class GameSettingsPanel extends GameUiPanel {
         return button;
     }
     private void fallback(){
-        for(int tab=0;tab<2;tab++){final int target=tab;chip(tab==0?"音效设置":"文字设置",page==tab,()->showPage(target),45,105+70*tab,210,54);}
+        for(int tab=0;tab<2;tab++){final int target=tab;chip(tab==0?"声音设置":"文字设置",page==tab,()->showPage(target),45,105+70*tab,210,54);}
         if(page==0){String[] labels={"背景音乐","音效","角色语音","特效语音"},keys={"musicVolume","soundVolume","voiceVolume","effectVoiceVolume"};
             for(int i=0;i<4;i++){final String key=keys[i];put(text(labels[i],28,0xffa4e7ff),330,90+120*i,700,38);
                 put(volumeBar("ta_bar01",labels[i],0,100,preferences.getInt(key,80),710,30,v->writeInt(key,v)),330,124+120*i,710,50);}
