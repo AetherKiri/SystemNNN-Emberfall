@@ -3888,7 +3888,8 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
     }
 
     void load_snapshot(nnn::snapshot::Reader& in,const std::function<bool(const FrameState&)>& verify,
-                       bool keep_music_position,bool jumping=false,bool migrate_legacy_system_variables=false) {
+                       bool keep_music_position,bool jumping=false,bool migrate_legacy_system_variables=false,
+                       bool restart_music=false) {
         using nnn::snapshot::invalid;
         if (ui_mode || !replay_films.empty()) invalid("Cannot restore into a decorative or replay session");
         auto staged=read_snapshot_progress(in,this);
@@ -4012,7 +4013,7 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         // Audio validates the remaining payload before swapping tracks under
         // the mixer lock. Its address stays stable for the PCM consumer.
         if (jumping) playback.load_snapshot(in,keep_music_position,jump_voice_mask,jump_finish_fades);
-        else playback.load_snapshot(in,keep_music_position);
+        else playback.load_snapshot(in,keep_music_position,{},false,restart_music);
         if (next.frame.modal) next.frame.modal->request=new_modal_request();
         frame=std::move(next.frame);vars=next.vars;
         append_prefix_bytes=0;
@@ -4334,9 +4335,9 @@ void GameSession::restore_pc_save(const std::vector<nnn::Byte>& bytes) {
 std::vector<nnn::Byte> GameSession::export_pc_save() { return pc::write_save(data_->make_pc_save()); }
 nnn::Value GameSession::save_slot_art() const { return data_->save_slot_art(); }
 void GameSession::restore_snapshot(const nnn::snapshot::Bytes& bytes,const std::function<bool(const FrameState&)>& verify,
-                                   bool keep_music_position,bool migrate_legacy_system_variables) {
+                                   bool keep_music_position,bool migrate_legacy_system_variables,bool restart_music) {
     nnn::snapshot::Reader in(bytes);
-    data_->load_snapshot(in,verify,keep_music_position,false,migrate_legacy_system_variables);
+    data_->load_snapshot(in,verify,keep_music_position,false,migrate_legacy_system_variables,restart_music);
     data_->clear_jumps();
 }
 const std::deque<BacklogEntry>& GameSession::backlog() const { return data_->backlog; }

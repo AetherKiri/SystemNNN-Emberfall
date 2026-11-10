@@ -36,7 +36,8 @@ final class NativeGame {
     static native void restorePcSave(long handle,byte[] save,int[] meta);
     static native byte[] exportPcSave(long handle);
     static native boolean restoreSnapshot(long handle,byte[] data,int wait,int word,int line,byte[][] content,int[] meta,
-                                          boolean keepMusicPosition,boolean migrateLegacySystemVariables);
+                                          boolean keepMusicPosition,boolean migrateLegacySystemVariables,boolean restartMusic);
+    static native void restartReplayedMusic(long handle);
     // meta = wait, word, dialogue sequence, logical width/height, frame time and remaining wait frames.
     static native void tick(long handle, int ms, int x, int y, boolean advance, int choice, boolean replay, int[] meta);
     static native byte[][] content(long handle);

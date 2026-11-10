@@ -530,10 +530,11 @@ final class GameSave {
         checkSlot(file,loaded.metadata);
         return loaded;
     }
-    static boolean restoreSnapshot(Loaded loaded,long handle,int[] meta,boolean keepMusicPosition,boolean migrateLegacy) {
+    static boolean restoreSnapshot(Loaded loaded,long handle,int[] meta,boolean keepMusicPosition,boolean migrateLegacy,
+                                   boolean restartMusic) {
         Metadata at=loaded.metadata;
         return loaded.nativeSnapshot!=null&&NativeGame.restoreSnapshot(handle,loaded.nativeSnapshot,at.wait,at.word,at.line,
-            loaded.content,meta,keepMusicPosition,migrateLegacy);
+            loaded.content,meta,keepMusicPosition,migrateLegacy,restartMusic);
     }
     static void replay(Loaded loaded,long handle,int[] meta) throws IOException {
         if(meta==null||meta.length<7)throw new IOException("缺少恢复状态");

@@ -363,6 +363,17 @@ struct GameAudio::Impl {
         if (backlog_voice.character==static_cast<int>(group)) backlog_voice.set_role(steps);
     }
     std::uint64_t fade(int units) const { return fade_frames(units,settings.sample_rate); }
+    int loaded_music_volume(const Track& track) const {
+        return track.active ? static_cast<int>(std::lround(track.gain.to[track.gain.index(track.gain.base)])) :
+            settings.music_volume;
+    }
+    void start_loaded_music(Track& target,const std::optional<std::pair<int,int>>& saved,int volume) {
+        target={};
+        if (!saved || !settings.enabled || !total_on || !music_on) return;
+        auto program=std::make_shared<Program>(files.bgm(saved->first));
+        target.start(std::move(program),saved->second,gain_curve(volume-settings.music_volume,0,true),
+                     settings.music_volume,fade(settings.default_music_fade_in));
+    }
     void bgm(const SystemEvent& e,EventInfo& info,SkipFlags skip) {
         if (e.parameters.empty()) throw AudioError("MUSIC missing track number");
         const auto& a=e.parameters; int id=a[0];
@@ -739,9 +750,7 @@ PcAudioState GameAudio::pc_state() const {
     if (impl_->last_music) {
         state.music_number=impl_->last_music->first-1;
         state.music_plays=impl_->last_music->second;
-        const auto& song=impl_->song;
-        state.music_volume=song.active ? static_cast<int>(std::lround(song.gain.to[song.gain.index(song.gain.base)])) :
-            impl_->settings.music_volume;
+        state.music_volume=impl_->loaded_music_volume(impl_->song);
     }
     const auto sample=[&](const Track& track,std::array<Value,16>& work) {
         work[0]=track.remaining==0?1:0;
@@ -801,19 +810,35 @@ void GameAudio::save_snapshot(snapshot::Writer& out) const {
 }
 
 void GameAudio::load_snapshot(snapshot::Reader& in,bool keep_music_position,
-                              std::optional<unsigned> jump_voice_mask,bool finish_script_fades) {
-    read_snapshot(in,keep_music_position,jump_voice_mask,finish_script_fades,false);
+                              std::optional<unsigned> jump_voice_mask,bool finish_script_fades,bool restart_music) {
+    read_snapshot(in,keep_music_position,jump_voice_mask,finish_script_fades,false,restart_music);
+}
+
+void GameAudio::restart_replayed_music() {
+    std::lock_guard<std::mutex> command(impl_->commands);
+    int volume;
+    {
+        std::lock_guard<std::mutex> mix(impl_->mixer);
+        volume=impl_->loaded_music_volume(impl_->song);
+    }
+    Track restored;
+    impl_->start_loaded_music(restored,impl_->last_music,volume);
+    std::lock_guard<std::mutex> mix(impl_->mixer);
+    impl_->song=std::move(restored);
+    impl_->outgoing={};
+    impl_->song_paused=false;
+    impl_->next_music.reset();
 }
 
 void GameAudio::inspect_snapshot(snapshot::Reader& in) {
     Settings settings;
     settings.enabled=false;
     GameAudio state({},settings);
-    state.read_snapshot(in,false,{},false,true);
+    state.read_snapshot(in,false,{},false,true,false);
 }
 
 void GameAudio::read_snapshot(snapshot::Reader& in,bool keep_music_position,
-                              std::optional<unsigned> jump_voice_mask,bool finish_script_fades,bool inspect) {
+                              std::optional<unsigned> jump_voice_mask,bool finish_script_fades,bool inspect,bool restart_music) {
     using snapshot::invalid;
     std::lock_guard<std::mutex> command(impl_->commands);
     unsigned rate=0;bool paused=false,last=false,next=false;
@@ -876,6 +901,14 @@ void GameAudio::read_snapshot(snapshot::Reader& in,bool keep_music_position,
     for (auto& t:tracks->sounds) track(t,2);
     if (in.remaining()) invalid("Unexpected data at end of snapshot");
     if (inspect) return;
+    // PC quick load starts the saved BGM at its intro, even when the same
+    // program is already playing. Prepare it before changing the live mixer.
+    if (restart_music) {
+        const int volume=impl_->loaded_music_volume(tracks->song);
+        impl_->start_loaded_music(tracks->song,last_music,volume);
+        paused=false;
+        next_music.reset();
+    }
     {
         std::lock_guard<std::mutex> mix(impl_->mixer);
         if (jump_voice_mask) {
@@ -912,7 +945,10 @@ void GameAudio::read_snapshot(snapshot::Reader& in,bool keep_music_position,
         }
         auto& restored=tracks->song;
         const auto& current=impl_->song;
-        if (keep_music_position && current.active && restored.active && current.program==restored.program &&
+        if (restart_music) {
+            tracks->outgoing=std::move(impl_->song);
+            tracks->outgoing.stop(impl_->song_paused ? 0 : impl_->fade(impl_->settings.default_music_fade_out));
+        } else if (keep_music_position && current.active && restored.active && current.program==restored.program &&
             !paused && !impl_->song_paused && !current.stop_after_ramp && !restored.stop_after_ramp &&
             (current.program->loop_start || (current.remaining==0 && restored.remaining==0))) {
             restored.part=current.part;

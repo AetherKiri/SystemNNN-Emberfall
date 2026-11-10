@@ -687,7 +687,8 @@ API jboolean JNICALL FN(inspectSaveSnapshot)(JNIEnv* env,jclass,jobject raw,jint
     } catch (const std::exception&) { return JNI_FALSE; }
 }
 API jboolean JNICALL FN(restoreSnapshot)(JNIEnv* env,jclass,jlong handle,jbyteArray raw,jint wait,jint word,jint line,
-                                        jobjectArray content,jintArray meta,jboolean keep_music_position,jboolean migrate_legacy) {
+                                        jobjectArray content,jintArray meta,jboolean keep_music_position,jboolean migrate_legacy,
+                                        jboolean restart_music) {
     try {
         if (!raw || !content || !meta || env->GetArrayLength(meta)<7) return JNI_FALSE;
         const jsize length=env->GetArrayLength(raw),fields=env->GetArrayLength(content);
@@ -716,7 +717,7 @@ API jboolean JNICALL FN(restoreSnapshot)(JNIEnv* env,jclass,jlong handle,jbyteAr
             if (!f.selection) return expected.size()==2;
             const auto& options=f.selection->options;
             return options.size()==expected.size()-2 && std::equal(options.begin(),options.end(),expected.begin()+2);
-        },keep_music_position==JNI_TRUE,migrate_legacy==JNI_TRUE);
+        },keep_music_position==JNI_TRUE,migrate_legacy==JNI_TRUE,restart_music==JNI_TRUE);
         p.published_screen_layer.reset();
         p.repaint=true;
         frame_meta(env,p,meta);
@@ -979,6 +980,10 @@ API void JNICALL FN(suspendScriptAudio)(JNIEnv* env,jclass,jlong handle) {
 }
 API void JNICALL FN(restartLoopScriptAudio)(JNIEnv* env,jclass,jlong handle) {
     try { player(handle).game->audio().restart_loop_script_audio(); }
+    catch (const std::exception& e) { fail(env,e.what()); }
+}
+API void JNICALL FN(restartReplayedMusic)(JNIEnv* env,jclass,jlong handle) {
+    try { player(handle).game->audio().restart_replayed_music(); }
     catch (const std::exception& e) { fail(env,e.what()); }
 }
 API void JNICALL FN(stopScriptAudio)(JNIEnv* env,jclass,jlong handle) {

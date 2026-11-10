@@ -692,16 +692,16 @@ final class GameRunner {
         }))onFailure.run();
     }
     private void open(File save,boolean holdStory) throws IOException {
-        open(save,holdStory,null);
+        open(save,holdStory,null,false);
     }
-    private void open(File save,boolean holdStory,byte[] pcSave) throws IOException {
+    private void open(File save,boolean holdStory,byte[] pcSave,boolean quick) throws IOException {
         long started=SystemClock.uptimeMillis();
         tasks.removeCallbacks(ticker);
         GameSave.Loaded loaded=save==null?null:saveResult(SAVE_FILES.submit(()->GameSave.read(save)));
         int[] state=new int[NativeGame.META_SIZE];
         GameSave next=pcSave!=null?GameSave.nativeBaseline():loaded==null?new GameSave():loaded.save;
         boolean live=loaded!=null&&handle!=0&&!onTitle&&!replaying&&!failed;
-        boolean restoredHere=live&&GameSave.restoreSnapshot(loaded,handle,state,true,false);
+        boolean restoredHere=live&&GameSave.restoreSnapshot(loaded,handle,state,!quick,false,quick);
         if(loaded!=null&&loaded.nativeSnapshot==null)next.requireReplayable();
         if(restoredHere){
             NativeGame.setParameters(handle,RuntimeSettingsAdapter.persistedOverrides(userPreferences,legacySource));
@@ -719,12 +719,13 @@ final class GameRunner {
                         NativeGame.setScriptRandomState(candidate,NativeGame.scriptRandomState(handle));
                     NativeGame.restorePcSave(candidate,pcSave,state);
                 }else if(loaded!=null){
-                    if(!GameSave.restoreSnapshot(loaded,candidate,state,false,onTitle&&!systemStateEstablished)){
+                    if(!GameSave.restoreSnapshot(loaded,candidate,state,false,onTitle&&!systemStateEstablished,quick)){
                         next.requireReplayable();
                         int[] globals=NativeGame.systemVariables(candidate);
                         int[] progress=NativeGame.scriptProgress(candidate),galleryState=NativeGame.galleryState(candidate);
                         if(!next.hasSystemBaseline())NativeGame.seedLegacyReplayVariables(candidate);
                         GameSave.replay(loaded,candidate,state);
+                        if(quick)NativeGame.restartReplayedMusic(candidate);
                         NativeGame.setSystemVariables(candidate,globals);
                         NativeGame.setScriptProgress(candidate,progress);
                         NativeGame.replaceGallery(candidate,galleryState);
@@ -769,7 +770,7 @@ final class GameRunner {
             boolean success=false;
             try{
                 if(handle==0||failed||replaying||moviePlaying)throw new IOException("当前无法读取PC存档");
-                open(null,true,saveResult(SAVE_FILES.submit(read)));
+                open(null,true,saveResult(SAVE_FILES.submit(read)),false);
                 success=true;
                 Log.i("SystemNNN","PC save imported at "+current.script+" word="+meta[1]);
             }catch(IOException|RuntimeException e){
@@ -1453,7 +1454,7 @@ final class GameRunner {
     private void loadSlot(int slot,boolean quick,java.util.function.Consumer<Boolean> done){
         boolean success=false;
         try{
-            open(slots.file(slot),done!=null);
+            open(slots.file(slot),done!=null,null,quick);
             success=true;
             if(slot!=SaveSlots.AUTO)SAVE_FILES.execute(()->rememberSlot(slot));
             if(quick)quickNotice(false);else if(done==null)playPanelSound(uiAssets.load,"loadSound",0);

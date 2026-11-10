@@ -127,11 +127,13 @@ public:
     // The audio payload ends the session snapshot. When requested, an already
     // playing loop of the same program keeps its current sample position.
     void load_snapshot(snapshot::Reader& in,bool keep_music_position=false,
-                       std::optional<unsigned> jump_voice_mask={},bool finish_script_fades=false);
+                       std::optional<unsigned> jump_voice_mask={},bool finish_script_fades=false,bool restart_music=false);
+    // After replaying a legacy save on an inaudible candidate session.
+    void restart_replayed_music();
     static void inspect_snapshot(snapshot::Reader& in);
 private:
     void read_snapshot(snapshot::Reader& in,bool keep_music_position,
-                       std::optional<unsigned> jump_voice_mask,bool finish_script_fades,bool inspect);
+                       std::optional<unsigned> jump_voice_mask,bool finish_script_fades,bool inspect,bool restart_music);
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };

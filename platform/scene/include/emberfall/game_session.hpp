@@ -221,7 +221,7 @@ public:
     std::vector<nnn::Byte> export_pc_save();
     nnn::Value save_slot_art() const;
     void restore_snapshot(const nnn::snapshot::Bytes& bytes,const std::function<bool(const FrameState&)>& verify={},
-                          bool keep_music_position=false,bool migrate_legacy_system_variables=false);
+                          bool keep_music_position=false,bool migrate_legacy_system_variables=false,bool restart_music=false);
 private:
     struct Impl;
     explicit GameSession(std::unique_ptr<Impl> data);
