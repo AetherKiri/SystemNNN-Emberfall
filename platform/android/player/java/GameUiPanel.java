@@ -262,7 +262,8 @@ class GameUiPanel extends FrameLayout {
         if(opening!=null&&opening.needsTarget()&&!copyingTarget&&getWidth()>0&&getHeight()>0&&
             (backdrop==null||backdrop.frameReady())){
             UiOpening entering=opening;
-            if(entering.delaysControls()&&!entering.needsWipeTarget()){
+            if(entering.usesWipeMask()||entering.delaysControls()&&!entering.needsWipeTarget()){
+                // Blend the previous screen over the live panel at its display resolution.
                 entering.target(null);
                 invalidate();
                 return;

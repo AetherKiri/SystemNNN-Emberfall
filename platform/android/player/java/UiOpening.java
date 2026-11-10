@@ -65,6 +65,7 @@ final class UiOpening {
     boolean fading(){return frame()<fadeFrames;}
     boolean hasFade(){return fadeFrames>0;}
     boolean needsWipeTarget(){return hasFade()&&fadeType>1;}
+    boolean usesWipeMask(){return fadeType>=89&&fadeType<=96;}
     boolean delaysControls(){return wait>0||reveal>0;}
     int color(){return fadeColor;}
     boolean needsPrevious(){return fadeFrames>0&&fadeType!=-1;}
@@ -148,11 +149,11 @@ final class UiOpening {
         return true;
     }
     private boolean drawWipe(Canvas c,View view,int width,int height,int tick){
-        if(wipeFailed||before==null||(!exiting&&after==null))return false;
+        boolean masked=usesWipeMask();
+        if(wipeFailed||before==null||(!exiting&&after==null&&!masked))return false;
         if(tick==0){drawFrame(c,view,before,255);return true;}
-        // These families only select/mix the same source pixel. Keep their geometry
-        // at the game's logical size, but never downsample the captured UI art.
-        boolean masked=fadeType>=89&&fadeType<=96;
+        // These wipes only mix the same source pixel. Render the mask at the
+        // game's logical size and apply it over the already drawn target.
         try{
             if(wipeHandle==0){
                 double scale=Math.min(1,Math.min(4096.0/Math.max(width,height),Math.sqrt((2*1024*1024.0)/width/height)));
@@ -183,7 +184,8 @@ final class UiOpening {
             wipeFailed=true;closeWipe();return false;
         }
         if(masked){
-            if(exiting)c.drawColor(fadeColor);else drawFrame(c,view,after,255);
+            if(exiting)c.drawColor(fadeColor);
+            else if(after!=null)drawFrame(c,view,after,255);
             int saved=c.saveLayer(0,0,view.getWidth(),view.getHeight(),null);
             try{
                 drawFrame(c,view,before,255);
