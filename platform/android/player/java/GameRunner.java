@@ -439,13 +439,7 @@ final class GameRunner {
     }
     private TitleMenu loadTitle(long player) throws IOException {
         boolean lastLoad=saveResult(SAVE_FILES.submit(slots::lastSelectedSlot))!=null;
-        return new TitleMenu(root,player,resumeSlot()!=null,lastLoad);
-    }
-    private Integer resumeSlot(){
-        Integer selected=slots.lastSelectedSlot();
-        if(selected!=null)return selected;
-        SaveSlots.Entry resume=slots.entry(SaveSlots.AUTO);
-        return resume.exists&&!resume.corrupt?SaveSlots.AUTO:null;
+        return new TitleMenu(root,player,lastLoad,lastLoad);
     }
     private void publishTitle(Capture previous){
         publishTitle(previous,false);
@@ -679,12 +673,11 @@ final class GameRunner {
             if(!onTitle||failed||closing){onFailure.run();return;}
             try{
                 Integer slot=null;
-                if(action==TitleMenu.Action.CONTINUE)slot=resumeSlot();
-                else if(action==TitleMenu.Action.LAST_LOAD){
+                if(action==TitleMenu.Action.CONTINUE||action==TitleMenu.Action.LAST_LOAD){
                     slot=slots.lastSelectedSlot();
                     if(slot==null)throw new FileNotFoundException("上次的存档无法读取");
                 }
-                if(slot==null)open(null,false);else openSlot(slot,false,false);
+                if(slot==null)open(null,false);else openSlot(slot,false);
             }
             catch(Exception|LinkageError e){
                 schedule();
@@ -694,74 +687,48 @@ final class GameRunner {
         }))onFailure.run();
     }
     private void open(File save,boolean holdStory) throws IOException {
-        open(save,holdStory,false);
-    }
-    private void open(File save,boolean holdStory,boolean quick) throws IOException {
         long started=SystemClock.uptimeMillis();
         tasks.removeCallbacks(ticker);
-        boolean pc=save!=null&&PcStorySave.isSlotFile(save.getName());
-        byte[] pcSave=pc?saveResult(SAVE_FILES.submit(()->PcStorySave.read(save))):null;
-        GameSave.Loaded loaded=save==null||pc?null:saveResult(SAVE_FILES.submit(()->GameSave.read(save)));
+        byte[] pcSave=save==null?null:saveResult(SAVE_FILES.submit(()->PcStorySave.read(save)));
         int[] state=new int[NativeGame.META_SIZE];
-        GameSave next=pcSave!=null?GameSave.nativeBaseline():loaded==null?new GameSave():loaded.save;
-        boolean live=loaded!=null&&handle!=0&&!onTitle&&!replaying&&!failed;
-        boolean restoredHere=live&&GameSave.restoreSnapshot(loaded,handle,state,!quick,false,quick);
-        if(loaded!=null&&loaded.nativeSnapshot==null)next.requireReplayable();
-        if(restoredHere){
-            NativeGame.setParameters(handle,RuntimeSettingsAdapter.persistedOverrides(userPreferences,legacySource));
-            NativeGame.setSkip(handle,false);
-        }else{
-            writeGallery();
-            boolean unsaved=handle!=0&&galleryWritten!=NativeGame.galleryRevision(handle);
-            long candidate=openNative();
-            long stored;
-            try{
-                configure(candidate);
-                stored=restoreGallery(candidate);
-                if(pcSave!=null){
-                    if(handle!=0&&!onTitle&&!replaying)
-                        NativeGame.setScriptRandomState(candidate,NativeGame.scriptRandomState(handle));
-                    NativeGame.restorePcSave(candidate,pcSave,state);
-                }else if(loaded!=null){
-                    if(!GameSave.restoreSnapshot(loaded,candidate,state,false,onTitle&&!systemStateEstablished,quick)){
-                        next.requireReplayable();
-                        int[] globals=NativeGame.systemVariables(candidate);
-                        int[] progress=NativeGame.scriptProgress(candidate),galleryState=NativeGame.galleryState(candidate);
-                        if(!next.hasSystemBaseline())NativeGame.seedLegacyReplayVariables(candidate);
-                        GameSave.replay(loaded,candidate,state);
-                        if(quick)NativeGame.restartReplayedMusic(candidate);
-                        NativeGame.setSystemVariables(candidate,globals);
-                        NativeGame.setScriptProgress(candidate,progress);
-                        NativeGame.replaceGallery(candidate,galleryState);
-                    }
-                }else{
-                    recordReplayBaseline(next,candidate,NativeGame.scriptRandomState(candidate));
-                    NativeGame.tick(candidate,0,0,0,false,0,false,state);
-                    next.appendWithClock(0,0,0,false,0,false,state[NativeGame.CLOCK_DATE],state[NativeGame.CLOCK_MILLISECONDS]);
-                }
-                configure(candidate);
-            }catch(Exception|LinkageError e){NativeGame.close(candidate);throw e;}
-            stopSound();
-            if(handle!=0)NativeGame.close(handle);
-            offerScreenLayer(-1);
-            handle=candidate;commitRuntime(candidate);
-            bindSurface(true);
-            galleryWritten=unsaved?-1:stored;
-        }
+        GameSave next=pcSave==null?new GameSave():GameSave.nativeBaseline();
+        writeGallery();
+        boolean unsaved=handle!=0&&galleryWritten!=NativeGame.galleryRevision(handle);
+        long candidate=openNative();
+        long stored;
+        try{
+            configure(candidate);
+            stored=restoreGallery(candidate);
+            if(pcSave!=null){
+                if(handle!=0&&!onTitle&&!replaying)
+                    NativeGame.setScriptRandomState(candidate,NativeGame.scriptRandomState(handle));
+                NativeGame.restorePcSave(candidate,pcSave,state);
+            }else{
+                recordReplayBaseline(next,candidate,NativeGame.scriptRandomState(candidate));
+                NativeGame.tick(candidate,0,0,0,false,0,false,state);
+                next.appendWithClock(0,0,0,false,0,false,state[NativeGame.CLOCK_DATE],state[NativeGame.CLOCK_MILLISECONDS]);
+            }
+            configure(candidate);
+        }catch(Exception|LinkageError e){NativeGame.close(candidate);throw e;}
+        stopSound();
+        if(handle!=0)NativeGame.close(handle);
+        offerScreenLayer(-1);
+        handle=candidate;commitRuntime(candidate);
+        bindSurface(true);
+        galleryWritten=unsaved?-1:stored;
         startupStage=null;startupConfig=null;titleBackgroundHeld=false;startupTitleFramePending=false;
         moviePlaying=false;
         onTitle=false;menuOpen=holdStory;systemMenuModal=false;choiceClicking=false;history=next;System.arraycopy(state,0,meta,0,meta.length);
-        if(loaded!=null)recordReplayBaseline(next,handle,NativeGame.scriptRandomState(handle));
         if(finishEndedRun())return;
         if(!systemStateEstablished)writeReadLines();
         queueGalleryWrite();
         GameSave.Run last=next.lastInput();x=last.x;y=last.y;
         failed=false;shownWait=-1;current=null;autoMode=false;skipMode=false;syncModes();
-        if(!restoredHere)ui.style(dialogueStyle);
+        ui.style(dialogueStyle);
         publishParameters();if(save!=null){NativeGame.captureBacklogJump(handle,0);ui.loaded();}
         if(meta[0]==NativeGame.MOVIE)startStoryMovie();else updateUi();
         schedule();
-        Log.i("SystemNNN","Opened "+root.getName()+(save==null?"":" save="+save.getName()+" inPlace="+restoredHere+
+        Log.i("SystemNNN","Opened "+root.getName()+(save==null?"":" save="+save.getName()+
             " elapsedMs="+(SystemClock.uptimeMillis()-started)));
     }
     private static void recordReplayBaseline(GameSave journal,long owner,int random){
@@ -1424,16 +1391,16 @@ final class GameRunner {
     }
     void loadSlot(int slot){loadSlot(slot,null);}
     void loadSlot(int slot,java.util.function.Consumer<Boolean> done){tasks.post(()->loadSlot(slot,false,done));}
-    private void openSlot(int slot,boolean holdStory,boolean quick) throws IOException {
-        File file=saveResult(SAVE_FILES.submit(()->slots.fileForRead(slot)));
-        open(file,holdStory,quick);
+    private void openSlot(int slot,boolean holdStory) throws IOException {
+        File file=saveResult(SAVE_FILES.submit(()->slots.pcFile(slot)));
+        open(file,holdStory);
     }
     private void loadSlot(int slot,boolean quick,java.util.function.Consumer<Boolean> done){
         boolean success=false;
         try{
-            openSlot(slot,done!=null,quick);
+            openSlot(slot,done!=null);
             success=true;
-            if(slot!=SaveSlots.AUTO)SAVE_FILES.execute(()->rememberSlot(slot));
+            SAVE_FILES.execute(()->rememberSlot(slot));
             if(quick)quickNotice(false);else if(done==null)playPanelSound(uiAssets.load,"loadSound",0);
         }catch(FileNotFoundException e){
             if(!quick)ui.notice("此槽位还没有存档");
@@ -1470,11 +1437,11 @@ final class GameRunner {
         int cue=config.number(key,fallback);
         if(cue>0)NativeGame.playSystemSe(handle,cue-1);
     }
-    void restart(boolean replaceResume){tasks.post(()->{
+    void restart(boolean startOver){tasks.post(()->{
         if(closing)return;
         try{
             if(!initialized)initialize();
-            else if(replaceResume){open(null,false);writeReadLines();}
+            else if(startOver){open(null,false);writeReadLines();}
         }catch(Exception|LinkageError e){broken(e);}
     });}
     void recoverCorruptProgress(){tasks.post(()->{

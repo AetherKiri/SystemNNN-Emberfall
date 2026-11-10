@@ -90,16 +90,15 @@ public final class GameSaveTest {
     }
     private static void configuredSlots(String[] games) throws Exception {
         SaveSlots.Layout arrows=new SaveSlots.Layout(2,5,10,-1,true,1);
-        check(arrows.pages==10&&arrows.perPage==10&&arrows.pageMode==1&&arrows.manualCount==99,"authored 10-page arrow grid");
-        check(arrows.slotAt(0)==SaveSlots.QUICK&&arrows.slotAt(1)==0&&arrows.slotAt(99)==98,"quick slot leaves original NS2 numbering");
-        check(arrows.openingPcPage(20)==2&&arrows.openingPcPage(130)==9&&!arrows.showsPc(130),
+        check(arrows.pages==10&&arrows.perPage==10&&arrows.pageMode==1&&arrows.quickPosition==0,"authored 10-page arrow grid");
+        check(arrows.openingPcPage(20)==2&&arrows.openingPcPage(130)==9,
             "physical PC slot opens its page and clamps after shrink");
         SaveSlots.Layout tabs=new SaveSlots.Layout(4,3,10,2,true,4);
-        check(tabs.pageMode==2&&tabs.slotAt(3)==SaveSlots.QUICK&&tabs.slotAt(4)==3&&tabs.manualCount==119,
+        check(tabs.pageMode==2&&tabs.quickPosition==3&&tabs.perPage*tabs.pages==120,
             "authored tabs and non-leading quick slot");
         SaveSlots.Layout single=new SaveSlots.Layout(2,2,1,-1,false,1);
-        check(single.pageMode==0&&single.showsPc(3)&&!single.showsPc(4)&&!single.showsPc(SaveSlots.AUTO),
-            "single page and supplemental saves");
+        check(single.pageMode==0&&single.openingPcPage(4)==0&&single.quickPosition==-1,
+            "single page has no quick slot");
         PcStorySave retail=new PcStorySave(new File("."),false);
         PcStorySave trial=new PcStorySave(new File("."),true);
         check(retail.number("DATA3.SAV")==3&&retail.number("tdata3.sav")==-1&&
@@ -117,8 +116,8 @@ public final class GameSaveTest {
                 int count=game.getName().contains("獄淫")||game.getName().equals("劣等")?120:100;
                 check(layout.pages==10&&layout.pageMode==1&&layout.perPage*layout.pages==count,
                     "real "+game.getName()+" "+(saving?"save":"load")+" pages");
-                check(layout.slotAt(count==120?3:0)==SaveSlots.QUICK&&layout.slotAt(count-1)==count-2,
-                    "real "+game.getName()+" quick position and last slot");
+                check(layout.quickPosition==(count==120?3:0),
+                    "real "+game.getName()+" quick position");
             }
         }
     }
@@ -127,76 +126,71 @@ public final class GameSaveTest {
         GameSavePaths paths=GameSavePaths.forGame(game.toFile());
         Files.createDirectory(paths.directory().toPath());
         SaveSlots slots=new SaveSlots(paths);
-        int high=118;
-        Path highFile=slots.file(high).toPath(),pointer=paths.file(SaveSlots.LAST_SELECTION).toPath();
+        int high=118,quick=3;
+        Path highFile=paths.file(".slot118.sav").toPath(),pointer=paths.file(SaveSlots.LAST_SELECTION).toPath();
         Path pointerBackup=paths.file(SaveSlots.LAST_SELECTION+".bak").toPath();
         Path slotUi=paths.file(SaveSlots.SLOT_UI).toPath();
+        File root=game.toFile();
+        GameTextDecoder decoder=GameTextDecoder.load(root);
+        PcStorySave.Preview highSlot=new PcStorySave.Preview(1,9,"High slot",null);
+        PcStorySave.Preview quickSlot=new PcStorySave.Preview(3,15,"Quick slot",null);
         try {
-            GameSave history=new GameSave();
-            history.append(0,0,0,false,0);
+            GameSave old=new GameSave();
+            old.append(0,0,0,false,0);
             GameSave.Metadata metadata=GameSave.metadata(high,1,SCRIPT,POSITION,"","");
-            byte[] encoded=write(history,metadata,null);
-            check(GameSave.readFrom(new ByteArrayInputStream(encoded),99,high,true).metadata.slot==high,"high slot keeps NS2 format");
+            byte[] encoded=write(old,metadata,null);
             Files.write(highFile,encoded);
-            check(SaveSlots.slotForFile(highFile.toFile())==high&&
-                SaveSlots.committedSlot(".slot118.sav.bak")==high&&SaveSlots.slotForSuffix(".slot0118.sav")==null,
-                "canonical high slot names, including committed backup");
-            slots.preload(4);
-            check(slots.entries().length==7&&slots.entry(high).exists,"out-of-grid save stays listed after shrinking layout");
-            slots.saved(metadata,null);
-            slots.recordWritten(metadata,9,1);
+            slots.preload(root,decoder);
+            check(!slots.entry(high).exists&&Arrays.equals(encoded,Files.readAllBytes(highFile)),
+                "a valid old phone slot is ignored and stays on disk");
+            check(slots.pcFile(high).getName().equals("data118.sav"),"PC high slot uses its physical number");
+            check(slots.entries().length==120&&!slots.entry(0).exists,"original layout starts with empty slots");
+            // Slot metadata is normally supplied by the Android native codec.
+            slots.savedPc(high,highSlot);
+            slots.recordWritten(high,highSlot.savedAt,null,1);
             slots.remember(high);
-            GameSave.Metadata auto=GameSave.metadata(SaveSlots.AUTO,2,SCRIPT,POSITION,"","");
-            slots.saved(auto,null);
-            slots.recordWritten(auto,99,1);
-            check(slots.lastSelectedSlot()==high,"autosave does not replace explicit last selection");
-            check(slots.entry(high).lastSaved&&slots.entry(high).artwork==9&&slots.entry(SaveSlots.AUTO).artwork==null,
-                "only manually committed slots acquire display metadata");
-
-            GameSave.Metadata quick=GameSave.metadata(SaveSlots.QUICK,3,SCRIPT,POSITION,"","");
-            slots.saved(quick,null);
-            slots.recordWritten(quick,15,0);
-            slots.remember(SaveSlots.QUICK);
-            check(slots.lastSelectedSlot()==SaveSlots.QUICK,"quick save is a selectable last save");
-            check(slots.entry(high).lastSaved&&!slots.entry(SaveSlots.QUICK).lastSaved,
+            slots.savedPc(quick,quickSlot);
+            slots.recordWritten(quick,quickSlot.savedAt,null,0);
+            slots.remember(quick);
+            check(slots.lastSelectedSlot()==quick,"quick save is a selectable last save");
+            check(slots.entry(high).lastSaved&&!slots.entry(quick).lastSaved,
                 "quickSetLastFlag zero retains the last save mark");
-            slots.recordWritten(quick,15,1);
+            slots.recordWritten(quick,quickSlot.savedAt,null,1);
             slots.remember(high);
-            check(slots.entry(SaveSlots.QUICK).lastSaved&&slots.entry(SaveSlots.QUICK).artwork==15&&!slots.entry(high).lastSaved,
+            check(slots.entry(quick).lastSaved&&slots.entry(quick).artwork==15&&!slots.entry(high).lastSaved,
                 "quick save replaces the mark and later loads leave it alone");
-            slots.recordWritten(quick,15,-1);
-            check(!slots.entry(SaveSlots.QUICK).lastSaved&&!slots.entry(high).lastSaved,
+            slots.recordWritten(quick,quickSlot.savedAt,null,-1);
+            check(!slots.entry(quick).lastSaved&&!slots.entry(high).lastSaved,
                 "quickSetLastFlag minus one clears the last save mark");
-            slots.recordWritten(metadata,9,1);
+            slots.recordWritten(high,highSlot.savedAt,null,1);
             SaveSlots reopened=new SaveSlots(paths);
-            reopened.preload(4);
-            // The Android AtomicFile stub on the JVM cannot read a live save. Register the validated NS2 payload.
-            reopened.saved(metadata,null);
+            reopened.preload(root,decoder);
+            reopened.savedPc(high,highSlot);
             check(reopened.lastSelectedSlot()==high,"last selection survives reopen");
             check(reopened.entry(high).lastSaved&&reopened.entry(high).artwork==9,"slot presentation survives reopen");
-            reopened.saved(GameSave.metadata(high,4,SCRIPT,POSITION,"",""),null);
-            check(!reopened.entry(high).lastSaved&&reopened.entry(high).artwork==null,
+            reopened.savedPc(high,new PcStorySave.Preview(4,11,"Overwritten",null));
+            check(!reopened.entry(high).lastSaved&&reopened.entry(high).artwork==11,
                 "stale presentation cannot attach to an overwritten slot");
             Files.copy(pointer,pointerBackup);
-            slots.remember(SaveSlots.QUICK);
-            reopened.preload(4);
-            reopened.saved(quick,null);
-            reopened.saved(metadata,null);
-            check(reopened.lastSelectedSlot()==SaveSlots.QUICK,"valid primary selection takes precedence over backup");
+            slots.remember(quick);
+            reopened.preload(root,decoder);
+            reopened.savedPc(quick,quickSlot);
+            reopened.savedPc(high,highSlot);
+            check(reopened.lastSelectedSlot()==quick,"valid primary selection takes precedence over backup");
             Files.delete(pointer);
-            reopened.preload(4);
-            reopened.saved(metadata,null);
+            reopened.preload(root,decoder);
+            reopened.savedPc(high,highSlot);
             check(reopened.lastSelectedSlot()==high,"backup selection survives a missing primary");
             Files.write(pointer,new byte[]{0,0,0,0});
-            reopened.preload(4);
-            reopened.saved(metadata,null);
+            reopened.preload(root,decoder);
+            reopened.savedPc(high,highSlot);
             check(reopened.lastSelectedSlot()==high,"backup selection survives an invalid primary");
             Files.write(pointerBackup,new byte[]{0,0,0,0});
             Files.write(slotUi,new byte[]{0,0,0,0});
-            reopened.preload(4);
-            reopened.saved(metadata,null);
+            reopened.preload(root,decoder);
+            reopened.savedPc(high,highSlot);
             check(reopened.lastSelectedSlot()==null,"invalid selection cannot block or enable title LastLoad");
-            check(reopened.entry(high).exists&&!reopened.entry(high).lastSaved&&reopened.entry(high).artwork==null,
+            check(reopened.entry(high).exists&&!reopened.entry(high).lastSaved,
                 "corrupt presentation index leaves the underlying slot readable");
         }finally{
             Files.deleteIfExists(highFile);
@@ -383,11 +377,6 @@ public final class GameSaveTest {
         invalid(() -> GameSave.metadata(SaveSlots.MAX_MANUAL_SLOTS,1,SCRIPT,POSITION,"",""),"slot outside manual range");
         invalid(() -> GameSave.metadata(0,-1,SCRIPT,POSITION,"",""),"negative timestamp");
         invalid(() -> GameSave.metadata(0,1,SCRIPT,POSITION,"x\0y",""),"NUL in speaker");
-        SaveSlots slots=new SaveSlots(GameSavePaths.forGame(new File(".")));
-        check(slots.file(0).getName().equals("emberfall.sav") && slots.file(SaveSlots.AUTO).getName().equals("emberfall.resume"),"portable filename identity");
-        Set<String> names=new HashSet<>(); SaveSlots.Entry[] entries=slots.entries(); check(entries.length==22,"20+auto+quick");
-        for (SaveSlots.Entry e:entries) { check(names.add(slots.file(e.slot).getName()),"unique slot file"); check(!e.exists && !e.corrupt,"empty slot"); check(SaveSlots.slotForFile(slots.file(e.slot))==e.slot,"slot name roundtrip"); }
-        check(entries[0].label().equals("存档 01") && entries[19].label().equals("存档 20") && entries[20].label().equals("自动存档") && entries[21].label().equals("快速存档"),"slot labels");
         configuredSlots(games);
         highSlotsAndLastSelection();
         System.out.println("GameSave checks passed: "+checks);

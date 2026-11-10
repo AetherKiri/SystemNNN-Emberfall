@@ -44,7 +44,7 @@ public final class PlayerActivity extends Activity implements GameRunner.Listene
     private FrameLayout root,stage;
     private TextureView screen;
     private Surface storySurface;
-    private Button panelActionButton,otherSavesButton;
+    private Button panelActionButton;
     private TextView status;
     private View longPrintBackdrop;
     private volatile StoryScreen storyScreen;
@@ -346,15 +346,6 @@ public final class PlayerActivity extends Activity implements GameRunner.Listene
         FrameLayout.LayoutParams actionPosition=new FrameLayout.LayoutParams(-2,dp(48),Gravity.TOP|Gravity.END);
         actionPosition.setMargins(dp(4),dp(4),dp(4),0);
         root.addView(panelActionButton,actionPosition);
-        otherSavesButton=new Button(this);
-        otherSavesButton.setText("其他存档");
-        otherSavesButton.setSingleLine(true);
-        otherSavesButton.setSoundEffectsEnabled(false);
-        otherSavesButton.setVisibility(View.GONE);
-        otherSavesButton.setOnClickListener(v->{if(panelActionReady())showOtherSaves();});
-        FrameLayout.LayoutParams otherPosition=new FrameLayout.LayoutParams(-2,dp(48),Gravity.TOP|Gravity.END);
-        otherPosition.setMargins(dp(4),dp(4),dp(4),0);
-        root.addView(otherSavesButton,otherPosition);
         root.getViewTreeObserver().addOnPreDrawListener(()->{updatePanelActionEnabled();return true;});
         root.addOnLayoutChangeListener((v,l,t,r,b,ol,ot,or,ob) -> layoutStage());
         screen=new TextureView(this); screen.setContentDescription("游戏画面");screen.setSoundEffectsEnabled(false);
@@ -609,15 +600,11 @@ public final class PlayerActivity extends Activity implements GameRunner.Listene
         boolean ready=panelActionReady();
         if(panelActionButton.getVisibility()==View.VISIBLE&&panelActionButton.isEnabled()!=ready)
             panelActionButton.setEnabled(ready);
-        if(otherSavesButton.getVisibility()==View.VISIBLE&&otherSavesButton.isEnabled()!=ready)
-            otherSavesButton.setEnabled(ready);
     }
     private void updatePanelAction(){
         String label=gamePanel instanceof GameSettingsPanel?"阅读字号":null;
         if(label!=null&&!label.contentEquals(panelActionButton.getText()))panelActionButton.setText(label);
         panelActionButton.setVisibility(label==null?View.GONE:View.VISIBLE);
-        otherSavesButton.setVisibility(gamePanel instanceof GameSlotsPanel&&
-            ((GameSlotsPanel)gamePanel).hasOtherSaves()?View.VISIBLE:View.GONE);
         updatePanelActionEnabled();
     }
     private void updateVisibility() {
@@ -1774,21 +1761,6 @@ public final class PlayerActivity extends Activity implements GameRunner.Listene
         showPanel(slotsDialog);if(slotsDialog.getWindow()!=null)slotsDialog.getWindow().setLayout(Math.min(dp(850),root.getWidth()-dp(32)),Math.max(dp(200),root.getHeight()-dp(32)));
         slotsChanged();
     }
-    private void showOtherSaves(){
-        if(!(gamePanel instanceof GameSlotsPanel))return;
-        GameSlotsPanel panel=(GameSlotsPanel)gamePanel;
-        List<SaveSlots.Entry> entries=panel.otherSaves();
-        if(entries.isEmpty())return;
-        CharSequence[] labels=new CharSequence[entries.size()];
-        DateFormat format=DateFormat.getDateTimeInstance(DateFormat.SHORT,DateFormat.SHORT);
-        for(int i=0;i<entries.size();i++){
-            SaveSlots.Entry entry=entries.get(i);
-            labels[i]=entry.label()+" · "+format.format(new Date(entry.savedAt))+"\n"+entry.displaySummary();
-        }
-        showPanel(new AlertDialog.Builder(this).setTitle("其他存档").setItems(labels,(dialog,index)->{
-            if(panel==gamePanel){systemClick();panel.loadOther(entries.get(index).slot);}
-        }).setNegativeButton("返回",dialogClick(null)).create());
-    }
     @Override public void slotsChanged() {runOnUiThread(() -> {
         if(runner==null||isDestroyed()||isFinishing())return;
         if(gameSlots!=null&&(gamePanel==gameSlots||preparingPanel==gameSlots)){
@@ -1802,7 +1774,7 @@ public final class PlayerActivity extends Activity implements GameRunner.Listene
                 (summary.isEmpty()?"":"\n"+summary);
             Button button=new Button(this);button.setAllCaps(false);button.setGravity(Gravity.START|Gravity.CENTER_VERTICAL);
             button.setPadding(dp(14),dp(8),dp(14),dp(8));button.setText(entry.label()+"\n"+detail);
-            button.setEnabled(savingSlots?entry.slot!=SaveSlots.AUTO:entry.exists&&!entry.corrupt);
+            button.setEnabled(savingSlots||entry.exists&&!entry.corrupt);
             button.setSoundEffectsEnabled(false);button.setOnClickListener(clicked(v -> {
                 if(savingSlots && entry.exists){AlertDialog confirm=new AlertDialog.Builder(this).setTitle("覆盖"+entry.label()+"？").setMessage(detail)
                     .setNegativeButton("取消",dialogClick(null)).setPositiveButton("覆盖保存",dialogClick((d,which) -> runner.saveSlot(entry.slot,slotPreview))).create();showPanel(confirm);}
@@ -1846,8 +1818,7 @@ public final class PlayerActivity extends Activity implements GameRunner.Listene
         }
         GameRunner owner=runner;
         boolean startOver=owner!=null&&owner.initialized();
-        String message=startOver?text+"\n\n从头开始会替换现有自动存档（如有）。":text;
-        new AlertDialog.Builder(this).setTitle("游戏运行中断").setMessage(message)
+        new AlertDialog.Builder(this).setTitle("游戏运行中断").setMessage(text)
             .setCancelable(false)
             .setNegativeButton("返回 TYN",dialogClick((d,w) -> finish()))
             .setPositiveButton(startOver?"从头开始":"重试读取",

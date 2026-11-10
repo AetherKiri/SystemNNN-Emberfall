@@ -68,23 +68,6 @@ final class GameSlotsPanel extends GameUiPanel {
         for(SaveSlots.Entry entry:value)entries.put(entry.slot,entry);
         if(confirmation==null&&loadCard==null)render(warmup);else refreshEntries=true;
     }
-    boolean hasOtherSaves(){
-        if(saving)return false;
-        for(SaveSlots.Entry entry:entries.values())
-            if(entry.exists&&!entry.corrupt&&!layout.showsPc(entry.slot))return true;
-        return false;
-    }
-    List<SaveSlots.Entry> otherSaves(){
-        List<SaveSlots.Entry> result=new ArrayList<>();
-        if(!saving)for(SaveSlots.Entry entry:entries.values())
-            if(entry.exists&&!entry.corrupt&&!layout.showsPc(entry.slot))result.add(entry);
-        result.sort((a,b)->Integer.compare(a.slot,b.slot));
-        return result;
-    }
-    void loadOther(int slot){
-        SaveSlots.Entry entry=entries.get(slot);
-        if(!saving&&entry!=null&&entry.exists&&!entry.corrupt&&!layout.showsPc(slot))select.choose(slot);
-    }
     private void render(){render(null);}
     private void render(UiPreviewPool.Warmup warmup){
         clearControls();
@@ -294,11 +277,9 @@ final class GameSlotsPanel extends GameUiPanel {
         }
         private void contents(Canvas c){
             timestamp(c);
-            if(e.slot!=SaveSlots.AUTO)serialNumber(c,false);
+            serialNumber(c,false);
             int x=data.number("textPrintX",210),y=data.number("textPrintY",87),size=limit(data.number("textFontSize",16),8,40);
             int artworkY=data.number("addPicPrintY",46);
-            if(e.slot==SaveSlots.AUTO&&artworkTile==null)
-                line(c,e.label(),data.number("addPicPrintX",x),artworkY,14,0xffb7cddb);
             if(data.number("textPrintFlag",0)!=0&&!summary.isEmpty()){
                 int color=Color.rgb(data.number("textColorR",128)&255,data.number("textColorG",224)&255,data.number("textColorB",224)&255);
                 if(quick&&base!=null){
