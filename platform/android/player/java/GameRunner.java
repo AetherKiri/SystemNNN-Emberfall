@@ -884,14 +884,18 @@ final class GameRunner {
     void filterPanel(Bitmap picture,GameUiAssets.Config config,java.util.function.Consumer<Capture> done){
         tasks.post(()->{
             Capture scene=null;
+            Bitmap input=picture;
             try{
-                int width=meta[3],height=meta[4];
-                Bitmap logical=Bitmap.createScaledBitmap(picture,width,height,true);
+                if(config.number("backScriptFlag",0)!=0)
+                    input=Bitmap.createScaledBitmap(picture,meta[3],meta[4],true);
+                // Static menus only change the color of the presented frame.
+                int width=input.getWidth(),height=input.getHeight();
                 int[] pixels=new int[width*height];
-                logical.getPixels(pixels,0,width,0,0,width,height);
+                input.getPixels(pixels,0,width,0,0,width,height);
                 filter(pixels,config);
                 scene=new Capture(pixels,width,height);
             }catch(RuntimeException|OutOfMemoryError e){Log.w("SystemNNN","Unable to filter the menu background",e);}
+            finally{if(input!=picture)input.recycle();}
             done.accept(scene);
         });
     }

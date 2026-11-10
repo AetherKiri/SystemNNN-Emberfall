@@ -1089,8 +1089,11 @@ public final class PlayerActivity extends Activity implements GameRunner.Listene
             Bitmap before=null;
             try{
                 TitlePanel title=titlePanel;
-                if(previous!=null)before=title==null?snapshotStory(previous,true,withStoryUi):
-                    UiOpening.snapshot(title,previous.bitmap(),canvas->drawTitleCapture(title,canvas));
+                if(previous!=null){
+                    if(title!=null)before=UiOpening.snapshot(title,previous.bitmap(),canvas->drawTitleCapture(title,canvas));
+                    else if(withStoryUi)before=snapshotMenuStory(previous,sceneEffect);
+                    else before=snapshotStory(previous,true);
+                }
             }catch(RuntimeException|OutOfMemoryError e){
                 Log.w("SystemNNN","Unable to capture the full menu screen",e);
             }
@@ -1129,16 +1132,16 @@ public final class PlayerActivity extends Activity implements GameRunner.Listene
             independentStatus.draw(canvas);
     }
     private Bitmap snapshotStory(GameRunner.Capture picture,boolean withUi){
-        return snapshotStory(picture,withUi,false);
-    }
-    private Bitmap snapshotStory(GameRunner.Capture picture,boolean withUi,boolean logicalSize){
-        if(logicalSize){
-            Bitmap base=picture.mutableBitmap();
-            if(stage.getWidth()>0&&stage.getHeight()>0)
-                UiOpening.drawOnto(stage,base,canvas->drawStorySnapshot(canvas,withUi,false));
-            return base;
-        }
         return UiOpening.snapshot(stage,picture.bitmap(),canvas->drawStorySnapshot(canvas,withUi,true));
+    }
+    private Bitmap snapshotMenuStory(GameRunner.Capture picture,GameUiAssets.Config config){
+        if(config.number("backScriptFlag",0)==0)
+            return UiOpening.snapshot(stage,picture.bitmap(),canvas->drawStorySnapshot(canvas,true,false));
+        // Background scripts sample the saved screen in game coordinates.
+        Bitmap base=picture.mutableBitmap();
+        if(stage.getWidth()>0&&stage.getHeight()>0)
+            UiOpening.drawOnto(stage,base,canvas->drawStorySnapshot(canvas,true,false));
+        return base;
     }
     private GameRunner.SlotPreview captureSlotPreview(){
         GameRunner.Frame frame=drawnStoryFrame;
