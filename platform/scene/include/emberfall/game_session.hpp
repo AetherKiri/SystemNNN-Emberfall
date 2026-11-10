@@ -218,7 +218,14 @@ public:
     static void inspect_snapshot(nnn::snapshot::Reader& in,const std::function<bool(const FrameState&)>& verify={});
     // Import uses a staged owner and commits only a fully validated PC slot.
     void restore_pc_save(const std::vector<nnn::Byte>& bytes);
-    std::vector<nnn::Byte> export_pc_save();
+    struct PcSavePreview {
+        std::array<int,7> time{};
+        int artwork=0, width=0, height=0;
+        std::string summary;
+        std::vector<std::uint32_t> pixels;
+    };
+    static PcSavePreview inspect_pc_save(const std::vector<nnn::Byte>& bytes, std::size_t picture_budget);
+    std::vector<nnn::Byte> export_pc_save(const std::vector<std::uint32_t>& pixels={}, int width=0, int height=0);
     nnn::Value save_slot_art() const;
     void restore_snapshot(const nnn::snapshot::Bytes& bytes,const std::function<bool(const FrameState&)>& verify={},
                           bool keep_music_position=false,bool migrate_legacy_system_variables=false,bool restart_music=false);

@@ -181,7 +181,6 @@ final class GameRunner {
         volatile boolean recovered;
         ProgressWriteFailure(GameProgress.State state,Exception cause){super(cause.getMessage(),cause);this.state=state;}
     }
-    private Future<?> autoWrite;
     private volatile boolean closing;
     private volatile boolean audioForeground;
     private final GalleryStore galleryStore;
@@ -303,7 +302,7 @@ final class GameRunner {
         saveResult(SAVE_FILES.submit(()->{
             if(saveAccess==null)saveAccess=savePaths.open(legacyFiles,legacySource);
             if(pending==null)readReadLines();else recoverProgress(previousProgress,pending);
-            slots.preload(SaveSlots.configuredManualCount(root,codec));
+            slots.preload(root,codec);
             return null;
         }));
         openTitle();
@@ -439,9 +438,14 @@ final class GameRunner {
         schedule();
     }
     private TitleMenu loadTitle(long player) throws IOException {
-        SaveSlots.Entry resume=slots.entry(SaveSlots.AUTO);
         boolean lastLoad=saveResult(SAVE_FILES.submit(slots::lastSelectedSlot))!=null;
-        return new TitleMenu(root,player,resume.exists&&!resume.corrupt,lastLoad);
+        return new TitleMenu(root,player,resumeSlot()!=null,lastLoad);
+    }
+    private Integer resumeSlot(){
+        Integer selected=slots.lastSelectedSlot();
+        if(selected!=null)return selected;
+        SaveSlots.Entry resume=slots.entry(SaveSlots.AUTO);
+        return resume.exists&&!resume.corrupt?SaveSlots.AUTO:null;
     }
     private void publishTitle(Capture previous){
         publishTitle(previous,false);
@@ -657,17 +661,9 @@ final class GameRunner {
     void returnToTitle(){tasks.post(() -> {
         if(onTitle||closing)return;
         if(replaying){finishReplay();return;}
-        Future<?> previousWrite=autoWrite;
-        autoWrite=null;
         try{
-            CompletableFuture<Void> currentWrite=queueSlotWrite(SaveSlots.AUTO,false,null,0,null);
-            if(currentWrite!=null){
-                writeReadLines();
-                saveResult(currentWrite);
-            }else if(previousWrite!=null){
-                // The earlier background save already reports failure to the player.
-                try{saveResult(previousWrite);}catch(IOException ignored){}
-            }
+            CompletableFuture<Void> progress=writeReadLines();
+            if(progress!=null)saveResult(progress);
         }catch(IOException|RuntimeException e){
             saveFailed(e);
             ui.titleReturnCancelled();
@@ -683,12 +679,12 @@ final class GameRunner {
             if(!onTitle||failed||closing){onFailure.run();return;}
             try{
                 Integer slot=null;
-                if(action==TitleMenu.Action.CONTINUE)slot=SaveSlots.AUTO;
+                if(action==TitleMenu.Action.CONTINUE)slot=resumeSlot();
                 else if(action==TitleMenu.Action.LAST_LOAD){
                     slot=slots.lastSelectedSlot();
                     if(slot==null)throw new FileNotFoundException("上次的存档无法读取");
                 }
-                open(slot==null?null:slots.file(slot),false);
+                if(slot==null)open(null,false);else openSlot(slot,false,false);
             }
             catch(Exception|LinkageError e){
                 schedule();
@@ -698,12 +694,14 @@ final class GameRunner {
         }))onFailure.run();
     }
     private void open(File save,boolean holdStory) throws IOException {
-        open(save,holdStory,null,false);
+        open(save,holdStory,false);
     }
-    private void open(File save,boolean holdStory,byte[] pcSave,boolean quick) throws IOException {
+    private void open(File save,boolean holdStory,boolean quick) throws IOException {
         long started=SystemClock.uptimeMillis();
         tasks.removeCallbacks(ticker);
-        GameSave.Loaded loaded=save==null?null:saveResult(SAVE_FILES.submit(()->GameSave.read(save)));
+        boolean pc=save!=null&&PcStorySave.isSlotFile(save.getName());
+        byte[] pcSave=pc?saveResult(SAVE_FILES.submit(()->PcStorySave.read(save))):null;
+        GameSave.Loaded loaded=save==null||pc?null:saveResult(SAVE_FILES.submit(()->GameSave.read(save)));
         int[] state=new int[NativeGame.META_SIZE];
         GameSave next=pcSave!=null?GameSave.nativeBaseline():loaded==null?new GameSave():loaded.save;
         boolean live=loaded!=null&&handle!=0&&!onTitle&&!replaying&&!failed;
@@ -760,7 +758,7 @@ final class GameRunner {
         GameSave.Run last=next.lastInput();x=last.x;y=last.y;
         failed=false;shownWait=-1;current=null;autoMode=false;skipMode=false;syncModes();
         if(!restoredHere)ui.style(dialogueStyle);
-        publishParameters();if(save!=null||pcSave!=null){NativeGame.captureBacklogJump(handle,0);ui.loaded();}
+        publishParameters();if(save!=null){NativeGame.captureBacklogJump(handle,0);ui.loaded();}
         if(meta[0]==NativeGame.MOVIE)startStoryMovie();else updateUi();
         schedule();
         Log.i("SystemNNN","Opened "+root.getName()+(save==null?"":" save="+save.getName()+" inPlace="+restoredHere+
@@ -770,38 +768,6 @@ final class GameRunner {
         if(journal.requiresSnapshot())return;
         journal.recordReplayBaseline(NativeGame.systemVariables(owner),NativeGame.scriptProgress(owner),
             NativeGame.galleryState(owner),random);
-    }
-    void importPcSave(java.util.concurrent.Callable<byte[]> read,java.util.function.Consumer<Boolean> done){
-        tasks.post(()->{
-            boolean success=false;
-            try{
-                if(handle==0||failed||replaying||moviePlaying)throw new IOException("当前无法读取PC存档");
-                open(null,true,saveResult(SAVE_FILES.submit(read)),false);
-                success=true;
-                Log.i("SystemNNN","PC save imported at "+current.script+" word="+meta[1]);
-            }catch(IOException|RuntimeException e){
-                Log.w("SystemNNN","Unable to import PC save",e);
-                ui.notice("读取PC存档失败 · "+e.getMessage());schedule();
-            }
-            finally{done.accept(success);}
-        });
-    }
-    void preparePcExport(java.util.function.Consumer<byte[]> ready){
-        tasks.post(()->{
-            byte[] data=null;
-            try{
-                if(handle==0||failed||onTitle||replaying||moviePlaying)throw new IOException("当前无法导出存档");
-                data=NativeGame.exportPcSave(handle);
-            }catch(IOException|RuntimeException e){ui.notice("导出 PC 存档失败 · "+e.getMessage());}
-            ready.accept(data);
-        });
-    }
-    void writePcExport(java.util.concurrent.Callable<Void> write,Runnable done){
-        SAVE_FILES.execute(()->{
-            try{write.call();ui.notice("PC 存档已导出");}
-            catch(Exception e){ui.notice("导出 PC 存档失败 · "+e.getMessage());}
-            finally{done.run();}
-        });
     }
     void surface(Surface value){
         if(closing)return;
@@ -857,8 +823,7 @@ final class GameRunner {
         postProgressFlush(()->{
             active=false;
             tasks.removeCallbacks(ticker);stopSound();writeGallery();
-            CompletableFuture<Void> saving=save(SaveSlots.AUTO,false,null,0,null);
-            return saving==null?writeReadLines():saving;
+            return writeReadLines();
         });
     }
     private void postProgressFlush(Supplier<CompletableFuture<Void>> flush){
@@ -1455,14 +1420,18 @@ final class GameRunner {
     SaveSlots.Entry[] slotEntries(){return slots.entries();}
     Integer lastSelectedSlot(){return slots.lastSelectedSlot();}
     void saveSlot(int slot,SlotPreview preview){
-        tasks.post(()->save(slot,true,()->playPanelSound(uiAssets.save,"saveSound",0),1,preview));
+        tasks.post(()->save(slot,()->playPanelSound(uiAssets.save,"saveSound",0),1,preview));
     }
     void loadSlot(int slot){loadSlot(slot,null);}
     void loadSlot(int slot,java.util.function.Consumer<Boolean> done){tasks.post(()->loadSlot(slot,false,done));}
+    private void openSlot(int slot,boolean holdStory,boolean quick) throws IOException {
+        File file=saveResult(SAVE_FILES.submit(()->slots.fileForRead(slot)));
+        open(file,holdStory,quick);
+    }
     private void loadSlot(int slot,boolean quick,java.util.function.Consumer<Boolean> done){
         boolean success=false;
         try{
-            open(slots.file(slot),done!=null,null,quick);
+            openSlot(slot,done!=null,quick);
             success=true;
             if(slot!=SaveSlots.AUTO)SAVE_FILES.execute(()->rememberSlot(slot));
             if(quick)quickNotice(false);else if(done==null)playPanelSound(uiAssets.load,"loadSound",0);
@@ -1479,15 +1448,17 @@ final class GameRunner {
     }
     void quickSave(SlotPreview preview){tasks.post(() -> {
         if(!onTitle&&quickEnabled(true))
-            save(SaveSlots.QUICK,true,()->quickNotice(true),uiAssets.save.number("quickSetLastFlag",0),preview);
+            save(slots.quickNumber(),()->quickNotice(true),uiAssets.save.number("quickSetLastFlag",0),preview);
     });}
-    void quickLoad(){tasks.post(() -> {if(!onTitle&&quickEnabled(false))loadSlot(SaveSlots.QUICK,true,null);});}
+    void quickLoad(){tasks.post(() -> {if(!onTitle&&quickEnabled(false))loadSlot(slots.quickNumber(),true,null);});}
     private boolean quickEnabled(boolean saving){
         int enabled=uiAssets.game.number("quickSaveEnable",0);
-        return (saving?enabled:uiAssets.game.number("quickLoadEnable",enabled))!=0;
+        return slots.quickNumber()>=0&&(saving?enabled:uiAssets.game.number("quickLoadEnable",enabled))!=0;
     }
     private void publishQuickSlot(){
-        SaveSlots.Entry slot=slots.entry(SaveSlots.QUICK);
+        int quick=slots.quickNumber();
+        if(quick<0){ui.quickSlot(false);return;}
+        SaveSlots.Entry slot=slots.entry(quick);
         ui.quickSlot(slot.exists&&!slot.corrupt);
     }
     private void quickNotice(boolean saving){
@@ -1503,7 +1474,7 @@ final class GameRunner {
         if(closing)return;
         try{
             if(!initialized)initialize();
-            else if(replaceResume){open(null,false);save(SaveSlots.AUTO,false,null,0,null);}
+            else if(replaceResume){open(null,false);writeReadLines();}
         }catch(Exception|LinkageError e){broken(e);}
     });}
     void recoverCorruptProgress(){tasks.post(()->{
@@ -1513,36 +1484,23 @@ final class GameRunner {
             initialize();
         }catch(Exception|LinkageError e){broken(e);}
     });}
-    private CompletableFuture<Void> save(int slot,boolean notify,Runnable feedback,int marker,SlotPreview preview){
-        try{
-            CompletableFuture<Void> write=queueSlotWrite(slot,notify,feedback,marker,preview);
-            if(write==null)return null;
-            if(slot==SaveSlots.AUTO)autoWrite=write;
-            write.whenComplete((unused,error)->{if(error!=null)saveFailed(error);});
-            return writeReadLines();
-        }catch(IOException|RuntimeException e){saveFailed(e);return null;}
-    }
-    private CompletableFuture<Void> queueSlotWrite(int slot,boolean notify,Runnable feedback,int marker,SlotPreview preview) throws IOException {
-        if(handle==0||failed||onTitle||history==null||!history.writable()||meta[0]==NativeGame.MOVIE||
-            (meta[0]==NativeGame.MODAL&&!NativeGame.modalSavable(handle))||meta[0]==NativeGame.END){
-            if(notify)ui.notice("当前无法保存进度");
-            return null;
+    private void save(int slot,Runnable feedback,int marker,SlotPreview preview){
+        if(handle==0||failed||onTitle||replaying||(meta[0]!=NativeGame.DIALOGUE&&meta[0]!=NativeGame.CHOICE&&meta[0]!=NativeGame.PLACE)){
+            ui.notice("当前场景无法保存");
+            return;
         }
-        long started=SystemClock.uptimeMillis();
-        if(feedback!=null)feedback.run();
-        GameSave.Loaded data=history.capture(slot,handle,meta,current==null?"":current.speaker,current==null?"":current.body);
-        Integer art=slotArtwork(slot);
-        Capture picture=slotPicture(preview);
-        long captureMs=SystemClock.uptimeMillis()-started;
-        return CompletableFuture.runAsync(()->{
-            try{writeSlot(data,picture,captureMs,art,marker);}
-            catch(IOException e){throw new CompletionException(e);}
-        },SAVE_FILES);
-    }
-    private Integer slotArtwork(int slot){
-        if(slot==SaveSlots.AUTO||uiAssets==null||uiAssets.dataFile.number("addPicPrintFlag",0)==0)return null;
-        try{return NativeGame.saveSlotArt(handle);}
-        catch(RuntimeException|LinkageError e){Log.w("SystemNNN","Unable to read save slot artwork number",e);return null;}
+        try{
+            Capture picture=slotPicture(preview);
+            byte[] data=NativeGame.exportPcSave(handle,picture==null?null:picture.pixels,
+                picture==null?0:picture.width,picture==null?0:picture.height);
+            if(data==null)throw new IOException("PC save export returned no data");
+            if(feedback!=null)feedback.run();
+            CompletableFuture.runAsync(()->{
+                try{writeSlot(slot,data,marker);}
+                catch(IOException e){throw new CompletionException(e);}
+            },SAVE_FILES).whenComplete((unused,error)->{if(error!=null)saveFailed(error);});
+            writeReadLines();
+        }catch(IOException|RuntimeException e){saveFailed(e);}
     }
     private Capture slotPicture(SlotPreview preview){
         int w=SaveSlots.pictureDimension(uiAssets.dataFile,"picSizeX",182);
@@ -1567,27 +1525,19 @@ final class GameRunner {
         }
         return picture;
     }
-    private void writeSlot(GameSave.Loaded data,Capture picture,long captureMs,Integer art,int marker) throws IOException {
-        long started=SystemClock.uptimeMillis();
-        GameSave.Metadata at=data.metadata;
-        GameSave.write(slots.file(at.slot),data);
-        Bitmap thumbnail=null;
-        if(picture!=null)try{
-            thumbnail=slots.writePicture(at.slot,at.savedAt,picture.width,picture.height,picture.pixels);
-        }catch(IOException|RuntimeException e){Log.w("SystemNNN","Unable to save slot preview",e);}
-        slots.saved(at,thumbnail);
-        if(at.slot!=SaveSlots.AUTO){
-            try{slots.recordWritten(at,art,marker);}
-            catch(IOException|RuntimeException e){Log.w("SystemNNN","Unable to save slot display metadata",e);}
-            rememberSlot(at.slot);
-        }
+    private void writeSlot(int slot,byte[] data,int marker) throws IOException {
+        File file=slots.pcFile(slot);
+        PcStorySave.Preview preview=PcStorySave.preview(data,System.currentTimeMillis(),codec,512*512);
+        PcStorySave.write(file,data);
+        slots.savedPc(slot,preview);
+        try{slots.recordWritten(slot,preview.savedAt,null,marker);}
+        catch(IOException|RuntimeException e){Log.w("SystemNNN","Unable to save slot display metadata",e);}
+        rememberSlot(slot);
         if(!closing){
-            if(at.slot==SaveSlots.QUICK)publishQuickSlot();
+            if(slot==slots.quickNumber())publishQuickSlot();
             ui.slotsChanged();
         }
-        Log.i("SystemNNN","Saved slot="+at.slot+" script="+at.script+" line="+at.line+" word="+at.word+
-            " captureMs="+captureMs+" writeMs="+(SystemClock.uptimeMillis()-started)+
-            " snapshotBytes="+(data.nativeSnapshot==null?0:data.nativeSnapshot.length));
+        Log.i("SystemNNN","Saved PC slot "+file.getName()+" bytes="+data.length);
     }
     private void rememberSlot(int slot){
         try{slots.remember(slot);}

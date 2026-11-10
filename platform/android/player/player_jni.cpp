@@ -657,14 +657,50 @@ API void JNICALL FN(restorePcSave)(JNIEnv* env,jclass,jlong handle,jbyteArray ra
         present(p);
     } catch (const std::exception& e) { fail(env,e.what()); }
 }
-API jbyteArray JNICALL FN(exportPcSave)(JNIEnv* env,jclass,jlong handle) {
+API jbyteArray JNICALL FN(exportPcSave)(JNIEnv* env,jclass,jlong handle,jintArray picture,jint width,jint height) {
     try {
         auto& p=player(handle);
         flush_screen_capture(p);
-        const auto data=p.game->export_pc_save();
+        std::vector<std::uint32_t> pixels;
+        if (picture) {
+            if (width<=0 || width>512 || height<=0 || height>512 || env->GetArrayLength(picture)!=width*height)
+                throw std::invalid_argument("Invalid PC save thumbnail");
+            pixels.resize(static_cast<std::size_t>(width)*static_cast<std::size_t>(height));
+            env->GetIntArrayRegion(picture,0,width*height,reinterpret_cast<jint*>(pixels.data()));
+            if (env->ExceptionCheck()) return nullptr;
+        }
+        const auto data=p.game->export_pc_save(pixels,width,height);
         const auto size=static_cast<jsize>(data.size());
         auto result=env->NewByteArray(size);
         if (result) env->SetByteArrayRegion(result,0,size,reinterpret_cast<const jbyte*>(data.data()));
+        return result;
+    } catch (const std::exception& e) { fail(env,e.what());return nullptr; }
+}
+API jobjectArray JNICALL FN(inspectPcSave)(JNIEnv* env,jclass,jbyteArray raw,jint picture_budget) {
+    try {
+        const auto size=raw?env->GetArrayLength(raw):0;
+        if (size<=0 || size>16*1024*1024) throw std::invalid_argument("Invalid PC save length");
+        std::vector<nnn::Byte> data(static_cast<std::size_t>(size));
+        env->GetByteArrayRegion(raw,0,size,reinterpret_cast<jbyte*>(data.data()));
+        if (env->ExceptionCheck()) return nullptr;
+        auto preview=GameSession::inspect_pc_save(data,static_cast<std::size_t>(std::max(0,picture_budget)));
+        const auto type=env->FindClass("java/lang/Object");
+        if (!type) return nullptr;
+        auto result=env->NewObjectArray(3,type,nullptr);
+        if (!result) return nullptr;
+        std::vector<int> fields(preview.time.begin(),preview.time.end());
+        fields.insert(fields.end(),{preview.artwork,preview.width,preview.height});
+        auto metadata=int_array(env,fields);
+        if (!metadata) return nullptr;
+        env->SetObjectArrayElement(result,0,metadata);
+        array_text(env,result,1,preview.summary);
+        if (!preview.pixels.empty() && !env->ExceptionCheck()) {
+            const auto count=static_cast<jsize>(preview.pixels.size());
+            auto image=env->NewIntArray(count);
+            if (!image) return nullptr;
+            env->SetIntArrayRegion(image,0,count,reinterpret_cast<const jint*>(preview.pixels.data()));
+            if (!env->ExceptionCheck()) env->SetObjectArrayElement(result,2,image);
+        }
         return result;
     } catch (const std::exception& e) { fail(env,e.what());return nullptr; }
 }

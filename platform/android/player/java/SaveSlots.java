@@ -13,11 +13,17 @@ final class SaveSlots {
     static final String LAST_SELECTION=".last-slot";
     static final String SLOT_UI=".slot-ui";
     private static final int LEGACY_MANUAL_COUNT=20;
-    private static final int LAST_MAGIC=0x4c535431; // LST1
-    private static final int SLOT_UI_MAGIC=0x534c5531; // SLU1
+    private static final int LEGACY_LAST_MAGIC=0x4c535431; // LST1
+    private static final int LAST_MAGIC=0x4c535432; // LST2, physical PC slot numbers
+    private static final int LEGACY_SLOT_UI_MAGIC=0x534c5531; // SLU1
+    private static final int SLOT_UI_MAGIC=0x534c5532; // SLU2
     private static final int MAX_PICTURE_SIZE=512;
     private static final int MAX_CACHED_PICTURE_PIXELS=6*1024*1024;
     private final GameSavePaths paths;
+    private PcStorySave pc;
+    private GameTextDecoder decoder;
+    private int quickNumber=-1;
+    private int legacyQuickPosition=-1;
     private volatile Map<Integer,Entry> cached=Collections.emptyMap();
     private volatile int manualCount=LEGACY_MANUAL_COUNT;
     private volatile Integer lastSelected;
@@ -60,19 +66,11 @@ final class SaveSlots {
             if(position==quickPosition)return QUICK;
             return quickPosition>=0&&position>quickPosition?position-1:position;
         }
-        int positionOf(int slot){
-            if(slot==QUICK)return quickPosition;
-            if(slot<0||slot>=manualCount)return -1;
-            return quickPosition>=0&&slot>=quickPosition?slot+1:slot;
+        int openingPcPage(Integer slot){
+            return slot==null||pageMode==0?0:Math.max(0,Math.min(pages-1,slot/perPage));
         }
-        int openingPage(Integer slot){
-            if(slot==null||pageMode==0)return 0;
-            if(slot>=manualCount)return pages-1;
-            return Math.max(0,positionOf(slot)/perPage);
-        }
-        boolean shows(int slot){
-            int position=positionOf(slot);
-            return position>=0&&(pageMode!=0||position<perPage);
+        boolean showsPc(int slot){
+            return slot>=0&&slot<(pageMode==0?perPage:pages*perPage);
         }
     }
     static final class Entry {
@@ -99,7 +97,7 @@ final class SaveSlots {
         private Entry withUi(SlotUi state){
             if(!exists||corrupt)return this;
             Artwork art=state.artwork.get(slot);
-            Integer number=art!=null&&art.savedAt==savedAt?art.number:null;
+            Integer number=artwork!=null?artwork:art!=null&&art.savedAt==savedAt?art.number:null;
             boolean marked=slot!=AUTO&&state.lastSaved==slot&&state.lastSavedAt==savedAt;
             if(number==null&&!marked)return this;
             return new Entry(slot,exists,corrupt,savedAt,speaker,summary,picture,number,marked);
@@ -112,14 +110,29 @@ final class SaveSlots {
     SaveSlots(GameSavePaths paths) {
         this.paths=paths;
     }
-    static int configuredManualCount(File root,GameTextDecoder decoder) throws IOException {
-        GameUiAssets.Config game=GameUiAssets.readConfig(root,"game",decoder);
-        GameUiAssets.Config data=GameUiAssets.readConfig(root,"dataFile",decoder);
-        Layout save=new Layout(GameUiAssets.readConfig(root,"save",decoder),game,data,true);
-        Layout load=new Layout(GameUiAssets.readConfig(root,"load",decoder),game,data,false);
-        return Math.max(save.manualCount,load.manualCount);
-    }
     File file(int slot){return paths.file(suffix(slot));}
+    int quickNumber(){return quickNumber;}
+    File pcFile(int slot){
+        if(slot<0||slot>=MAX_MANUAL_SLOTS)throw new IllegalArgumentException("Invalid PC save slot");
+        return pc.file(slot);
+    }
+    File fileForRead(int slot){
+        if(slot==AUTO||pc==null)return file(slot);
+        File nativeFile=pcFile(slot);
+        if(present(nativeFile)||present(new File(nativeFile.getPath()+".bak")))return nativeFile;
+        int legacy=slot;
+        if(legacyQuickPosition>=0&&slot>=legacyQuickPosition)
+            legacy=slot==legacyQuickPosition?QUICK:slot-1;
+        File previous=file(legacy);
+        if(slot==quickNumber&&legacy!=QUICK&&!exists(previous)&&exists(file(QUICK)))return file(QUICK);
+        return previous;
+    }
+    private static boolean present(File file){return Files.exists(file.toPath(),LinkOption.NOFOLLOW_LINKS);}
+    private int physicalSlot(int legacy){
+        if(pc==null||legacy==AUTO)return legacy;
+        if(legacy==QUICK)return quickNumber;
+        return legacyQuickPosition>=0&&legacy>=legacyQuickPosition?legacy+1:legacy;
+    }
     static String suffix(int slot) {
         if (!valid(slot)) throw new IllegalArgumentException("无效的存档编号");
         if (slot==AUTO) return ".resume";
@@ -127,13 +140,32 @@ final class SaveSlots {
         if (slot==0) return ".sav";
         return ".slot"+(slot<10?"0":"")+slot+".sav";
     }
+    void preload(File root,GameTextDecoder decoder) throws IOException {
+        this.decoder=decoder;
+        GameUiAssets.Config game=GameUiAssets.readConfig(root,"game",decoder);
+        GameUiAssets.Config data=GameUiAssets.readConfig(root,"dataFile",decoder);
+        Layout save=new Layout(GameUiAssets.readConfig(root,"save",decoder),game,data,true);
+        Layout load=new Layout(GameUiAssets.readConfig(root,"load",decoder),game,data,false);
+        pc=new PcStorySave(paths.directory(),game.number("taikenflag",0)!=0);
+        int quick=data.number("quickSlotNumber",1);
+        quickNumber=quick>0&&quick<=MAX_MANUAL_SLOTS?quick-1:-1;
+        legacyQuickPosition=save.quickPosition;
+        preload(Math.max(save.pages*save.perPage,load.pages*load.perPage));
+    }
     void preload(int manualCount) throws IOException {
         Set<Integer> found=new TreeSet<>();
-        try(DirectoryStream<Path> files=Files.newDirectoryStream(paths.directory().toPath(),GameSavePaths.PREFIX+"*")){
+        try(DirectoryStream<Path> files=Files.newDirectoryStream(paths.directory().toPath())){
             for(Path file:files){
                 String name=file.getFileName().toString();
-                Integer slot=committedSlot(name.substring(GameSavePaths.PREFIX.length()));
-                if(slot!=null)found.add(slot);
+                int number=pc==null?-1:pc.number(name);
+                if(number>=0)found.add(number);
+                else if(name.startsWith(GameSavePaths.PREFIX)){
+                    Integer slot=committedSlot(name.substring(GameSavePaths.PREFIX.length()));
+                    if(slot!=null){
+                        int mapped=physicalSlot(slot);
+                        if(mapped==AUTO||mapped==QUICK&&pc==null||mapped>=0&&mapped<MAX_MANUAL_SLOTS)found.add(mapped);
+                    }
+                }
             }
         }
         Map<Integer,Entry> entries=new TreeMap<>();
@@ -154,7 +186,8 @@ final class SaveSlots {
         List<Entry> entries=new ArrayList<>(manualCount+2);
         for(int slot=0;slot<manualCount;slot++)entries.add(entry(snapshot,slot).withUi(decoration));
         for(Entry saved:snapshot.values())if(saved.slot>=manualCount)entries.add(saved.withUi(decoration));
-        entries.add(entry(snapshot,AUTO));entries.add(entry(snapshot,QUICK).withUi(decoration));
+        entries.add(entry(snapshot,AUTO));
+        if(pc==null)entries.add(entry(snapshot,QUICK).withUi(decoration));
         return entries.toArray(new Entry[0]);
     }
     Entry entry(int slot){return entry(cached,slot).withUi(slotUi);}
@@ -162,12 +195,14 @@ final class SaveSlots {
         Entry saved=entries.get(slot);
         return saved==null?empty(slot):saved;
     }
-    void saved(GameSave.Metadata metadata,Bitmap picture){
+    void saved(GameSave.Metadata metadata,Bitmap picture){cache(entry(metadata.slot,metadata,picture));}
+    void savedPc(int slot,PcStorySave.Preview preview){cache(pcEntry(slot,preview));}
+    private void cache(Entry saved){
         Map<Integer,Entry> next=new TreeMap<>(cached);
-        next.remove(metadata.slot);
+        next.remove(saved.slot);
         long available=MAX_CACHED_PICTURE_PIXELS;
         for(Entry entry:next.values())available-=picturePixels(entry.picture);
-        long pixels=picturePixels(picture);
+        long pixels=picturePixels(saved.picture);
         if(pixels>available && pixels<=MAX_CACHED_PICTURE_PIXELS){
             List<Entry> oldPictures=new ArrayList<>();
             for(Entry entry:next.values())if(entry.picture!=null)oldPictures.add(entry);
@@ -178,7 +213,7 @@ final class SaveSlots {
                 if(available>=pixels)break;
             }
         }
-        next.put(metadata.slot,entry(metadata.slot,metadata,pixels<=available?picture:null));
+        next.put(saved.slot,pixels<=available?saved:saved.withoutPicture());
         cached=next;
     }
     private static long picturePixels(Bitmap picture){
@@ -198,14 +233,17 @@ final class SaveSlots {
         writeIndex(LAST_SELECTION,bytes);
     }
     void recordWritten(GameSave.Metadata saved,Integer art,int marker) throws IOException {
-        if(saved.slot==AUTO)return;
+        recordWritten(saved.slot,saved.savedAt,art,marker);
+    }
+    void recordWritten(int slot,long savedAt,Integer art,int marker) throws IOException {
+        if(slot==AUTO)return;
         SlotUi previous=slotUi;
         int last=previous.lastSaved;
-        if(marker!=0)last=marker==-1?AUTO:saved.slot;
-        long time=last==AUTO?0:last==saved.slot?saved.savedAt:previous.lastSavedAt;
+        if(marker!=0)last=marker==-1?AUTO:slot;
+        long time=last==AUTO?0:last==slot?savedAt:previous.lastSavedAt;
         Map<Integer,Artwork> images=new TreeMap<>(previous.artwork);
-        if(art==null)images.remove(saved.slot);
-        else images.put(saved.slot,new Artwork(saved.savedAt,art));
+        if(art==null)images.remove(slot);
+        else images.put(slot,new Artwork(savedAt,art));
         slotUi=new SlotUi(last,time,images);
         ByteBuffer bytes=ByteBuffer.allocate(20+images.size()*16);
         bytes.putInt(SLOT_UI_MAGIC).putInt(last).putLong(time).putInt(images.size());
@@ -218,14 +256,17 @@ final class SaveSlots {
     private SlotUi readSlotUi(){
         File file=paths.file(SLOT_UI);
         try(DataInputStream in=new DataInputStream(new BufferedInputStream(Files.newInputStream(file.toPath(),LinkOption.NOFOLLOW_LINKS)))){
-            if(in.readInt()!=SLOT_UI_MAGIC)return SlotUi.EMPTY;
+            int magic=in.readInt();
+            if(magic!=SLOT_UI_MAGIC&&magic!=LEGACY_SLOT_UI_MAGIC)return SlotUi.EMPTY;
             int last=in.readInt();
+            if(magic==LEGACY_SLOT_UI_MAGIC)last=physicalSlot(last);
             long time=in.readLong();
             int count=in.readInt();
             if(!valid(last)||time<0||count<0||count>MAX_MANUAL_SLOTS+1)return SlotUi.EMPTY;
             Map<Integer,Artwork> images=new TreeMap<>();
             for(int i=0;i<count;i++){
                 int slot=in.readInt();
+                if(magic==LEGACY_SLOT_UI_MAGIC)slot=physicalSlot(slot);
                 long savedAt=in.readLong();
                 int number=in.readInt();
                 if(slot==AUTO||!valid(slot)||savedAt<0||images.putIfAbsent(slot,new Artwork(savedAt,number))!=null)
@@ -251,10 +292,12 @@ final class SaveSlots {
         Integer selected=readLastSelection(paths.file(LAST_SELECTION));
         return selected!=null?selected:readLastSelection(paths.file(LAST_SELECTION+".bak"));
     }
-    private static Integer readLastSelection(File file){
+    private Integer readLastSelection(File file){
         try(DataInputStream in=new DataInputStream(Files.newInputStream(file.toPath(),LinkOption.NOFOLLOW_LINKS))){
-            if(in.readInt()!=LAST_MAGIC)return null;
+            int magic=in.readInt();
+            if(magic!=LAST_MAGIC&&magic!=LEGACY_LAST_MAGIC)return null;
             int slot=in.readInt();
+            if(magic==LEGACY_LAST_MAGIC)slot=physicalSlot(slot);
             return slot!=AUTO&&valid(slot)&&in.read()==-1?slot:null;
         }catch(IOException|RuntimeException ignored){return null;}
     }
@@ -262,13 +305,20 @@ final class SaveSlots {
     private static Entry entry(int slot,GameSave.Metadata m,Bitmap picture){
         return new Entry(slot,true,false,m.savedAt,m.speaker,m.legacy?"旧版存档":m.summary,picture);
     }
+    private static Entry pcEntry(int slot,PcStorySave.Preview preview){
+        return new Entry(slot,true,false,preview.savedAt,"",preview.summary,preview.picture,preview.artwork,false);
+    }
     private Entry readEntry(int slot,int remainingPixels) {
-        File file=file(slot);
+        File file=fileForRead(slot);
         if (!exists(file)) return empty(slot);
         try {
+            if(PcStorySave.isSlotFile(file.getName())){
+                byte[] bytes=PcStorySave.read(file);
+                return pcEntry(slot,PcStorySave.preview(bytes,file.lastModified(),decoder,remainingPixels));
+            }
             GameSave.Metadata m=GameSave.readMetadata(file);
-            if (!m.legacy && m.slot!=slot) throw new IOException("存档编号不匹配");
-            return entry(slot,m,m.legacy||remainingPixels<=0?null:readPicture(slot,m.savedAt,remainingPixels));
+            if (!m.legacy && m.slot!=slotForFile(file)) throw new IOException("存档编号不匹配");
+            return entry(slot,m,m.legacy||remainingPixels<=0?null:readPicture(m.slot,m.savedAt,remainingPixels));
         } catch (IOException | RuntimeException e) {
             return new Entry(slot,true,true,Math.max(0,file.lastModified()),"","存档损坏",null);
         }
@@ -290,19 +340,6 @@ final class SaveSlots {
             ByteBuffer.wrap(bytes).asIntBuffer().get(pixels);
             return Bitmap.createBitmap(pixels,w,h,Bitmap.Config.ARGB_8888);
         }catch(IOException|RuntimeException e){return null;}
-    }
-    Bitmap writePicture(int slot,long savedAt,int w,int h,int[] pixels) throws IOException {
-        if(!pictureSize(w,h)||pixels==null||pixels.length!=w*h)throw new IOException("无效的存档截图");
-        ByteBuffer bytes=ByteBuffer.allocate(pixels.length*Integer.BYTES);
-        bytes.asIntBuffer().put(pixels);
-        AtomicFile atomic=new AtomicFile(pictureFile(slot));FileOutputStream raw=atomic.startWrite();
-        try{
-            DataOutputStream out=new DataOutputStream(new BufferedOutputStream(raw));
-            out.writeLong(savedAt);out.writeShort(w);out.writeShort(h);
-            out.write(bytes.array());
-            out.flush();atomic.finishWrite(raw);
-        }catch(IOException|RuntimeException e){atomic.failWrite(raw);throw e;}
-        return Bitmap.createBitmap(pixels,w,h,Bitmap.Config.ARGB_8888);
     }
     static boolean valid(int slot) { return slot==AUTO || slot==QUICK || slot>=0 && slot<MAX_MANUAL_SLOTS; }
     static boolean exists(File file) { return file.isFile() || new File(file.getPath()+".bak").isFile(); }
@@ -332,7 +369,7 @@ final class SaveSlots {
         }
         return 0;
     }
-    private static String labelFor(int slot) {
+    static String labelFor(int slot) {
         if (slot==AUTO) return "自动存档";
         if (slot==QUICK) return "快速存档";
         return "存档 "+(slot<9?"0":"")+(slot+1);

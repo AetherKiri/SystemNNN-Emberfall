@@ -2154,7 +2154,7 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         const auto display=variable_id(setup.display_page_var);
         try {
             ChartNodeSave saved;
-            saved.status=make_chart_status(plan.mode);
+            saved.status=make_pc_command_status(plan.mode);
             saved.vars=nnn::chart::capture_variables([&](std::size_t i){return GetVarData(static_cast<nnn::Word>(i));});
             saved.run=current_chart_run();
             if (slot<saved.vars.size()) saved.vars[slot]=plan.slot;
@@ -3277,31 +3277,35 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
             status.layer_variables[i%16]|=static_cast<std::uint16_t>(static_cast<unsigned>(binding)<<(i>=16?8U:0U));
         }
     }
-    pc::Status make_chart_status(nnn::RuntimeMode mode) const {
+    pc::Status make_pc_command_status(nnn::RuntimeMode mode,bool allow_raw_position=false) const {
         pc::Status status;
         capture_pc_status(status,mode);
         status.save_count=1;
-        const bool adjusted=vm->pc_adjustment_ids();
-        status.adjust_version=adjusted ? 1 : 0;
+        bool adjusted=vm->pc_adjustment_ids();
         const auto wait=mode==nnn::RuntimeMode::Title ? nnn::PcScriptWait::Raw : nnn::PcScriptWait::Command;
         std::array<nnn::PcScriptSlot,nnn::script_mode_count> positions;
-        const auto result=vm->capture_pc_positions(positions,adjusted,wait);
+        auto result=vm->capture_pc_positions(positions,adjusted,wait);
+        if (!result && adjusted && allow_raw_position) {
+            adjusted=false;
+            result=vm->capture_pc_positions(positions,false,wait);
+        }
         if (!result) throw std::runtime_error(result.detail);
-        if (positions[0].path!="spt/sys.spt") throw std::runtime_error("Chart checkpoint requires the game control script");
+        status.adjust_version=adjusted ? 1 : 0;
+        if (positions[0].path!="spt/sys.spt") throw std::runtime_error("PC save requires the game control script");
         for (std::size_t i=0;i<=static_cast<std::size_t>(status.run_mode);++i) {
             const auto& position=positions[i];
             auto& slot=status.vm[i];
             if (position.pc>INT32_MAX || position.stack.size()>=250U)
-                throw std::runtime_error("Chart script position exceeds the PC save format");
+                throw std::runtime_error("Script position exceeds the PC save format");
             if (i!=0) {
                 const auto id=script_ids.find(stem(position.path));
-                if (id==script_ids.end()) throw std::runtime_error("Chart script is outside the PC project table");
+                if (id==script_ids.end()) throw std::runtime_error("Active script is outside the PC project table");
                 slot.script_number=static_cast<int>(id->second);
             }
             slot.pc=static_cast<int>(position.pc);
             slot.stack_pointer=static_cast<int>(position.stack.size());
             for (std::size_t j=0;j<position.stack.size();++j) {
-                if (position.stack[j]>INT32_MAX) throw std::runtime_error("Invalid chart SUB call frame");
+                if (position.stack[j]>INT32_MAX) throw std::runtime_error("Invalid PC save SUB call frame");
                 slot.call_stack[j]=static_cast<int>(position.stack[j]);
             }
             slot.call_stack[253]=position.script_call<=INT32_MAX ? static_cast<int>(position.script_call) : -1;
@@ -3424,13 +3428,17 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         const bool relocate=static_cast<unsigned>(saved.info.version)<game_version;
         const auto& status=saved.status;
         const auto mode=static_cast<nnn::RuntimeMode>(status.game_mode);
-        if (mode!=nnn::RuntimeMode::PrintMessage && mode!=nnn::RuntimeMode::SelectMessage)
+        const auto* place=place_config(status.game_mode);
+        if (!place && mode!=nnn::RuntimeMode::PrintMessage && mode!=nnn::RuntimeMode::SelectMessage)
             throw std::runtime_error("Unsupported PC save mode "+std::to_string(status.game_mode));
+        if (place && relocate && status.adjust_version==0)
+            throw std::runtime_error("PC place save needs the matching script version");
         const bool dialogue=mode==nnn::RuntimeMode::PrintMessage;
         const auto active=static_cast<std::size_t>(status.run_mode);
         const auto positions=pc_positions(status);
         const auto id=static_cast<nnn::Word>(dialogue ? status.last_message_id : status.last_select_id);
-        const auto waiting=dialogue ? nnn::PcScriptWait::Dialogue : nnn::PcScriptWait::Selection;
+        const auto waiting=place ? nnn::PcScriptWait::Command :
+            dialogue ? nnn::PcScriptWait::Dialogue : nnn::PcScriptWait::Selection;
         const auto result=vm->restore_pc_positions(static_cast<nnn::ScriptMode>(active),positions,status.adjust_version!=0,waiting,id,relocate);
         if (!result) throw std::runtime_error(result.detail);
         location();
@@ -3481,7 +3489,12 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
             remember(std::move(line));
         }
         const auto* script=vm->GetVM(vm->ActiveMode());
-        if (dialogue) {
+        if (place) {
+            const auto command=script->saved_user_command();
+            if (!command || command->command!=place->command || !check_place(mode,*place))
+                throw std::runtime_error("PC save place does not match the script or game configuration");
+            frame.wait=Wait::Place;
+        } else if (dialogue) {
             const auto message=script->saved_dialogue();
             if (!message || status.message_count<=0) throw std::runtime_error("Missing PC save message");
             auto& line=frame.dialogue;
@@ -3518,7 +3531,7 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         restore_pc_audio(status);
         const auto first_voice=std::max(playback.voice_duration_ms(0),playback.voice_duration_ms(1));
         message_has_voice=first_voice!=0;message_voice_ms=first_voice;
-        begin_line(message_has_voice,message_voice_ms,0);
+        if (!place) begin_line(message_has_voice,message_voice_ms,0);
         set_mode(mode);
         shared_runtime->set_skip_active(false);
         shared_runtime->set_system_parameter(nnn::NNNPARAM_AUTOMODE,0);
@@ -3532,35 +3545,47 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         publish_preview_story();
     }
 
-    pc::Save make_pc_save() {
-        if (!pc_export_layout || ui_mode || !replay_films.empty() || (frame.wait!=Wait::Dialogue && frame.wait!=Wait::Choice))
+    pc::Save make_pc_save(const std::vector<std::uint32_t>& pixels, int picture_width, int picture_height) {
+        const bool place=frame.wait==Wait::Place;
+        if (!pc_export_layout || ui_mode || !replay_films.empty() ||
+            (!place && frame.wait!=Wait::Dialogue && frame.wait!=Wait::Choice))
             throw std::runtime_error("This game mode or save layout cannot be exported to the PC engine");
         pc::Save saved;
         saved.header.name=pc_save_header;saved.info.version=static_cast<int>(game_version);
         auto& status=saved.status;
-        capture_pc_status(status,frame.wait==Wait::Dialogue ? nnn::RuntimeMode::PrintMessage : nnn::RuntimeMode::SelectMessage);
-        status.remaining=save_slot_art();
-        status.adjust_version=1;
-        for (std::size_t i=0;i<=static_cast<std::size_t>(status.run_mode);++i) {
-            auto& slot=saved.status.vm[i];
-            const auto* script=vm->GetVM(static_cast<nnn::ScriptMode>(i));
-            slot.pc=static_cast<int>(script->GetPC());
-            if (i!=0) {
-                const auto id=script_ids.find(stem(script->Identity()));
-                if (id==script_ids.end()) throw std::runtime_error("Active script is outside the PC project table");
-                slot.script_number=static_cast<int>(id->second);
+        if (place) {
+            const auto mode=shared_runtime->mode();
+            const auto* setup=place_config(mode);
+            const auto command=vm->GetVM(vm->ActiveMode())->saved_user_command();
+            if (!setup || !command || command->command!=setup->command)
+                throw std::runtime_error("No exportable place at the current script position");
+            status=make_pc_command_status(static_cast<nnn::RuntimeMode>(mode),true);
+        } else {
+            capture_pc_status(status,frame.wait==Wait::Dialogue ? nnn::RuntimeMode::PrintMessage : nnn::RuntimeMode::SelectMessage);
+            status.adjust_version=1;
+            status.save_count=1;
+            for (std::size_t i=0;i<=static_cast<std::size_t>(status.run_mode);++i) {
+                auto& slot=saved.status.vm[i];
+                const auto* script=vm->GetVM(static_cast<nnn::ScriptMode>(i));
+                slot.pc=static_cast<int>(script->GetPC());
+                if (i!=0) {
+                    const auto id=script_ids.find(stem(script->Identity()));
+                    if (id==script_ids.end()) throw std::runtime_error("Active script is outside the PC project table");
+                    slot.script_number=static_cast<int>(id->second);
+                }
+                slot.stack_pointer=static_cast<int>(script->GetCallDepth());
+                for (int j=0;j<slot.stack_pointer;++j) {
+                    nnn::CallFrame call;
+                    if (!script->GetCallFrame(static_cast<std::size_t>(j),call) || call.id>INT32_MAX)
+                        throw std::runtime_error("Invalid PC export SUB frame");
+                    slot.call_stack[static_cast<std::size_t>(j)]=static_cast<int>(call.id);
+                }
+                nnn::Word call=0;
+                if (script->GetScriptCallSlot(call) && call<=INT32_MAX) slot.call_stack[253]=static_cast<int>(call);
+                else if (i<static_cast<std::size_t>(status.run_mode)) throw std::runtime_error("Missing PC export SCRIPT slot");
             }
-            slot.stack_pointer=static_cast<int>(script->GetCallDepth());
-            for (int j=0;j<slot.stack_pointer;++j) {
-                nnn::CallFrame call;
-                if (!script->GetCallFrame(static_cast<std::size_t>(j),call) || call.id>INT32_MAX)
-                    throw std::runtime_error("Invalid PC export SUB frame");
-                slot.call_stack[static_cast<std::size_t>(j)]=static_cast<int>(call.id);
-            }
-            nnn::Word call=0;
-            if (script->GetScriptCallSlot(call) && call<=INT32_MAX) slot.call_stack[253]=static_cast<int>(call);
-            else if (i<static_cast<std::size_t>(status.run_mode)) throw std::runtime_error("Missing PC export SCRIPT slot");
         }
+        status.remaining=save_slot_art();
         const auto* script=vm->GetVM(vm->ActiveMode());
         std::vector<std::string> rows;
         if (frame.wait==Wait::Dialogue) {
@@ -3575,7 +3600,7 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
             const bool raw_complete=frame.dialogue.command!=append && replace_dialogue(raw)==frame.dialogue.display_bytes;
             rows=message_rows(raw_complete ? raw : frame.dialogue.display_bytes);
             status.message_count=static_cast<int>(rows.size());
-        } else {
+        } else if (!place) {
             const auto id=script->saved_selection_id();
             if (!id || *id>INT32_MAX || !frame.selection) throw std::runtime_error("No exportable choice at the current script position");
             const auto& choice=*frame.selection;
@@ -3587,7 +3612,8 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
             rows.insert(rows.end(),choice.options.begin(),choice.options.end());
             status.select_count=static_cast<int>(rows.size());
         }
-        if (rows.empty() || rows.size()>saved.messages.size()) throw std::runtime_error("PC save has too many message rows");
+        if ((!place && rows.empty()) || rows.size()>saved.messages.size())
+            throw std::runtime_error("Invalid PC save message rows");
         std::move(rows.begin(),rows.end(),saved.messages.begin());
         saved.vars.assign(vars.begin(),vars.begin()+(system_variable_end==1200?2224:1024));
         std::fill(saved.vars.begin()+first_system_variable,saved.vars.begin()+system_variable_end,0);
@@ -3609,15 +3635,28 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
                 if (saved.filenames[i].empty()) throw std::runtime_error("Layer texture has no equivalent PC resource path");
             }
         }
-        const auto& image=renderer->surface();
         auto& thumb=saved.thumbnail;
         thumb.width=pc_thumbnail_width;thumb.height=pc_thumbnail_height;
         const auto width=static_cast<unsigned>(thumb.width),height=static_cast<unsigned>(thumb.height);
         thumb.pixels.reserve(static_cast<std::size_t>(width)*height);
-        for (unsigned y=0;y<height;++y) for (unsigned x=0;x<width;++x) {
-            const auto offset=(static_cast<std::size_t>(y)*image.height/height*image.width+
-                static_cast<std::size_t>(x)*image.width/width)*3;
-            thumb.pixels.push_back((std::uint32_t{image.rgb[offset]}<<16U)|(std::uint32_t{image.rgb[offset+1]}<<8U)|image.rgb[offset+2]);
+        if (!pixels.empty()) {
+            if (picture_width<1 || picture_height<1 || picture_width>512 || picture_height>512)
+                throw std::runtime_error("Invalid PC save preview");
+            const auto source_width=static_cast<std::size_t>(picture_width);
+            const auto source_height=static_cast<std::size_t>(picture_height);
+            if (pixels.size()!=source_width*source_height) throw std::runtime_error("Invalid PC save preview length");
+            for (unsigned y=0;y<height;++y) for (unsigned x=0;x<width;++x) {
+                const auto offset=static_cast<std::size_t>(y)*source_height/height*source_width+
+                    static_cast<std::size_t>(x)*source_width/width;
+                thumb.pixels.push_back(pixels[offset]&0x00ffffffU);
+            }
+        } else {
+            const auto& image=renderer->surface();
+            for (unsigned y=0;y<height;++y) for (unsigned x=0;x<width;++x) {
+                const auto offset=(static_cast<std::size_t>(y)*image.height/height*image.width+
+                    static_cast<std::size_t>(x)*image.width/width)*3;
+                thumb.pixels.push_back((std::uint32_t{image.rgb[offset]}<<16U)|(std::uint32_t{image.rgb[offset+1]}<<8U)|image.rgb[offset+2]);
+            }
         }
         if (pc_save_log) {
             auto& log=saved.log.emplace();
@@ -4332,7 +4371,32 @@ void GameSession::restore_pc_save(const std::vector<nnn::Byte>& bytes) {
     candidate->load_pc_save(bytes);
     data_.swap(candidate);
 }
-std::vector<nnn::Byte> GameSession::export_pc_save() { return pc::write_save(data_->make_pc_save()); }
+GameSession::PcSavePreview GameSession::inspect_pc_save(const std::vector<nnn::Byte>& bytes, std::size_t picture_budget) {
+    if (bytes.size()<32) throw std::runtime_error("Incomplete PC save header");
+    const auto start=bytes.begin()+16;
+    const auto end=std::find(start,bytes.begin()+32,0);
+    const auto saved=pc::parse_save(bytes,std::string(start,end),std::nullopt);
+    const auto& status=saved.status;
+    const auto& time=status.saved_at;
+    PcSavePreview result;
+    result.time={time.year,time.month,time.day,time.hour,time.minute,time.second,time.millisecond};
+    result.artwork=status.remaining;
+    for (const auto& comment:status.large_comments) if (!comment.empty()) {
+        if (!result.summary.empty()) result.summary+='\n';
+        result.summary+=comment;
+    }
+    if (result.summary.empty()) result.summary=saved.messages[0];
+    const auto& thumbnail=saved.thumbnail;
+    if (thumbnail.width<=512 && thumbnail.height<=512 && thumbnail.pixels.size()<=picture_budget) {
+        result.width=thumbnail.width;result.height=thumbnail.height;
+        result.pixels.reserve(thumbnail.pixels.size());
+        for (const auto pixel:thumbnail.pixels) result.pixels.push_back(pixel|0xff000000U);
+    }
+    return result;
+}
+std::vector<nnn::Byte> GameSession::export_pc_save(const std::vector<std::uint32_t>& pixels, int width, int height) {
+    return pc::write_save(data_->make_pc_save(pixels,width,height));
+}
 nnn::Value GameSession::save_slot_art() const { return data_->save_slot_art(); }
 void GameSession::restore_snapshot(const nnn::snapshot::Bytes& bytes,const std::function<bool(const FrameState&)>& verify,
                                    bool keep_music_position,bool migrate_legacy_system_variables,bool restart_music) {

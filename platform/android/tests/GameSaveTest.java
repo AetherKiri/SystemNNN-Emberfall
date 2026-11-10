@@ -92,12 +92,20 @@ public final class GameSaveTest {
         SaveSlots.Layout arrows=new SaveSlots.Layout(2,5,10,-1,true,1);
         check(arrows.pages==10&&arrows.perPage==10&&arrows.pageMode==1&&arrows.manualCount==99,"authored 10-page arrow grid");
         check(arrows.slotAt(0)==SaveSlots.QUICK&&arrows.slotAt(1)==0&&arrows.slotAt(99)==98,"quick slot leaves original NS2 numbering");
-        check(arrows.openingPage(19)==2&&arrows.openingPage(130)==9&&!arrows.shows(130),"last selection opens its page and clamps after shrink");
+        check(arrows.openingPcPage(20)==2&&arrows.openingPcPage(130)==9&&!arrows.showsPc(130),
+            "physical PC slot opens its page and clamps after shrink");
         SaveSlots.Layout tabs=new SaveSlots.Layout(4,3,10,2,true,4);
         check(tabs.pageMode==2&&tabs.slotAt(3)==SaveSlots.QUICK&&tabs.slotAt(4)==3&&tabs.manualCount==119,
             "authored tabs and non-leading quick slot");
         SaveSlots.Layout single=new SaveSlots.Layout(2,2,1,-1,false,1);
-        check(single.pageMode==0&&single.shows(3)&&!single.shows(4)&&!single.shows(SaveSlots.AUTO),"single page and supplemental saves");
+        check(single.pageMode==0&&single.showsPc(3)&&!single.showsPc(4)&&!single.showsPc(SaveSlots.AUTO),
+            "single page and supplemental saves");
+        PcStorySave retail=new PcStorySave(new File("."),false);
+        PcStorySave trial=new PcStorySave(new File("."),true);
+        check(retail.number("DATA3.SAV")==3&&retail.number("tdata3.sav")==-1&&
+            trial.number("tdata0.sav")==0&&trial.number("tdata4096.sav")==-1&&
+            !PcStorySave.isSlotFile("data03.sav")&&PcStorySave.isSlotFile("data3.sav.bak"),
+            "official retail and trial namespaces use bounded physical slot numbers");
         for(String name:games){
             File game=new File(name);
             GameTextDecoder decoder=GameTextDecoder.load(game);

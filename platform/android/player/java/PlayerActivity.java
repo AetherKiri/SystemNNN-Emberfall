@@ -9,7 +9,6 @@ import android.graphics.SurfaceTexture;
 import android.Manifest;
 import android.app.Activity;
 import android.app.AlertDialog;
-import android.content.ActivityNotFoundException;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.DialogInterface;
@@ -29,11 +28,8 @@ import android.util.Log;
 import android.view.*;
 import android.widget.*;
 import java.io.File;
-import java.io.ByteArrayOutputStream;
 import java.io.FileInputStream;
 import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStream;
 import java.text.DateFormat;
 import java.util.ArrayList;
 import java.util.Date;
@@ -107,8 +103,6 @@ public final class PlayerActivity extends Activity implements GameRunner.Listene
     private boolean syncingRuntime;
     private int[] pendingDisplay,pendingAuxiliary;
     private int mouseVariant=Integer.MIN_VALUE;
-    private boolean pcSaveBusy;
-    private byte[] pendingPcExport;
     private final SharedPreferences.OnSharedPreferenceChangeListener settingsListener=(p,key) -> {
         if(syncingRuntime||p!=preferences)return;
         settings=PlayerSettings.read(p,userPreferences);
@@ -187,25 +181,6 @@ public final class PlayerActivity extends Activity implements GameRunner.Listene
     }
     @Override protected void onActivityResult(int request,int result,Intent data) {
         super.onActivityResult(request,result,data);
-        if(request==33){
-            if(result==RESULT_OK&&data!=null&&data.getData()!=null)importPcSave(data.getData());
-            else setPcSaveBusy(false);
-            return;
-        }
-        if(request==34){
-            byte[] contents=pendingPcExport;pendingPcExport=null;
-            if(result==RESULT_OK&&data!=null&&data.getData()!=null&&contents!=null&&runner!=null){
-                Uri uri=data.getData();
-                runner.writePcExport(()->{
-                    try(OutputStream out=getContentResolver().openOutputStream(uri,"wt")){
-                        if(out==null)throw new IOException("无法打开选中的文件");
-                        out.write(contents);
-                    }
-                    return null;
-                },()->runOnUiThread(()->setPcSaveBusy(false)));
-            }else setPcSaveBusy(false);
-            return;
-        }
         if (request!=32 || result!=RESULT_OK || data==null || data.getData()==null) return;
         try {
             Uri uri=data.getData();
@@ -228,50 +203,6 @@ public final class PlayerActivity extends Activity implements GameRunner.Listene
             }catch(SecurityException ignored){}
             game=selected; inspectAccess();
         } catch (IOException | IllegalArgumentException e) { chooseHome(e.getMessage()); }
-    }
-    private void choosePcSave(){
-        if(runner==null||pcSaveBusy)return;
-        Intent picker=new Intent(Intent.ACTION_OPEN_DOCUMENT).setType("*/*").addCategory(Intent.CATEGORY_OPENABLE);
-        setPcSaveBusy(true);
-        try{startActivityForResult(picker,33);}
-        catch(ActivityNotFoundException e){setPcSaveBusy(false);notice("无法打开文件选择器");}
-    }
-    private void choosePcExport(){
-        GameRunner owner=runner;
-        if(owner==null||pcSaveBusy)return;
-        setPcSaveBusy(true);
-        owner.preparePcExport(contents->runOnUiThread(()->{
-            if(contents==null||owner!=runner||isDestroyed()||isFinishing()){setPcSaveBusy(false);return;}
-            pendingPcExport=contents;
-            Intent picker=new Intent(Intent.ACTION_CREATE_DOCUMENT).setType("application/octet-stream")
-                .addCategory(Intent.CATEGORY_OPENABLE).putExtra(Intent.EXTRA_TITLE,"data1.sav");
-            try{startActivityForResult(picker,34);}
-            catch(ActivityNotFoundException e){pendingPcExport=null;setPcSaveBusy(false);notice("无法打开文件选择器");}
-        }));
-    }
-    private void setPcSaveBusy(boolean busy){pcSaveBusy=busy;updatePanelActionEnabled();}
-    private byte[] readPcSave(Uri uri) throws IOException {
-        try(InputStream input=getContentResolver().openInputStream(uri)){
-            if(input==null)throw new IOException("无法打开选中的文件");
-            ByteArrayOutputStream data=new ByteArrayOutputStream();byte[] buffer=new byte[8192];
-            for(int n;(n=input.read(buffer))!=-1;){
-                if(n>16*1024*1024-data.size())throw new IOException("PC 存档超过 16 MiB");
-                data.write(buffer,0,n);
-            }
-            return data.toByteArray();
-        }
-    }
-    private void importPcSave(Uri uri){
-        GameRunner owner=runner;
-        if(owner==null){setPcSaveBusy(false);return;}
-        GameUiPanel panel=gamePanel;
-        setPcSaveBusy(true);
-        owner.importPcSave(()->readPcSave(uri),success->runOnUiThread(()->{
-            setPcSaveBusy(false);
-            if(!success||owner!=runner||isDestroyed()||isFinishing())return;
-            if(panel!=null&&panel==gamePanel)panel.leave(uiAssets.load,false,(picture,filled)->enterStory(picture,filled));
-            else enterStory(null);
-        }));
     }
     @Override protected void onSaveInstanceState(Bundle state) {
         super.onSaveInstanceState(state);
@@ -411,7 +342,6 @@ public final class PlayerActivity extends Activity implements GameRunner.Listene
         panelActionButton.setOnClickListener(v->{
             if(!panelActionReady())return;
             if(gamePanel instanceof GameSettingsPanel)showReadingSettings();
-            else if(gamePanel instanceof GameSlotsPanel)((GameSlotsPanel)gamePanel).performPcTransfer();
         });
         FrameLayout.LayoutParams actionPosition=new FrameLayout.LayoutParams(-2,dp(48),Gravity.TOP|Gravity.END);
         actionPosition.setMargins(dp(4),dp(4),dp(4),0);
@@ -423,7 +353,7 @@ public final class PlayerActivity extends Activity implements GameRunner.Listene
         otherSavesButton.setVisibility(View.GONE);
         otherSavesButton.setOnClickListener(v->{if(panelActionReady())showOtherSaves();});
         FrameLayout.LayoutParams otherPosition=new FrameLayout.LayoutParams(-2,dp(48),Gravity.TOP|Gravity.END);
-        otherPosition.setMargins(dp(4),dp(52),dp(4),0);
+        otherPosition.setMargins(dp(4),dp(4),dp(4),0);
         root.addView(otherSavesButton,otherPosition);
         root.getViewTreeObserver().addOnPreDrawListener(()->{updatePanelActionEnabled();return true;});
         root.addOnLayoutChangeListener((v,l,t,r,b,ol,ot,or,ob) -> layoutStage());
@@ -671,7 +601,7 @@ public final class PlayerActivity extends Activity implements GameRunner.Listene
     }
     private void hideUi() {if(runner==null)return;runner.auto(false);runner.skip(false);if(quickNoticeView!=null)quickNoticeView.clear();uiHidden=true;updateVisibility();}
     private boolean panelActionReady(){
-        return runner!=null&&preparingPanel==null&&!returningToTitle&&!pcSaveBusy&&gamePanel!=null&&
+        return runner!=null&&preparingPanel==null&&!returningToTitle&&gamePanel!=null&&
             gamePanel.activeFrameReady()&&!gamePanel.openingRunning()&&!gamePanel.controlsBusy();
     }
     private void updatePanelActionEnabled(){
@@ -683,8 +613,7 @@ public final class PlayerActivity extends Activity implements GameRunner.Listene
             otherSavesButton.setEnabled(ready);
     }
     private void updatePanelAction(){
-        String label=gamePanel instanceof GameSettingsPanel?"阅读字号":
-            gamePanel instanceof GameSlotsPanel?((GameSlotsPanel)gamePanel).pcTransferLabel():null;
+        String label=gamePanel instanceof GameSettingsPanel?"阅读字号":null;
         if(label!=null&&!label.contentEquals(panelActionButton.getText()))panelActionButton.setText(label);
         panelActionButton.setVisibility(label==null?View.GONE:View.VISIBLE);
         otherSavesButton.setVisibility(gamePanel instanceof GameSlotsPanel&&
@@ -925,7 +854,7 @@ public final class PlayerActivity extends Activity implements GameRunner.Listene
             boolean saving=action==GameStoryControlsModel.Action.SAVE;
             GameUiAssets.Config config=saving?uiAssets.save:uiAssets.load;
             SaveSlots.Layout layout=new SaveSlots.Layout(config,uiAssets.game,uiAssets.dataFile,saving);
-            request=UiPreviewPool.Request.read(config,saving?6:5,layout.openingPage(runner.lastSelectedSlot())+1);
+            request=UiPreviewPool.Request.read(config,saving?6:5,layout.openingPcPage(runner.lastSelectedSlot())+1);
             break;
         default:return;
         }
@@ -1837,13 +1766,10 @@ public final class PlayerActivity extends Activity implements GameRunner.Listene
                         }));
                     });
                 }
-            },saving?this::choosePcExport:this::choosePcSave,takePanelWarmup());showOriginalPanel(gameSlots,back);return;
+            },takePanelWarmup());showOriginalPanel(gameSlots,back);return;
         }
         slotRows=column();ScrollView scroll=new ScrollView(this);scroll.addView(slotRows);
         AlertDialog.Builder slotDialog=new AlertDialog.Builder(this).setTitle(saving?"保存进度":"读取存档").setView(scroll).setNegativeButton("返回",dialogClick(null));
-        slotDialog.setNeutralButton(GameSlotsPanel.pcTransferLabel(saving),(dialog,which)->{
-            if(saving)choosePcExport();else choosePcSave();
-        });
         slotsDialog=slotDialog.create();
         showPanel(slotsDialog);if(slotsDialog.getWindow()!=null)slotsDialog.getWindow().setLayout(Math.min(dp(850),root.getWidth()-dp(32)),Math.max(dp(200),root.getHeight()-dp(32)));
         slotsChanged();
@@ -1869,7 +1795,7 @@ public final class PlayerActivity extends Activity implements GameRunner.Listene
             gameSlots.entries(runner.slotEntries());updatePanelAction();return;
         }
         if(slotRows==null || slotsDialog==null || !slotsDialog.isShowing())return;slotRows.removeAllViews();
-        TextView hint=label(savingSlots?"选择一个槽位保存。自动存档由游戏维护。":"选择存档继续游戏。",14);hint.setPadding(0,0,0,dp(10));slotRows.addView(hint);
+        TextView hint=label(savingSlots?"选择一个槽位保存。":"选择存档继续游戏。",14);hint.setPadding(0,0,0,dp(10));slotRows.addView(hint);
         for(SaveSlots.Entry entry:runner.slotEntries()){
             String summary=entry.displaySummary();
             String detail=entry.corrupt?"存档无法读取":!entry.exists?"空槽位":DateFormat.getDateTimeInstance(DateFormat.SHORT,DateFormat.SHORT).format(new Date(entry.savedAt))+
@@ -1980,7 +1906,7 @@ public final class PlayerActivity extends Activity implements GameRunner.Listene
         else if(runner!=null)runner.windowFocused();
     }
     @Override public boolean dispatchTouchEvent(MotionEvent event) {
-        if(pcSaveBusy||returningToTitle||preparingPanel!=null)return true;
+        if(returningToTitle||preparingPanel!=null)return true;
         int action=event.getActionMasked();
         if(action==MotionEvent.ACTION_DOWN){storyDownX=event.getRawX();storyDownY=event.getRawY();storyDrag=false;}
         if(storyPointerActive()){
@@ -2012,7 +1938,6 @@ public final class PlayerActivity extends Activity implements GameRunner.Listene
     }
     @Override public void onBackPressed() {
         if(copyingGame){cancelGameCopy=true;return;}
-        if(pcSaveBusy)return;
         panelWarmup=null;
         if(moviePlayback!=null){moviePlayback.skip();return;}
         if(logoPanel!=null){logoPanel.skip();return;}

@@ -34,7 +34,8 @@ final class NativeGame {
     static native byte[] snapshot(long handle);
     static native boolean inspectSaveSnapshot(ByteBuffer data,int length,int wait,int word,int line,byte[][] content);
     static native void restorePcSave(long handle,byte[] save,int[] meta);
-    static native byte[] exportPcSave(long handle);
+    static native byte[] exportPcSave(long handle,int[] pixels,int width,int height);
+    static native Object[] inspectPcSave(byte[] save,int pictureBudget);
     static native boolean restoreSnapshot(long handle,byte[] data,int wait,int word,int line,byte[][] content,int[] meta,
                                           boolean keepMusicPosition,boolean migrateLegacySystemVariables,boolean restartMusic);
     static native void restartReplayedMusic(long handle);

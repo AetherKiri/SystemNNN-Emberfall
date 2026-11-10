@@ -18,7 +18,7 @@ final class GameSlotsPanel extends GameUiPanel {
     interface Select { void choose(int slot); }
     private final boolean saving;
     private final Select select;
-    private final Runnable close,transferPc;
+    private final Runnable close;
     private final GameUiAssets.Config config,data;
     private final SaveSlots.Layout layout;
     private final Map<Integer,SaveSlots.Entry> entries=new HashMap<>();
@@ -35,13 +35,13 @@ final class GameSlotsPanel extends GameUiPanel {
     private Runnable pendingLoad;
     private long loadClickAt;
     private boolean refreshEntries;
-    GameSlotsPanel(Context c,GameUiAssets assets,boolean saving,SaveSlots.Entry[] slots,Integer lastSelected,Runnable click,Runnable close,Select select,Runnable transferPc,
+    GameSlotsPanel(Context c,GameUiAssets assets,boolean saving,SaveSlots.Entry[] slots,Integer lastSelected,Runnable click,Runnable close,Select select,
                    UiPreviewPool.Warmup warmup){
         super(c,assets,(saving?assets.save:assets.load).value("filenameBG",saving?"ta_savebg01":"ta_loadbg01"),click);
-        this.saving=saving;this.select=select;this.close=close;this.transferPc=transferPc;
+        this.saving=saving;this.select=select;this.close=close;
         config=saving?assets.save:assets.load;data=assets.dataFile;
         layout=new SaveSlots.Layout(config,assets.game,data,saving);
-        page=layout.openingPage(lastSelected);
+        page=layout.openingPcPage(lastSelected);
         cardWidth=limit(data.number("areaSizeX",132),1,4096);cardHeight=limit(data.number("areaSizeY",100),1,4096);
         artworkAtlas=data.number("addPicPrintFlag",0)!=0?sprite(data.value("fileNameAddPic","ta_sl_font")):null;
         artworkColumns=data.number("addPicMultiFlag",0)!=0?Math.max(1,data.number("addPicMultiNumberX",1)):0;
@@ -61,9 +61,6 @@ final class GameSlotsPanel extends GameUiPanel {
         opening(config,false);
         entries(slots,warmup);
     }
-    static String pcTransferLabel(boolean saving){return saving?"导出PC存档":"读取PC存档";}
-    String pcTransferLabel(){return pcTransferLabel(saving);}
-    void performPcTransfer(){transferPc.run();}
     @Override boolean controlsBusy(){return super.controlsBusy()||confirmation!=null||loadCard!=null;}
     void entries(SaveSlots.Entry[] value){entries(value,null);}
     private void entries(SaveSlots.Entry[] value,UiPreviewPool.Warmup warmup){
@@ -74,19 +71,19 @@ final class GameSlotsPanel extends GameUiPanel {
     boolean hasOtherSaves(){
         if(saving)return false;
         for(SaveSlots.Entry entry:entries.values())
-            if(entry.exists&&!entry.corrupt&&!layout.shows(entry.slot))return true;
+            if(entry.exists&&!entry.corrupt&&!layout.showsPc(entry.slot))return true;
         return false;
     }
     List<SaveSlots.Entry> otherSaves(){
         List<SaveSlots.Entry> result=new ArrayList<>();
         if(!saving)for(SaveSlots.Entry entry:entries.values())
-            if(entry.exists&&!entry.corrupt&&!layout.shows(entry.slot))result.add(entry);
+            if(entry.exists&&!entry.corrupt&&!layout.showsPc(entry.slot))result.add(entry);
         result.sort((a,b)->Integer.compare(a.slot,b.slot));
         return result;
     }
     void loadOther(int slot){
         SaveSlots.Entry entry=entries.get(slot);
-        if(!saving&&entry!=null&&entry.exists&&!entry.corrupt&&!layout.shows(slot))select.choose(slot);
+        if(!saving&&entry!=null&&entry.exists&&!entry.corrupt&&!layout.showsPc(slot))select.choose(slot);
     }
     private void render(){render(null);}
     private void render(UiPreviewPool.Warmup warmup){
@@ -97,10 +94,11 @@ final class GameSlotsPanel extends GameUiPanel {
         boolean allowQuick=config.number(saving?"quickSaveSelectOk":"quickLoadSelectOk",0)!=0;
         for(int i=0;i<layout.perPage;i++){
             int index=page*layout.perPage+i;
-            SaveSlots.Entry e=entries.get(layout.slotAt(index));
+            SaveSlots.Entry e=entries.get(index);
             if(e==null)continue;
-            SlotCard card=new SlotCard(e,index+1);
-            card.setEnabled((e.slot!=SaveSlots.QUICK||allowQuick)&&(saving||e.exists&&!e.corrupt));
+            boolean quick=index==layout.quickPosition;
+            SlotCard card=new SlotCard(e,index+1,quick);
+            card.setEnabled((!quick||allowQuick)&&(saving||e.exists&&!e.corrupt));
             card.setOnClickListener(v->{
                 if(!saving)beginLoad(card,e.slot);
                 else if(e.exists&&config.number("warningPrintFlag",1)!=0){
@@ -112,9 +110,7 @@ final class GameSlotsPanel extends GameUiPanel {
         if(layout.pageMode==1)pageArrows(config,page,layout.pages,616,16,646,this::showPage);
         else if(layout.pageMode==2)pageTabs();
         if(config.number("pagePrintFlag",0)!=0)pageNumber(layout.pages);
-        View back=back(config,close);
-        back.setContentDescription("返回，长按"+pcTransferLabel());
-        back.setOnLongClickListener(v->{performPcTransfer();return true;});
+        back(config,close);
     }
     private void showPage(int next){page=next;lastSaveSince=SystemClock.uptimeMillis();render();}
     private void pageTabs(){
@@ -241,19 +237,22 @@ final class GameSlotsPanel extends GameUiPanel {
         private final Bitmap preview,base;
         private final Rect artworkTile;
         private final int serial;
-        private final String time,summary;
+        private final boolean quick;
+        private final String time,summary,label;
         private final Paint p=new Paint(Paint.ANTI_ALIAS_FLAG|Paint.FILTER_BITMAP_FLAG);
-        SlotCard(SaveSlots.Entry e,int serial){
+        SlotCard(SaveSlots.Entry e,int serial,boolean quick){
             super(GameSlotsPanel.this.getContext());this.e=e;this.serial=serial;setSoundEffectsEnabled(false);
             time=e.exists?new SimpleDateFormat("yyyy/MM/dd HH:mm",Locale.ROOT).format(new Date(e.savedAt)):"";
+            this.quick=quick;
+            label=quick?SaveSlots.labelFor(SaveSlots.QUICK):e.label();
             String kind=saving?"Save":"Load";
-            String image=e.slot==SaveSlots.QUICK?data.value("filenameQuick"+kind+"Base","ta_quk_slot01"):
+            String image=quick?data.value("filenameQuick"+kind+"Base","ta_quk_slot01"):
                 data.value("filename"+kind+"Base","");
             base=data.number("basePrintFlag",1)!=0?sprite(image):null;
             preview=e.picture;
             artworkTile=artworkSource(e.artwork);
             summary=e.displaySummary();
-            setContentDescription(e.label()+" · "+(e.corrupt?"存档无法读取":
+            setContentDescription(label+" · "+(e.corrupt?"存档无法读取":
                 !e.exists?"空槽位":time+(summary.isEmpty()?"":" · "+summary)));
         }
         @Override public CharSequence getAccessibilityClassName(){return "android.widget.Button";}
@@ -302,7 +301,7 @@ final class GameSlotsPanel extends GameUiPanel {
                 line(c,e.label(),data.number("addPicPrintX",x),artworkY,14,0xffb7cddb);
             if(data.number("textPrintFlag",0)!=0&&!summary.isEmpty()){
                 int color=Color.rgb(data.number("textColorR",128)&255,data.number("textColorG",224)&255,data.number("textColorB",224)&255);
-                if(e.slot==SaveSlots.QUICK&&base!=null){
+                if(quick&&base!=null){
                     // The quick-slot plate already has a label in the comment box.
                     int small=Math.min(size,13),top=y-small-10;
                     if(top>=artworkY+16)line(c,summary,x,top,small,color);
@@ -318,11 +317,11 @@ final class GameSlotsPanel extends GameUiPanel {
             int clip=canvas.save();
             canvas.clipRect(0,0,cardWidth,cardHeight);
             if(base!=null)picture(canvas,base,0,0,base.getWidth(),base.getHeight());
-            if(e.slot==SaveSlots.AUTO&&!e.exists||e.slot==SaveSlots.QUICK&&base==null)
-                line(canvas,e.label(),17,38,20,saving?0xffffb7aa:0xffa4e9ff);
+            if(quick&&base==null)
+                line(canvas,label,17,38,20,saving?0xffffb7aa:0xffa4e9ff);
             if(saving&&base==null&&e.slot>=0&&!e.exists&&!e.corrupt&&!serialNumber(canvas,true)){
                 int x=Math.min(17,cardWidth/4),y=Math.min(38,cardHeight/4);
-                if(line(canvas,e.label(),x,y,Math.min(20,cardHeight-y),0xffffb7aa)==0){
+                if(line(canvas,label,x,y,Math.min(20,cardHeight-y),0xffffb7aa)==0){
                     p.setColor(0x99ffb7aa);p.setStyle(Paint.Style.STROKE);p.setStrokeWidth(1);
                     canvas.drawRect(0,0,cardWidth,cardHeight,p);p.setStyle(Paint.Style.FILL);
                 }

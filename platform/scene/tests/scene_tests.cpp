@@ -344,11 +344,13 @@ int main(){
         require(game.step_frame(0).wait==scene::Wait::Place && game.place_mode()==nnn::RuntimeMode::SelectPlace &&
             game.places()==std::vector<int>{2} && game.place_characters()==std::vector<int>{0},"first class setup");
         const auto first=game.snapshot();
+        const auto first_pc=game.export_pc_save();
         scene::InputState choose;choose.choice=1;
         require(game.step_frame(0,choose).wait==scene::Wait::Place && game.place_mode()==nnn::RuntimeMode::SelectPlace2 &&
             game.places()==std::vector<int>{0,1,2} && game.place_characters()==std::vector<int>{0,0,4} &&
             game.variable(0)==1 && game.variable(1)==0,"second class setup");
         const auto second=game.snapshot();
+        const auto second_pc=game.export_pc_save();
         auto preview=scene::GameSession::create_ui_preview(temp.root,options);
         preview->start_ui_background("sys",static_cast<int>(nnn::RuntimeMode::SelectPlace2));
         preview->set_ui_place_preview(3);
@@ -370,6 +372,13 @@ int main(){
         game.restore_snapshot(second);
         require(game.place_mode()==nnn::RuntimeMode::SelectPlace2 && game.places()==std::vector<int>{0,1,2} &&
             game.step_frame(0,choose).wait==scene::Wait::Dialogue && game.variable(1)==3,"second place class snapshot");
+        game.restore_pc_save(first_pc);
+        require(game.place_mode()==nnn::RuntimeMode::SelectPlace && game.places()==std::vector<int>{2},
+            "PC slot restores the first place command");
+        game.restore_pc_save(second_pc);
+        require(game.place_mode()==nnn::RuntimeMode::SelectPlace2 && game.places()==std::vector<int>{0,1,2} &&
+            game.step_frame(0,choose).wait==scene::Wait::Dialogue && game.variable(1)==3,
+            "PC slot restores the second place command and its result");
         temp.text("spt/varinitdata.xtx","0\n77\n1\n0\n4\n0\n0\n");
         scene::GameSession empty(temp.root,test_options());
         choose.choice=1;
@@ -1319,6 +1328,10 @@ int main(){
         scene::GameSession game(temp.root,test_options());
         require(game.step_frame(0).wait==scene::Wait::Dialogue,"first dialogue");
         const auto good=game.export_pc_save(),native=game.snapshot();
+        const auto with_picture=game.export_pc_save({0xff123456U,0xffabcdefU},2,1);
+        const auto picture=scene::GameSession::inspect_pc_save(with_picture,512U*512U);
+        require(!picture.pixels.empty() && picture.pixels.front()==0xff123456U && picture.pixels.back()==0xffabcdefU &&
+            scene::GameSession::inspect_pc_save(with_picture,0).pixels.empty(),"PC slot stores the supplied composited image");
         game.runtime()->set_system_variable(5,17);
         scene::InputState advance;advance.advance=true;
         require(game.step_frame(0,advance).dialogue.message_id==2,"second dialogue");
