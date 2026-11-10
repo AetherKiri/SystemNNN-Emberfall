@@ -24,7 +24,8 @@ final class GameUiBackground extends TextureView implements TextureView.SurfaceT
     private SurfaceTexture connectedTexture;
     private long deadline;
     private volatile boolean closed,active=true,frameReady;
-    private boolean held=true;
+    private boolean held=true,pageHeld;
+    private Runnable pagePresented;
     private int firstFrameRetries;
     private boolean chartFramePending;
     private boolean chartCompositionWarning;
@@ -81,10 +82,56 @@ final class GameUiBackground extends TextureView implements TextureView.SurfaceT
     void page(int number,int chartTiles){tasks.post(()->{
         long handle=handle();
         if(handle!=0)try{
-            NativeUiPreview.page(handle,number);
+            NativeUiPreview.page(handle,number,true);
             if(chart!=null){chart.tiles(chartTiles);publishChart();}
         }catch(RuntimeException|LinkageError e){failed(e);}
     });}
+    /** Restart into an offscreen frame while the last complete page stays visible. */
+    void preparePage(int number,int width,int height,Consumer<Bitmap> complete){
+        if(!tasks.post(()->{
+            Bitmap frame=null;
+            try{
+                long handle=handle();
+                if(handle!=0){
+                    pageHeld=true;
+                    schedule();
+                    NativeUiPreview.page(handle,number,false);
+                    frame=Bitmap.createBitmap(width,height,Bitmap.Config.ARGB_8888);
+                    frame.setHasAlpha(false);
+                    NativeUiPreview.capture(handle,frame);
+                }
+            }catch(OutOfMemoryError exhausted){
+                Log.w("SystemNNN","Unable to stage the settings background",exhausted);
+                if(frame!=null)frame.recycle();
+                frame=null;
+                resumePage();
+            }catch(RuntimeException|LinkageError e){
+                if(frame!=null)frame.recycle();
+                frame=null;
+                failed(e);
+            }
+            Bitmap ready=frame;
+            main.post(()->complete.accept(ready));
+        }))complete.accept(null);
+    }
+    void presentPage(Runnable complete){
+        if(closed){complete.run();return;}
+        pagePresented=complete;
+        frameReady=false;
+        if(!tasks.post(this::resumePage)){
+            frameReady=true;pagePresented=null;complete.run();
+        }
+    }
+    private void resumePage(){
+        pageHeld=false;
+        try{
+            if(handle()!=0&&connectedTexture!=null&&connectedTexture==requestedTexture){
+                firstFrameRetries=0;
+                lease.retrySurface();
+            }
+            schedule();
+        }catch(RuntimeException|LinkageError e){failed(e);}
+    }
     private void publishChart(){
         if(chartFramePending||closed)return;
         ChartBackdrop.Frame frame;
@@ -132,7 +179,7 @@ final class GameUiBackground extends TextureView implements TextureView.SurfaceT
         tasks.removeCallbacks(ticker);
         tasks.removeCallbacks(retryFirstFrame);
         boolean connected=connectedTexture!=null&&connectedTexture==requestedTexture;
-        boolean usable=active&&handle()!=0&&(chart!=null||connected);
+        boolean usable=active&&!pageHeld&&handle()!=0&&(chart!=null||connected);
         if(usable&&!held&&(chart!=null||frameReady)){
             deadline=SystemClock.uptimeMillis();tasks.post(ticker);
         }else{
@@ -172,7 +219,7 @@ final class GameUiBackground extends TextureView implements TextureView.SurfaceT
     }};
     private final Runnable ticker=new Runnable(){public void run(){
         long handle=handle();
-        if(handle==0||!active||held||chart==null&&
+        if(handle==0||!active||held||pageHeld||chart==null&&
             (!frameReady||connectedTexture==null||connectedTexture!=requestedTexture))return;
         long now=SystemClock.uptimeMillis(),late=Math.max(0,now-deadline);
         int steps=(int)Math.min(maxSteps,1+late/frameMs);
@@ -191,6 +238,7 @@ final class GameUiBackground extends TextureView implements TextureView.SurfaceT
     }
     private void showFailure(Throwable e){
         Log.w("SystemNNN","Unable to run menu background script",e);
+        pagePresented=null;
         setVisibility(GONE);
         if(getParent() instanceof GameUiPanel)((GameUiPanel)getParent()).backgroundFailed(this,e);
     }
@@ -205,7 +253,7 @@ final class GameUiBackground extends TextureView implements TextureView.SurfaceT
         closed=true;requestedTexture=null;
         tasks.post(()->release(true));
     }
-    @Override protected void onDetachedFromWindow(){close();super.onDetachedFromWindow();}
+    @Override protected void onDetachedFromWindow(){pagePresented=null;close();super.onDetachedFromWindow();}
     @Override public boolean onSurfaceTextureDestroyed(SurfaceTexture texture){
         if(requestedTexture==texture){requestedTexture=null;frameReady=false;}
         boolean posted=tasks.post(()->{
@@ -224,6 +272,8 @@ final class GameUiBackground extends TextureView implements TextureView.SurfaceT
         if(closed||requestedTexture!=texture||frameReady)return;
         frameReady=true;
         tasks.post(this::schedule);
+        Runnable presented=pagePresented;pagePresented=null;
+        if(presented!=null)presented.run();
         notifyFrameReady();
     }
     private void notifyFrameReady(){if(getParent() instanceof GameUiPanel)((GameUiPanel)getParent()).backgroundReady();}

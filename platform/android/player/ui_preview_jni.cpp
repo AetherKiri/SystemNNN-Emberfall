@@ -296,7 +296,7 @@ API void JNICALL FN(savedScreen)(JNIEnv* env,jclass,jlong handle,jintArray pixel
         p.game->set_ui_saved_screen(std::move(frame));p.repaint=true;
     } catch (const std::exception& e) { fail(env,e.what()); }
 }
-API void JNICALL FN(page)(JNIEnv* env,jclass,jlong handle,jint page){
+API void JNICALL FN(page)(JNIEnv* env,jclass,jlong handle,jint page,jboolean publish){
     try{
         auto& p=prepared_preview(handle);int n=p.bound_page(page);
         if(n!=p.page){
@@ -308,9 +308,9 @@ API void JNICALL FN(page)(JNIEnv* env,jclass,jlong handle,jint page){
                 p.restart();
                 emberfall::scene::InputState input;input.mouse_x=input.mouse_y=-1;
                 step(p,input);
-                present(p);
+                if(publish==JNI_TRUE)present(p);
             }
-            else {p.apply_page();if(p.place_mode()||p.object_mode())present(p);}
+            else {p.apply_page();if(publish==JNI_TRUE&&(p.place_mode()||p.object_mode()))present(p);}
         }
     }
     catch(const std::exception& e){fail(env,e.what());}

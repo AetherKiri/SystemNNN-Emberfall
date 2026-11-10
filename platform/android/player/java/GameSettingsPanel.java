@@ -74,6 +74,10 @@ final class GameSettingsPanel extends GameUiPanel {
     private void write(Runnable change){writingPreferences=true;try{change.run();}finally{writingPreferences=false;}}
     private void writeInt(String key,int value){write(()->preferences.edit().putInt(key,value).apply());}
     private void writeBoolean(String key,boolean value){write(()->preferences.edit().putBoolean(key,value).apply());}
+    private void selectPage(int selected){
+        if(selected==page||controlsBusy())return;
+        if(!prepareBackgroundPage(selected+1,()->{backgroundPage=selected;showPage(selected);}))showPage(selected);
+    }
     private void showPage(int selected){
         page=Math.max(0,Math.min(selected,(model.original?model.pages:2)-1));clearControls();
         previewWindow=null;previewNameWindow=null;
@@ -82,8 +86,8 @@ final class GameSettingsPanel extends GameUiPanel {
         background(model.background(page+1));
         if(!model.original){fallback();return;}
         if(backgroundPage!=page){uiBackground(assets.config,12,page+1);backgroundPage=page;}
-        if(model.pageMode==2)for(int i=0;i<model.tabs.size();i++){final int target=i;drawButton(model.tabs.get(i),page==i,"设置第 "+(i+1)+" 页",()->showPage(target));}
-        else if(model.pageMode==1)pageArrows(assets.config,page,model.pages,616,16,646,this::showPage);
+        if(model.pageMode==2)for(int i=0;i<model.tabs.size();i++){final int target=i;drawButton(model.tabs.get(i),page==i,"设置第 "+(i+1)+" 页",()->selectPage(target));}
+        else if(model.pageMode==1)pageArrows(assets.config,page,model.pages,616,16,646,this::selectPage);
         for(OriginalSettingsModel.Slider s:model.sliders)if(s.page==page+1)volume(s);
         for(OriginalSettingsModel.CharacterControl c:model.characters)if(c.page==page+1)character(c);
         for(OriginalSettingsModel.Choice c:model.modes)if(c.page==page+1)mode(c);
@@ -95,7 +99,7 @@ final class GameSettingsPanel extends GameUiPanel {
         preview();
         returnButton=back(assets.config,close);
     }
-    @Override boolean backOverlay(){return returnButton!=null&&returnButton.performClick();}
+    @Override boolean backOverlay(){return pageChanging()||returnButton!=null&&returnButton.performClick();}
     private void systemVoices(){
         int selected=preferences.getInt("systemVoiceSelection",0);
         for(int i=0;i<model.systemVoices.size();i++){

@@ -17,7 +17,7 @@ final class NativeUiPreview {
     static native boolean claim(long handle,long runtime);
     static native void surface(long handle,Surface surface);
     static native void savedScreen(long handle,int[] pixels,int width,int height);
-    static native void page(long handle,int page);
+    static native void page(long handle,int page,boolean publish);
     static native void prime(long handle);
     static native void capture(long handle,Bitmap bitmap);
     static native void tick(long handle,int mouseX,int mouseY,boolean clicked,boolean held,int frames);
