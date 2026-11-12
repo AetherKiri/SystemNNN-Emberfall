@@ -235,7 +235,7 @@ struct GameAudio::Impl {
     bool system_voice_role_gain=false;
     int system_sound_channel=0,movie_volume=100;
     bool music_on=true,total_on=true,system_se_on=true,script_se_on=true,voice_on=true,effect_voice_on=true;
-    bool continue_voice=false,must_play_se_in_skip=false;
+    bool continue_voice=false,must_play_se_in_skip=false,not_play_same_music=false;
     std::optional<std::pair<int,int>> last_music; // Original table number and loop count, not script gain/fade overrides.
     int fade_se=0,fade_voice=0;
     std::optional<int> next_music;
@@ -255,6 +255,7 @@ struct GameAudio::Impl {
         if (settings.default_music_fade_in<0) settings.default_music_fade_in=std::max(0,config_number(game,"defaultMusicFadeInTime",0));
         if (settings.default_music_fade_out<0) settings.default_music_fade_out=std::max(0,config_number(game,"defaultMusicFadeOutTime",5));
         must_play_se_in_skip=config_number(game,"mustPlayScriptSEInSkip",0)!=0;
+        not_play_same_music=config_number(game,"notPlaySameMusic",0)!=0;
         std::istringstream lines(game);
         for (std::string line;std::getline(lines,line);) {
             std::istringstream row(line); std::string key; int value=0;
@@ -380,6 +381,7 @@ struct GameAudio::Impl {
         const auto& a=e.parameters; int id=a[0];
         if (id>0) {
             if (!files.has_bgm(id)) throw AudioError("Invalid MUSIC number");
+            if (not_play_same_music && last_music && last_music->first==id) { info.action="music.same"; return; }
             last_music=std::make_pair(id,parameter(a,1));
         }
         if (gate.effect) { info.action="music.skipped"; return; }
