@@ -151,6 +151,8 @@ final class NativeGame {
     static native int galleryVariable(long handle,byte[] name);
     static native int menuVariable(long handle,byte[] name);
     static native int openingVariable(long handle,byte[] name);
+    // Presets a named variable of a new story before its first tick. False when the game has no such name.
+    static native boolean setStoryVariable(long handle,byte[] name,int value);
     static native void menuMusic(long handle,int number,int plays,int volume,int fade,boolean restart);
     static native void playGalleryMusic(long handle,byte[] name,int plays,int volume);
     static native void stopGalleryMusic(long handle);

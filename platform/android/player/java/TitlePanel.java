@@ -66,7 +66,7 @@ final class TitlePanel extends FrameLayout {
         // Story entry completes when the first story frame replaces the title.
         click.select(item);
         if(item.action!=TitleMenu.Action.START&&item.action!=TitleMenu.Action.CONTINUE&&
-            item.action!=TitleMenu.Action.LAST_LOAD)pending(false);
+            item.action!=TitleMenu.Action.LAST_LOAD&&item.action!=TitleMenu.Action.SCENARIO)pending(false);
     }
     private void pending(boolean busy){
         pending=busy;

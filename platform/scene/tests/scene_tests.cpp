@@ -1878,6 +1878,20 @@ int main(){
         require(log.size()==2&&log[0].action=="music.stop"&&log[1].action=="voice.skipped","music or voice gate");
         require(game.skip_active(),"STARTKOMA stopped skip");
     });
+    suite.test("a title scenario entry presets its variable before the first frame",[]{
+        Model m;m.message=true;
+        m.code.add({6,control,0x55560002U,0xa0000000U,1,0x80000000U|300U});
+        m.code.add({4,control,0xa000007bU,13});m.code.print(2);m.code.add({3,control,0xa000007dU});
+        m.code.print(1);m.code.end();TempGame temp(m);
+        std::string names;for(int i=0;i<300;++i)names+="v"+std::to_string(i)+"\n";
+        names+="route\n";Bytes encoded(names.begin(),names.end());for(auto& byte:encoded)byte^=0xffU;
+        temp.write("spt/var.fxf",encoded);
+        scene::GameSession plain(temp.root,test_options());
+        require(plain.step_frame(0).dialogue.message_id==1,"an ordinary new game took the scenario branch");
+        scene::GameSession entry(temp.root,test_options());
+        require(entry.set_story_variable("route",1)&&!entry.set_story_variable("missing",1),"scenario variable lookup");
+        require(entry.step_frame(0).dialogue.message_id==2&&entry.variable(300)==1,"the scenario value was not visible to the first script");
+    });
     suite.test("frame pacing repays a bounded number of frames",[]{
         Model m;m.code.present(30);m.code.end();TempGame temp(m);
         temp.text("init/game.xtx","frameTime 20\nmaxSkipFrame 2\nskipAdjustFrame 30\n");
