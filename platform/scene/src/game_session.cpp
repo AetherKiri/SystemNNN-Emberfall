@@ -5,6 +5,7 @@
 #include "game_assets.hpp"
 #include "pc_save.hpp"
 #include "nnn/scheduler.hpp"
+#include "nnn/frame_debt.hpp"
 #include "nnn/game_config.hpp"
 #include "nnn/game_name_list.hpp"
 #include "nnn/inventory_catalog.hpp"
@@ -473,6 +474,7 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
     std::uint32_t hidden_layers=0;
     InputState input;
     unsigned period=20, default_period=20, remainder=0;
+    nnn::FrameDebt pacing;
     std::uint32_t draw_remaining=0;
     std::size_t movie_count=0;
     std::optional<nnn::Word> movie_command;
@@ -689,6 +691,8 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         const int height=options.height ? options.height : config_int(setup,"mainScreenWindowSizeY1",720);
         period=options.frame_ms ? options.frame_ms : static_cast<unsigned>(std::clamp(config_int(init,"frameTime",20),1,1000));
         default_period=period;
+        pacing.configure(static_cast<int>(period),std::clamp(config_int(init,"maxSkipFrame",2),1,64),
+            std::clamp(config_int(init,"skipAdjustFrame",10),1,1000));
         auto varfile=assets.config("var2.fxf");
         const auto classic_varfile=assets.config("var.fxf");
         render_layer_count=render_layer_capacity(layer_limit,!varfile.empty(),!classic_varfile.empty());
@@ -1162,6 +1166,21 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
     void set_period(unsigned value) {
         period=value;
         remainder%=period;
+        pacing.set_frame(static_cast<int>(period));
+    }
+    std::uint32_t pace(std::uint32_t elapsed) {
+        const auto frames=[](std::uint32_t count) { return static_cast<int>(std::clamp<std::uint32_t>(count,1,1U<<20)); };
+        int wanted=pacing.max_frames();
+        switch (frame.wait) {
+        case Wait::Running: case Wait::Dialogue: break;
+        case Wait::Draw: wanted=frames(draw_remaining); break;
+        case Wait::Overlap: wanted=frames(renderer->overlap_remaining()); break;
+        default:
+            // The PC clears its debt outside the message mode.
+            pacing.clear();
+            return std::min(elapsed,static_cast<std::uint32_t>(pacing.max_frames())*period);
+        }
+        return static_cast<std::uint32_t>(pacing.repay(elapsed,wanted))*period;
     }
     std::string speaker(const std::string& text) const {
         const auto end=text.find_first_of("\r\n");
@@ -3550,6 +3569,7 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
             frame.end_reason=EndReason::None;frame.error.clear();
             frame.dialogue={};
             frame.remaining_frames=draw_remaining=remainder=0;
+            pacing.clear();
             frame.movie=0;frame.demo_mode=0;
             frame.film_name.clear();frame.story_name.clear();
             option_off=next_message_speed=0;next_window=-1;
@@ -3862,6 +3882,7 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         message_has_voice=first_voice!=0;message_voice_ms=first_voice;
         if (!place && !chart) begin_line(message_has_voice,message_voice_ms,0);
         set_mode(mode);
+        pacing.clear();
         shared_runtime->set_skip_active(false);
         shared_runtime->set_system_parameter(nnn::NNNPARAM_AUTOMODE,0);
         initial_calendar=false;
@@ -4474,6 +4495,7 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         replacements.swap(next.replacements);surname.swap(next.surname);given_name.swap(next.given_name);
         remainder=next.remainder;draw_remaining=next.draw_remaining;input=next.input;
         period=next.period;layer_variables=next.layer_variables;choice_appear_remaining=next.choice_appear_remaining;
+        pacing.set_frame(static_cast<int>(period));pacing.clear();
         behavior.swap(next_behavior);vm.swap(next_vm);renderer.swap(next_renderer);
         inactive_pc_layers={};loaded_pc_preview={};
         audio.clear();system_save_requested=restored_names.has_value();pending_notice=0;SetSkipFlags(flags);
@@ -4680,6 +4702,7 @@ const FrameState& GameSession::step_frame(std::uint32_t dt,const InputState& inp
     data_->publish_preview_story();
     return frame;
 }
+std::uint32_t GameSession::pace(std::uint32_t elapsed_ms) { return data_->pace(elapsed_ms); }
 const FrameState& GameSession::state() const { return data_->frame; }
 bool GameSession::complete_modal(int id,bool accepted,unsigned elapsed_frames,const std::vector<std::string>& values) {
     if (!data_->complete_modal(id,accepted,elapsed_frames,values)) return false;

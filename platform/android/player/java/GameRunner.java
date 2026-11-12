@@ -1633,7 +1633,7 @@ final class GameRunner {
             if(onTitle)return;
             if(finishEndedRun())return;
             scriptUiEvents();
-            if(history!=null)history.appendWithClock(ms,x,y,advance,
+            if(history!=null)history.appendWithClock(meta[NativeGame.PACED_MS],x,y,advance,
                 timedSelection&&NativeGame.choiceTimedOut(handle)?GameSave.TIMED_OUT:choice,recordedSkip,
                 meta[NativeGame.CLOCK_DATE],meta[NativeGame.CLOCK_MILLISECONDS]);
             if(meta[0]==NativeGame.MOVIE){startStoryMovie();return;}

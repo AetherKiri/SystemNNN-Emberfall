@@ -1878,6 +1878,20 @@ int main(){
         require(log.size()==2&&log[0].action=="music.stop"&&log[1].action=="voice.skipped","music or voice gate");
         require(game.skip_active(),"STARTKOMA stopped skip");
     });
+    suite.test("frame pacing repays a bounded number of frames",[]{
+        Model m;m.code.present(30);m.code.end();TempGame temp(m);
+        temp.text("init/game.xtx","frameTime 20\nmaxSkipFrame 2\nskipAdjustFrame 30\n");
+        scene::GameSession game(temp.root,test_options());
+        require(game.step_frame(0).wait==scene::Wait::Draw,"draw not reached");
+        std::vector<unsigned> steady;
+        for(int i=0;i<6;++i)steady.push_back(game.pace(20));
+        require(steady==std::vector<unsigned>{20,40,0,20,40,0},"on-time frames differ from the PC schedule");
+        require(game.pace(500)==20&&game.pace(20)==40&&game.pace(20)==40,"a late frame exceeded maxSkipFrame");
+        Model brief;brief.code.present(1);brief.code.end();TempGame other(brief);
+        scene::GameSession last(other.root,test_options());
+        require(last.step_frame(0).wait==scene::Wait::Draw&&last.pace(20)==20&&last.pace(20)==20,
+            "pacing ran past the remaining DRAW frames");
+    });
     suite.test("background script runs one segment per frame",[]{
         Model m;m.code.end();TempGame temp(m);
         Model back;

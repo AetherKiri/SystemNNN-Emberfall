@@ -135,6 +135,9 @@ public:
     GameSession(const GameSession&)=delete;
     GameSession& operator=(const GameSession&)=delete;
     const FrameState& step_frame(std::uint32_t dt_ms,const InputState& input={});
+    // Convert elapsed wall time to the step_frame time for this frame. The game's
+    // maxSkipFrame bounds how many frames a late call can run at once.
+    std::uint32_t pace(std::uint32_t elapsed_ms);
     const FrameState& state() const;
     bool complete_modal(int request,bool accepted,unsigned elapsed_frames,const std::vector<std::string>& values);
     // Back, choose, page, hover, confirm, group, resume, chart scroll and chart commit use codes 0 through 8.
