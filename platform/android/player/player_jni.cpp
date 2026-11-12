@@ -461,7 +461,9 @@ API void JNICALL FN(tick)(JNIEnv* env,jclass,jlong handle,jint ms,jint x,jint y,
         if (input.recorded_clock && clock[0]>0)
             input.clock_sample=emberfall::scene::ScriptClockSample{clock[0],clock[1]};
         if (!replay) flush_screen_capture(p);
-        const auto& f=p.game->step_frame(static_cast<unsigned>(ms),input);
+        // A journal replays the paced time it recorded. A zero-time tick continues the script only.
+        const auto step_ms=replay || ms==0 ? static_cast<unsigned>(ms) : p.game->pace(static_cast<unsigned>(ms));
+        const auto& f=p.game->step_frame(step_ms,input);
         if (f.wait==emberfall::scene::Wait::Error) throw std::runtime_error(f.script+" @"+std::to_string(f.word)+" "+f.error);
         const auto sampled=p.game->script_clock_sample();
         if (input.clock_sample && !sampled) throw std::runtime_error("Unused journal clock sample");
@@ -470,6 +472,10 @@ API void JNICALL FN(tick)(JNIEnv* env,jclass,jlong handle,jint ms,jint x,jint y,
         if (with_clock) {
             const jint values[]={sampled ? sampled->date : 0,sampled ? sampled->milliseconds : 0};
             env->SetIntArrayRegion(meta,7,2,values);
+        }
+        if (length>=13) {
+            const jint paced=static_cast<jint>(step_ms);
+            env->SetIntArrayRegion(meta,12,1,&paced);
         }
     } catch (const std::exception& e) { fail(env,e.what()); }
 }

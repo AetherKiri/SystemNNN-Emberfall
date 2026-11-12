@@ -7,8 +7,8 @@ import java.nio.ByteBuffer;
 final class NativeGame {
     static { System.loadLibrary("systemnnn"); }
     static final int RUNNING=0, DRAW=1, OVERLAP=2, DIALOGUE=3, CHOICE=4, END=5, TITLE=6, MOVIE=7, PLACE=8, MODAL=9;
-    static final int META_SIZE=12, CLOCK_DATE=7, CLOCK_MILLISECONDS=8, SCRIPT_CURSOR=9, DRAW_MESSAGE=10,
-        TITLE_BACKGROUND_ENDED=11;
+    static final int META_SIZE=13, CLOCK_DATE=7, CLOCK_MILLISECONDS=8, SCRIPT_CURSOR=9, DRAW_MESSAGE=10,
+        TITLE_BACKGROUND_ENDED=11, PACED_MS=12;
     static final int SELECT_PLACE_MODE=22,SELECT_PLACE2_MODE=35;
     static native long open(byte[] path, int sampleRate);
     static native long openWithRuntime(byte[] path,int sampleRate,long contextToken);
@@ -41,6 +41,7 @@ final class NativeGame {
     static native boolean restoreSnapshot(long handle,byte[] data,int wait,int word,int line,byte[][] content,int[] meta,
                                           boolean keepMusicPosition,boolean migrateLegacySystemVariables,boolean restartMusic);
     // meta = wait, word, dialogue sequence, logical width/height, frame time and remaining wait frames.
+    // A live tick converts ms to whole frames within the game's maxSkipFrame and reports it in PACED_MS.
     static native void tick(long handle, int ms, int x, int y, boolean advance, int choice, boolean replay, int[] meta);
     static native byte[][] content(long handle);
     static native void frameInfo(long handle,int[] meta);
