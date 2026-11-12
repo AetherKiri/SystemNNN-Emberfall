@@ -235,7 +235,7 @@ struct GameAudio::Impl {
     bool system_voice_role_gain=false;
     int system_sound_channel=0,movie_volume=100;
     bool music_on=true,total_on=true,system_se_on=true,script_se_on=true,voice_on=true,effect_voice_on=true;
-    bool continue_voice=false;
+    bool continue_voice=false,must_play_se_in_skip=false;
     std::optional<std::pair<int,int>> last_music; // Original table number and loop count, not script gain/fade overrides.
     int fade_se=0,fade_voice=0;
     std::optional<int> next_music;
@@ -254,6 +254,7 @@ struct GameAudio::Impl {
         const auto game=game_config::read(root,"init","game.xtx");
         if (settings.default_music_fade_in<0) settings.default_music_fade_in=std::max(0,config_number(game,"defaultMusicFadeInTime",0));
         if (settings.default_music_fade_out<0) settings.default_music_fade_out=std::max(0,config_number(game,"defaultMusicFadeOutTime",5));
+        must_play_se_in_skip=config_number(game,"mustPlayScriptSEInSkip",0)!=0;
         std::istringstream lines(game);
         for (std::string line;std::getline(lines,line);) {
             std::istringstream row(line); std::string key; int value=0;
@@ -374,14 +375,14 @@ struct GameAudio::Impl {
         target.start(std::move(program),saved->second,gain_curve(volume-settings.music_volume,0,true),
                      settings.music_volume,fade(settings.default_music_fade_in));
     }
-    void bgm(const SystemEvent& e,EventInfo& info,SkipFlags skip) {
+    void bgm(const SystemEvent& e,EventInfo& info,AudioGate gate) {
         if (e.parameters.empty()) throw AudioError("MUSIC missing track number");
         const auto& a=e.parameters; int id=a[0];
         if (id>0) {
             if (!files.has_bgm(id)) throw AudioError("Invalid MUSIC number");
             last_music=std::make_pair(id,parameter(a,1));
         }
-        if (skip.skip_next_command && skip.skip_effect_command) { info.action="music.skipped"; return; }
+        if (gate.effect) { info.action="music.skipped"; return; }
         if (id==-1 || id==-2) {
             std::lock_guard<std::mutex> lock(mixer);
             if (id==-1) {
@@ -416,9 +417,10 @@ struct GameAudio::Impl {
         if (gain==UiGain::Movie) return movie_volume;
         return settings.system_sound_volume;
     }
-    void sample_event(const SystemEvent& e,EventInfo& info,SkipFlags skip,SampleOrigin origin,VoicePreview preview) {
+    void sample_event(const SystemEvent& e,EventInfo& info,AudioGate gate,SampleOrigin origin,VoicePreview preview) {
         const auto& a=e.parameters;
         const bool speech=e.opcode==voice;
+        const bool skipping=(gate.command || gate.message) && (speech || !must_play_se_in_skip);
         const bool pc_voice=origin==SampleOrigin::PcVoice;
         const bool system=origin!=SampleOrigin::Script && !pc_voice;
         const bool button_voice=origin==SampleOrigin::ButtonVoice;
@@ -442,10 +444,10 @@ struct GameAudio::Impl {
         const std::string bus=button_voice ? "system_voice" : config_voice ? "config_voice" :
             config_sound ? "config_se" : menu_voice ? "menu_voice" : replay ? "backlog_voice" :
             speech ? "voice" : system ? "system_se" : "se";
-        if (speech && !system && id==-1 && ch<2 && continue_voice && !skip.skip_next_command) {
+        if (speech && !system && id==-1 && ch<2 && continue_voice && !skipping) {
             info.action="voice.continued"; return;
         }
-        if (id==-1 || (skip.skip_next_command && !system)) {
+        if (id==-1 || (skipping && !system)) {
             std::lock_guard<std::mutex> lock(mixer);
             if (id==-1 || (tr.active && tr.remaining==0)) tr.stop(duration);
             info.action=bus+(id==-1 ? ".stop" : ".skipped"); return;
@@ -502,7 +504,7 @@ struct GameAudio::Impl {
             target.pan.set(pan_value(parameter(a,8)),fade(a[7]));
         ++totals.plays;
     }
-    std::string submit(const SystemEvent& e,const std::string& script,Word pc,SkipFlags skip,
+    std::string submit(const SystemEvent& e,const std::string& script,Word pc,AudioGate gate,
                        SampleOrigin origin=SampleOrigin::Script,bool* voice_started=nullptr,VoicePreview preview={}) {
         if (voice_started) *voice_started=false;
         if (!settings.enabled || !is_audio_command(e.opcode)) return {};
@@ -528,8 +530,8 @@ struct GameAudio::Impl {
         try {
             const auto& a=e.parameters;
             if (a.empty()) throw AudioError("Audio command has no arguments");
-            if (e.opcode==music) bgm(e,info,skip);
-            else if (e.opcode==voice || e.opcode==sound) sample_event(e,info,skip,origin,preview);
+            if (e.opcode==music) bgm(e,info,gate);
+            else if (e.opcode==voice || e.opcode==sound) sample_event(e,info,gate,origin,preview);
             else if (e.opcode==volume_voice || e.opcode==volume_se) {
                 if (a.size()<2) throw AudioError("Volume command missing channel or gain");
                 const bool v=e.opcode==volume_voice;
@@ -538,7 +540,7 @@ struct GameAudio::Impl {
                 info.channel=a[0]; info.action=v ? "voice.gain" : "se.gain";
                 std::lock_guard<std::mutex> lock(mixer);
                 auto& tr=v ? channel(voices,a[0]) : channel(sounds,a[0]);
-                if (!skip.skip_next_command && tr.active && tr.volume_allowed) {
+                if (!gate.command && tr.active && tr.volume_allowed) {
                     tr.volume(gain_curve(a[1],v ? adjustment(tr.program->name) : 0,false,characters.slider_delta,v && tr.character>=0),duration);
                 }
             } else if (e.opcode==next_fade_voice || e.opcode==next_fade_se) {
@@ -946,8 +948,8 @@ void GameAudio::read_snapshot(snapshot::Reader& in,bool keep_music_position,
         impl_->voice_flags.swap(voice_flags);
     }
 }
-std::string GameAudio::submit(const SystemEvent& e,const std::string& script,Word word,SkipFlags skip,bool* voice_started) {
-    return impl_->submit(e,script,word,skip,SampleOrigin::Script,voice_started);
+std::string GameAudio::submit(const SystemEvent& e,const std::string& script,Word word,AudioGate gate,bool* voice_started) {
+    return impl_->submit(e,script,word,gate,SampleOrigin::Script,voice_started);
 }
 std::string GameAudio::submit_pc_voice(const SystemEvent& e,const std::string& script,Word word) {
     if (e.opcode!=voice) throw std::invalid_argument("PC voice state requires a VOICE event");

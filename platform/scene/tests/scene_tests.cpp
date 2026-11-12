@@ -1870,13 +1870,26 @@ int main(){
         require((log[1].action=="voice.skipped")==all&&game.skip_active()==all,"second voice or skip gate");
         if(!all)require(!log[1].error.empty(),"missing voice did not reach audio");
     });
-    for(const bool sentinel:{false,true})suite.test(sentinel?"STARTKOMA sentinel retains effect skip":"unread STARTKOMA gates only effects",[sentinel]{
+    for(const bool sentinel:{false,true})suite.test(sentinel?"message skip stops music after a STARTKOMA sentinel":"message skip stops music after an unread STARTKOMA",[sentinel]{
         Model m;m.code.number(0x3333001cU,{sentinel?UINT32_MAX:42U});m.code.number(nnn::audio::music,{UINT32_MAX});
         m.code.voice();m.code.present();m.code.end();TempGame temp(m);scene::GameSession game(temp.root,test_options());
         game.set_system_parameter(nnn::NNNPARAM_SKIPMODE,0);game.set_skip_active(true);
         require(game.step_frame(0).wait==scene::Wait::Draw,"draw not reached");const auto log=game.audio().stats().log;
-        require(log.size()==2&&log[0].action==(sentinel?"music.skipped":"music.stop")&&log[1].action=="voice.skipped","effect or voice gate");
+        require(log.size()==2&&log[0].action=="music.stop"&&log[1].action=="voice.skipped","music or voice gate");
         require(game.skip_active(),"STARTKOMA stopped skip");
+    });
+    suite.test("message skip runs music commands and gallery unlocks",[]{
+        Model m;m.code.number(0x3333001cU,{UINT32_MAX});m.code.number(nnn::audio::music,{1});
+        m.code.number(nnn::audio::music,{UINT32_MAX});m.code.number(0x33330018U,{1,1});
+        m.code.present();m.code.end();TempGame temp(m);
+        temp.text("spt/bgmlist.xtx","missing,Missing track\n");
+        temp.text("wgq/missing.mml","missing_intro [0: missing_loop]\n");
+        temp.text("init/game.xtx","mustSetCGFlag 0\n");
+        scene::GameSession game(temp.root,test_options());
+        game.set_system_parameter(nnn::NNNPARAM_SKIPMODE,1);game.set_skip_active(true);
+        require(game.step_frame(0).wait==scene::Wait::Draw,"draw not reached");const auto log=game.audio().stats().log;
+        require(log.size()==2&&!log[0].error.empty()&&log[1].action=="music.stop","music was dropped during message skip");
+        require(game.stats().cg_unlocks==1&&game.skip_active(),"CG unlock was dropped during message skip");
     });
     suite.test("DRAW presentation follows PC message type and window overrides",[]{
         using DrawMessage=scene::DrawMessage;

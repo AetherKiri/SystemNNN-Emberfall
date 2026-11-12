@@ -907,14 +907,14 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
     }
     bool skip_blocked() const { return auto_message>0 || cannot_skip>0; }
     bool click_blocked() const { return auto_message>0 || cannot_click>0; }
+    // The player's Skip is the PC message skip. Only F4, F5 and skip-to-film-end
+    // set the command flags, so a slot saved by an earlier build drops them here.
+    bool message_skip() const { return !ui_mode && shared_runtime->skip_active() && !skip_blocked(); }
     void sync_skip() {
         auto flags=GetSkipFlags();
-        const bool raw=!ui_mode && shared_runtime->skip_active();
-        if (!raw) effect_gate=false;
-        const bool active=raw && !skip_blocked();
-        flags.skip_next_command=active;
-        flags.skip_effect_command=active && !effect_gate;
+        flags.skip_next_command=flags.skip_effect_command=false;
         SetSkipFlags(flags);
+        effect_gate=false;
     }
     void mark_current_read() {
         if (!ui_mode && frame.wait==Wait::Dialogue && !shared_runtime->mark_read(frame.dialogue.message_id))
@@ -3006,10 +3006,12 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
                 (skip_music || !flags.skip_next_command || !flags.skip_effect_command))
                 shared_runtime->unlock_gallery(nnn::GalleryKind::Music,0,static_cast<nnn::Word>(a[0]-1));
             bool voice_started=false;
-            const auto error=playback.submit(e,frame.script,frame.word,flags,&voice_started);
+            const nnn::audio::AudioGate gate{flags.skip_next_command,
+                flags.skip_next_command && flags.skip_effect_command,message_skip()};
+            const auto error=playback.submit(e,frame.script,frame.word,gate,&voice_started);
             if (!error.empty()) warn("Audio "+frame.script+" at "+std::to_string(frame.word)+": "+error);
             if (error.empty() && e.opcode==nnn::audio::voice && a.size()>=2 &&
-                a[0]>=0 && a[1]>=0 && a[1]<2 && !GetSkipFlags().skip_next_command) {
+                a[0]>=0 && a[1]>=0 && a[1]<2 && !gate.command && !gate.message) {
                 message_has_voice=true;
                 message_voice_ms=playback.voice_duration_ms(static_cast<unsigned>(a[1]));
                 if (voice_started) { speaking_ms=message_voice_ms;renderer->set_speaking(speaking_ms!=0); }
@@ -3094,13 +3096,6 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
                 // pending mode, which STARTMESSAGE can replace before DRAW.
                 next_window=a.size()>2 ? a[2] : -1;
                 frame.dialogue.window_visible=next_window==2 || (next_window!=1 && next_message_type==0);
-            }
-            if (!ui_mode && !a.empty() && a[0]!=-1) {
-                const auto flags=GetSkipFlags();
-                if (flags.skip_next_command && flags.skip_effect_command &&
-                    shared_runtime->get_system_parameter(nnn::NNNPARAM_SKIPMODE)==nnn::NNNSKIPMODE_NORMAL &&
-                    !shared_runtime->is_read(identity(a[0]))) effect_gate=true;
-                sync_skip();
             }
             return true;
         case 0x3333006fU:

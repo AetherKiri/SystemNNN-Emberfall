@@ -62,6 +62,11 @@ struct PcAudioState {
     std::array<std::array<Value,16>,8> sounds{},voices{};
     std::array<std::string,4> voice_names;
 };
+// command and effect follow the PC's F4, F5 and skip-to-film-end flags.
+// message is the player's Skip (Ctrl, Shift or the Skip button) outside AUTOMESSAGE.
+struct AudioGate {
+    bool command=false, effect=false, message=false;
+};
 
 // Submit from the game thread. Pull interleaved stereo PCM16 from one audio consumer.
 // I/O and Vorbis decoding happen before a track enters the mixer.
@@ -71,7 +76,7 @@ public:
     ~GameAudio();
     GameAudio(const GameAudio&)=delete;
     GameAudio& operator=(const GameAudio&)=delete;
-    std::string submit(const SystemEvent& event,const std::string& script={},Word word=0,SkipFlags skip={},
+    std::string submit(const SystemEvent& event,const std::string& script={},Word word=0,AudioGate gate={},
                        bool* voice_started=nullptr);
     // A PC slot already includes the saved role correction in its VOICE delta.
     std::string submit_pc_voice(const SystemEvent& event,const std::string& script={},Word word=0);
