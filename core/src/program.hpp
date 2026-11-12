@@ -8,6 +8,8 @@
 
 namespace nnn::detail {
 
+inline constexpr Word legacy_header_words = 20;
+inline constexpr Word adjustment_header_words = 32;
 inline constexpr Word identify_data = 0x66660001;
 inline constexpr Word identify_control = 0x66660002;
 inline constexpr Word identify_command = 0x66660003;
@@ -60,6 +62,7 @@ inline constexpr Word function_nomessagewindow = 0x33330017;
 inline constexpr Word function_startmessage = 0x3333001b;
 inline constexpr Word function_startkoma = 0x3333001c;
 inline constexpr Word function_preloaddwq = 0x3333001f;
+inline constexpr Word function_debug = 0x33330042;
 inline constexpr Word table_label = 0x44440003;
 inline constexpr Word user_command_return = 0x11110001;
 inline constexpr Word token_var = 0x80000000;

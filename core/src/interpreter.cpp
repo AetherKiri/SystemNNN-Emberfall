@@ -224,6 +224,10 @@ Word system_event(const Program& p, const Record& r, CScriptCallBack& host,
         choices = selection(p, r, event.parameters);
         event.primary = static_cast<Value>(event.parameters.size());
         yield = command_select;
+    } else if (function && r.code == function_debug) {
+        event.payload = SystemPayload::Debug;
+        event.primary = 1;
+        if (!p.messages.get(words[pc+3], event.text.emplace())) invalid(pc, "Missing debug message");
     } else if (function && has_string_argument(r.code)) {
         event.payload = SystemPayload::Named;
         event.primary = (r.code == function_storyname || r.code == function_filmname) ? 1 : value_from_word(words[pc+3]);
@@ -392,7 +396,6 @@ ExecResult CExecScript::Exec(std::uint64_t work_budget) {
                     if (!call_depth_) return finish({ErrorCode::CallStackUnderflow,pc_,"RETURN without SUB"});
                     pc_=call_frames_[--call_depth_].return_pc; continue;
                 case control_script: case control_subscript: case control_scriptjump: {
-                    if (r.length<(r.code==control_scriptjump ? 4U : 5U)) invalid(pc_,"Incomplete script transfer");
                     std::string target;
                     if (!p.strings.get(w[pc_+3],target)) invalid(pc_,"Script transfer name outside table");
                     if (prepare_script_) {
@@ -400,7 +403,10 @@ ExecResult CExecScript::Exec(std::uint64_t work_budget) {
                         if (!status) return finish(std::move(status));
                     }
                     callback_.ReceiveScriptCommand(r.code,0,target,0);
-                    if (r.code!=control_scriptjump) { script_call_slot_=w[pc_+4]; script_call_slot_valid_=true; }
+                    if (r.code!=control_scriptjump) {
+                        script_call_slot_valid_=r.length==5;
+                        script_call_slot_=script_call_slot_valid_ ? w[pc_+4] : 0;
+                    }
                     pc_=next; return finish({},r.code);
                 }
                 default: callback_.UnhandledInstruction(pc_,r.identify,r.code); pc_=next; continue;

@@ -17,12 +17,29 @@ public final class SystemNnnHost {
 
     private SystemNnnHost() {}
 
+    public static boolean isPcGlobalSave(String name) {
+        return PcSystemSave.isSystemFile(name)||PcSystemSave.isResultFile(name)||PcSystemSave.isChartFile(name);
+    }
+
     /** Checks the staged snapshot without promoting any legacy backup files. */
     public static boolean canReplaceSaveSnapshot(Map<String,File> incoming,Set<String> existing) throws IOException {
-        boolean hasStory=false;
+        boolean hasStory=false,hasPcProgress=false;
         GameSave.ImportValidation validation=new GameSave.ImportValidation();
         for(Map.Entry<String,File> entry:incoming.entrySet()){
             String name=entry.getKey();
+            if(isPcGlobalSave(name)){
+                if(!PcSystemSave.valid(entry.getValue()))return false;
+                hasPcProgress|=PcSystemSave.isSystemFile(name);
+                continue;
+            }
+            if(PcStorySave.isSlotFile(name)){
+                if(incoming.containsKey(name+".bak"))continue;
+                try(InputStream in=Files.newInputStream(entry.getValue().toPath(),LinkOption.NOFOLLOW_LINKS)){
+                    if(!PcStorySave.valid(in))return false;
+                }
+                hasStory=true;
+                continue;
+            }
             Integer slot=storySaveSlot(name);
             // AtomicFile reads the legacy backup first when both files exist.
             if(slot==null||incoming.containsKey(name+".bak"))continue;
@@ -38,7 +55,8 @@ public final class SystemNnnHost {
         if(hasProgress&&!GameProgress.hasReadableBase(primary,backup))return false;
         if(hasStory)return true;
         String chart=GameSavePaths.PREFIX+GameSavePaths.CHART+"/";
-        return hasProgress&&existing.stream().noneMatch(name->storySaveSlot(name)!=null||name.startsWith(chart));
+        return (hasProgress||hasPcProgress)&&existing.stream().noneMatch(
+            name->PcStorySave.isSlotFile(name)||storySaveSlot(name)!=null||name.startsWith(chart));
     }
 
     /** Caller holds the game's shared save lock. Retired backups stay outside ZIP imports. */
@@ -48,7 +66,10 @@ public final class SystemNnnHost {
 
     private static Integer storySaveSlot(String name){
         String prefix=GameSavePaths.PREFIX;
-        return name.startsWith(prefix)?SaveSlots.committedSlot(name.substring(prefix.length())):null;
+        if(!name.startsWith(prefix))return null;
+        String suffix=name.substring(prefix.length());
+        if(suffix.endsWith(".bak"))suffix=suffix.substring(0,suffix.length()-4);
+        return SaveSlots.slotForSuffix(suffix);
     }
 
     /** Checks for a readable spt/sys.spt marker. The player validates the script when opened. */
@@ -58,6 +79,13 @@ public final class SystemNnnHost {
         } catch (IllegalArgumentException | IOException | SecurityException e) {
             return false;
         }
+    }
+
+    /** Reads the cached save layout, or explicitly rebuilds it for this game. */
+    public static SaveLayoutConfig saveLayoutConfig(File root,boolean regenerate) throws IOException {
+        File game=canonicalRoot(root);
+        if(!hasMarker(game))throw new IOException("Cannot read spt/sys.spt in "+game);
+        return SaveLayoutConfig.open(game,regenerate);
     }
 
     /** Builds an explicit in-app intent using an absolute filesystem path. */

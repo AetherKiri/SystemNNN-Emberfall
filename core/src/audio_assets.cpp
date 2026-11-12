@@ -172,8 +172,9 @@ AudioClip decode(const Bytes& b,bool music_file,std::string name,std::string sou
         const auto format=le16(b.data()+84),channels=le16(b.data()+86);
         const auto rate=le32(b.data()+88);
         const auto align=le16(b.data()+96),bits=le16(b.data()+98);
+        const auto sample_bytes=bits/8U;
         if (format!=1 || channels<1 || channels>2 || !rate || rate>192000 ||
-            (bits!=8 && bits!=16) || align!=channels*bits/8U) throw AudioError("Invalid VAW PCM format");
+            (bits!=8 && bits!=16 && bits!=24) || align!=channels*sample_bytes) throw AudioError("Invalid VAW PCM format");
         const auto size=le32(b.data()+offset-4U);
         if (size>b.size()-offset) throw AudioError("Truncated VAW PCM data");
         const auto frames=size/align;
@@ -183,10 +184,12 @@ AudioClip decode(const Bytes& b,bool music_file,std::string name,std::string sou
         const auto total=static_cast<std::size_t>(frames)*channels;
         clip->pcm.resize(total);
         for (std::size_t i=0;i<total;++i) {
-            if (bits==8) clip->pcm[i]=static_cast<std::int16_t>((static_cast<int>(b[offset+i])-128)*256);
+            const auto* sample=b.data()+offset+i*sample_bytes;
+            if (bits==8) clip->pcm[i]=static_cast<std::int16_t>((static_cast<int>(*sample)-128)*256);
             else {
-                const auto sample=le16(b.data()+offset+i*2U);
-                clip->pcm[i]=static_cast<std::int16_t>(sample<32768U ? static_cast<int>(sample) : static_cast<int>(sample)-65536);
+                // The PCM16 mixer uses the high signed word of each sample.
+                const auto high_word=le16(sample+(sample_bytes-2U));
+                clip->pcm[i]=static_cast<std::int16_t>(high_word<32768U ? static_cast<int>(high_word) : static_cast<int>(high_word)-65536);
             }
         }
         return clip;

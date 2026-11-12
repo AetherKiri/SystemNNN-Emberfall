@@ -814,22 +814,6 @@ void GameAudio::load_snapshot(snapshot::Reader& in,bool keep_music_position,
     read_snapshot(in,keep_music_position,jump_voice_mask,finish_script_fades,false,restart_music);
 }
 
-void GameAudio::restart_replayed_music() {
-    std::lock_guard<std::mutex> command(impl_->commands);
-    int volume;
-    {
-        std::lock_guard<std::mutex> mix(impl_->mixer);
-        volume=impl_->loaded_music_volume(impl_->song);
-    }
-    Track restored;
-    impl_->start_loaded_music(restored,impl_->last_music,volume);
-    std::lock_guard<std::mutex> mix(impl_->mixer);
-    impl_->song=std::move(restored);
-    impl_->outgoing={};
-    impl_->song_paused=false;
-    impl_->next_music.reset();
-}
-
 void GameAudio::inspect_snapshot(snapshot::Reader& in) {
     Settings settings;
     settings.enabled=false;

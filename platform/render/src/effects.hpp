@@ -77,7 +77,7 @@ unsigned duration(const Layer& layer);
 void advance(Layer& layer,int width,int height,Point cursor={-1,-1});
 int animation_frame(const Layer& layer,bool off);
 void draw(Surface& out,const std::array<Layer,32>& layers,unsigned slot,const Surface& saved,
-          const AnimationTexture& animation={},bool animation_off=false,bool speaking=false);
+          bool background,const AnimationTexture& animation={},bool animation_off=false,bool speaking=false);
 double progress(double tick,int length,int type,int delay);
 void paint(Surface& out,const Texture& texture,Rect src,Rect dst,int percent,
            std::array<int,3> add,bool alpha);

@@ -30,10 +30,14 @@ std::vector<Byte> file(const std::string& name){const auto path=std::filesystem:
 nnn::FunctionRegistry registry(){auto result=nnn::parse_function_registry(raw("one,d,two,d,stopf5,d,"));status_is(result.status,ErrorCode::Ok,"registry");return std::move(result.registry);}
 struct Code {
     std::vector<Word> words,sub_slots,script_sites;
-    Word pc()const{return 32U+static_cast<Word>(words.size());}
+    Word header_words=32;
+    Word pc()const{return header_words+static_cast<Word>(words.size());}
     Word add(std::initializer_list<Word> values){const Word at=pc();words.insert(words.end(),values);return at;}
     Word marker(Word code){return add({3,control,code});}
-    Word call(Word code=script_code,Word string_index=0,Word slot=0){const Word at=add({5,control,code,string_index,slot});script_sites.push_back(at);return at;}
+    Word call(Word code=script_code,Word string_index=0,Word slot=0){
+        if(header_words==20)return add({4,control,code,string_index});
+        const Word at=add({5,control,code,string_index,slot});script_sites.push_back(at);return at;
+    }
     Word print(){return add({6,0x66660006U,print_code,0,0,0});}
     Word sub(Word label){const Word at=add({5,control,0x55560009U,label,static_cast<Word>(sub_slots.size())});sub_slots.push_back(at);return at;}
     Word story(Word string_index=0){return add({5,0x66660007U,0x33330051U,1,string_index});}
@@ -43,7 +47,8 @@ struct Code {
 };
 struct Model {Code code;bool labels=true;std::vector<std::string> strings{"child"};std::vector<Word> targets,label_adjust,command_adjust;};
 std::vector<Word> words(const Model& model){
-    std::vector<Word> out(32,0);out[0]=32;out[1]=data;out[2]=0x55550001U;
+    const auto header_words=model.code.header_words;
+    std::vector<Word> out(header_words,0);out[0]=header_words;out[1]=data;out[2]=0x55550001U;
     out[12]=0x48545053U;out[13]=0x45444145U;out[14]=0x20203052U;out[15]=0x00202020U;
     out.insert(out.end(),model.code.words.begin(),model.code.words.end());
     const auto table=[&](Word kind,Word field,const std::vector<Word>& payload,bool record=false){out[field]=static_cast<Word>(out.size())+(record?0U:4U);out.insert(out.end(),{4U+static_cast<Word>(payload.size()),data,0x55550002U,kind});out.insert(out.end(),payload.begin(),payload.end());};
@@ -53,8 +58,12 @@ std::vector<Word> words(const Model& model){
         for(std::size_t i=0;i<values.size();++i){payload[i]=begin+static_cast<Word>(payload.size());auto bytes=raw(values[i]);bytes.push_back(0);while(bytes.size()%4U)bytes.push_back(0);for(std::size_t b=0;b<bytes.size();b+=4U)payload.push_back(static_cast<Word>(bytes[b])|(static_cast<Word>(bytes[b+1U])<<8U)|(static_cast<Word>(bytes[b+2U])<<16U)|(static_cast<Word>(bytes[b+3U])<<24U));}table(kind,field,payload);
     };
     text(0x44440002U,5,4,{"M"});text(0x44440001U,7,6,model.strings);
-    table(0x44440004U,18,{});table(0x44440005U,20,model.code.sub_slots);table(0x44440006U,21,model.label_adjust);
-    table(0x44440007U,22,model.command_adjust);table(0x44440008U,23,model.code.script_sites);return out;
+    table(0x44440004U,18,{});
+    if(header_words==32){
+        table(0x44440005U,20,model.code.sub_slots);table(0x44440006U,21,model.label_adjust);
+        table(0x44440007U,22,model.command_adjust);table(0x44440008U,23,model.code.script_sites);
+    }
+    return out;
 }
 std::vector<Byte> encode(const std::vector<Word>& source,nnn::DecodeParameters parameters={}){std::vector<Byte> result;Word key=parameters.xor_key,increment=0;for(Word value:source){value=(value-increment)^key;for(unsigned shift=0;shift<32;shift+=8)result.push_back(static_cast<Byte>(value>>shift));key+=parameters.key_step;increment+=parameters.increment_step;}return result;}
 std::vector<Byte> script(const Model& model,nnn::DecodeParameters parameters={}){return encode(words(model),parameters);}
@@ -204,6 +213,65 @@ int main(){Suite suite;
         status_is(result.status,ErrorCode::Ok,"resumed execution");
         require(result.return_code==print_code&&result.transitions==1&&result.active_mode==mode(0)&&
             e.vm(1).GetCallDepth()==0&&e.vm(0).GetPC()==43,"SUB RETURN and SCRIPT NEXT did not resume the caller");
+    });
+    suite.test("Legacy SPT restores a SELECT and nested return using raw word offsets",[]{
+        Environment e;
+        Model root;
+        root.code.header_words=20;
+        root.code.call();
+        root.code.print();
+        root.code.marker(end_code);
+        Model child;
+        child.code.header_words=20;
+        child.strings={"Continue"};
+        child.code.sub(0);
+        const auto return_pc=child.code.marker(next_code);
+        child.targets={child.code.add({6,0x66660006U,0x22220006U,1,0,17})};
+        child.code.add({4,control,0x55560008U,1});
+        child.code.marker(0x55560007U);
+        e.files["spt/sys.spt"]=script(root);
+        e.files["spt/child.spt"]=script(child);
+        status_is(e.owner->LoadFile("spt/sys.spt"),ErrorCode::Ok,"legacy root load");
+        require(!e.owner->pc_adjustment_ids(),"20-word header has no adjustment tables");
+        require(e.step().return_code==script_code && e.vm(0).GetPC()==24,"four-word SCRIPT call");
+        require(e.step().return_code==0x22220006U && e.vm(1).saved_selection_id()==17,"legacy choice");
+        std::array<nnn::PcScriptSlot,nnn::script_mode_count> saved{};
+        status_is(e.owner->capture_pc_positions(saved,false,nnn::PcScriptWait::Selection),ErrorCode::Ok,"raw capture");
+        require(saved[0].script_call==nnn::no_word && saved[1].stack==std::vector<Word>{return_pc},"raw stack or call slot");
+        auto damaged=saved;
+        damaged[0].pc--;
+        status_is(e.owner->restore_pc_positions(mode(1),damaged,false,nnn::PcScriptWait::Selection,17,false),
+            ErrorCode::InvalidFormat,"offset inside SCRIPT");
+        status_is(e.owner->restore_pc_positions(mode(1),saved,false,nnn::PcScriptWait::Selection,17,true),
+            ErrorCode::InvalidFormat,"raw offsets cannot relocate across versions");
+        status_is(e.owner->restore_pc_positions(mode(1),saved,false,nnn::PcScriptWait::Selection,17,false),
+            ErrorCode::Ok,"raw restore");
+        require(e.vm(1).saved_selection_id()==17 && frames(e.vm(1))[0].first==return_pc,"choice and return offset restored");
+        status_is(e.owner->Choose(1),ErrorCode::Ok,"choose restored option");
+        const auto result=e.owner->Exec();
+        status_is(result.status,ErrorCode::Ok,"resume legacy caller");
+        require(result.return_code==print_code && result.active_mode==mode(0),"did not resume caller");
+    });
+    suite.test("Legacy SPT accepts an omitted INT32 table",[]{
+        Model legacy;
+        legacy.code.header_words=20;
+        const auto operand=legacy.code.pc()+6U;
+        legacy.code.set(100,42);
+        legacy.code.marker(end_code);
+        auto source=words(legacy);
+        source.resize(source[18]-4U);
+        source[18]=0;
+        Host host;
+        nnn::CExecScript vm(host);
+        status_is(vm.LoadBytes(encode(source)),ErrorCode::Ok,"omitted INT32 table");
+        const auto result=vm.Exec(100);
+        status_is(result.status,ErrorCode::Ok,"execute without INT32");
+        require(result.return_code==end_code && host.variables[100]==42,"legacy script did not run to END");
+
+        source[operand]=0x91000000U;
+        const auto invalid=vm.LoadBytes(encode(source));
+        status_is(invalid,ErrorCode::InvalidFormat,"reference to omitted INT32 table");
+        require(invalid.word==operand,"missing INT32 reference was not rejected at its operand");
     });
     suite.test("API bounds, valid empty slots and closed initial state",[]{Environment e;require(nnn::script_mode_count==4&&nnn::max_scheduler_transitions==1024&&static_cast<int>(ErrorCode::HostRejected)==13,"old bounds/error ordinal");require(!e.owner->IsLoaded()&&e.owner->ActiveMode()==mode(0)&&e.owner->GetVM(static_cast<ScriptMode>(255))==nullptr,"initial owner state");for(std::size_t m=0;m<4;++m){Word out=123;require(!e.vm(m).IsLoaded()&&!e.vm(m).GetScriptCallSlot(out)&&out==123,"unloaded slot/failed out");}status_is(e.owner->Step().status,ErrorCode::NotLoaded,"empty Step");status_is(e.owner->Exec().status,ErrorCode::NotLoaded,"empty Exec");});
     suite.test("fixed8-step source-shaped chain one layer per NEXT",[]{

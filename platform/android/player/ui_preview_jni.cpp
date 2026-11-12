@@ -96,7 +96,7 @@ std::string raw(JNIEnv* env,jbyteArray bytes,int maximum){
 void fail(JNIEnv* env,const char* s){if(!env->ExceptionCheck())env->ThrowNew(env->FindClass("java/lang/IllegalStateException"),s);}
 Preview& preview(jlong handle){if(!handle)throw std::runtime_error("Closed UI session");return *reinterpret_cast<Preview*>(handle);}
 std::shared_ptr<nnn::RuntimeContext> context(jlong token){
-    return token ? *reinterpret_cast<const std::shared_ptr<nnn::RuntimeContext>*>(token) : nullptr;
+    return token ? reinterpret_cast<const GameSession::RuntimeRef*>(token)->runtime : nullptr;
 }
 Preview& prepared_preview(jlong handle){
     auto& p=preview(handle);

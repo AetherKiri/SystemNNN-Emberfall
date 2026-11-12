@@ -411,7 +411,7 @@ final class GalleryCatalog {
         if (encrypted) for (int i=0;i<bytes.length;i++) bytes[i]^=(byte)0xff;
         return bytes;
     }
-    private static List<String> tokens(File root,String folder,String name) throws IOException {
+    static List<String> tokens(File root,String folder,String name) throws IOException {
         byte[] bytes=listBytes(root,folder,name);
         return bytes==null?Collections.emptyList():tokens(new String(bytes,StandardCharsets.ISO_8859_1),true);
     }

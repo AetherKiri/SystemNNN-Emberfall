@@ -23,7 +23,7 @@ final class GameSave {
     private static final int NATIVE_BASELINE=-5;
     private static final int RANDOM_STATE=-6, CLOCK_SAMPLE=-7, RESET_GALLERY=-8, GALLERY_BITS=-9;
     private static final int RESET_SCRIPT_PROGRESS=-10, SET_SCRIPT_PROGRESS=-11;
-    private static final int MAX_GALLERY_KEYS=150000;
+    private static final int MAX_GALLERY_KEYS=GalleryStore.LIMIT;
     static final int MAGIC_NS1=0x4e4e5331, MAGIC_NS2=0x4e4e5332;
     private static final int MAX_RUNS=200000, MAX_TICKS=24000000, MAX_CONTENT_BYTES=1024*1024;
     // A native checkpoint still validates its ID and cursor. This token can

@@ -10,9 +10,6 @@
 namespace emberfall::scene::pc {
 namespace {
 
-constexpr std::size_t header_size=32;
-constexpr std::size_t legacy_status_size=7088, status_size=8112;
-constexpr std::size_t max_extensions=256;
 constexpr std::size_t max_blocks=8+3+max_extensions+32;
 constexpr std::size_t max_thumbnail_pixels=4U*1024U*1024U;
 constexpr int print_mode=10, select_mode=9;
@@ -183,7 +180,7 @@ void read_vm_slots(View view,Status& status) {
 }
 
 Status read_status(View view) {
-    if (view.size()!=legacy_status_size && view.size()!=status_size)
+    if (!supported_status_size(view.size()))
         invalid("unsupported GAMESTATUS layout");
     Status status;
     status.saved_at={view.i32(32),view.i32(36),view.i32(40),view.i32(44),
@@ -244,17 +241,17 @@ Status read_status(View view) {
     status.large_comment_flag=view.i32(6048);
     for (std::size_t i=0;i<status.large_comments.size();++i)
         status.large_comments[i]=view.text(6064+i*256,256,status.large_comment_flag!=0);
-    if (view.size()==status_size) {
+    if (view.size()==preview_status_bytes) {
         // Old saves predate this preview text. The current PC writer copies
         // its active rows without explicitly writing a terminator.
         for (std::size_t i=0;i<status.log_messages.size();++i)
-            status.log_messages[i]=view.text(legacy_status_size+i*256,256,false);
+            status.log_messages[i]=view.text(classic_status_bytes+i*256,256,false);
     }
     return status;
 }
 
 void append_status(std::vector<nnn::Byte>& bytes,const Status& status,bool full) {
-    OutputBlock state(bytes,full?status_size:legacy_status_size,2,"GAMESTATUS");
+    OutputBlock state(bytes,full?preview_status_bytes:classic_status_bytes,2,"GAMESTATUS");
     const auto& time=status.saved_at;
     state.words(32,std::array<int,8>{time.year,time.month,time.day,time.weekday,time.hour,time.minute,time.second,time.millisecond});
     state.words(64,std::array<int,9>{status.game_month,status.game_day,status.game_hour,status.game_weekday,status.game_mode,
@@ -289,7 +286,7 @@ void append_status(std::vector<nnn::Byte>& bytes,const Status& status,bool full)
     if (full) {
         state.raw(1840,status.guid);
         for (std::size_t i=0;i<status.log_messages.size();++i)
-            state.text(legacy_status_size+i*256,256,status.log_messages[i]);
+            state.text(classic_status_bytes+i*256,256,status.log_messages[i]);
     }
 }
 
@@ -312,11 +309,12 @@ Rect read_rect(View view,std::size_t offset) {
 }
 
 void read_effects(View effects,View filenames,Save& save) {
-    constexpr std::size_t effect_size=1024, name_size=256;
-    if (effects.size()!=header_size+layer_count*effect_size ||
-        filenames.size()!=header_size+layer_count*name_size)
+    const auto count=effects.size()==header_size+classic_layer_count*effect_size ? classic_layer_count : layer_count;
+    if (effects.size()!=header_size+count*effect_size ||
+        filenames.size()!=header_size+count*filename_size)
         invalid("unsupported effect or filename layout");
-    for (std::size_t i=0;i<layer_count;++i) {
+    save.layer_records=count;
+    for (std::size_t i=0;i<count;++i) {
         const auto base=header_size+i*effect_size;
         auto& effect=save.effects[i];
         effect.flag=effects.i32(base); effect.picture=effects.i32(base+4); effect.command=effects.i32(base+8);
@@ -326,7 +324,8 @@ void read_effects(View effects,View filenames,Save& save) {
         effect.count=effects.i32(base+108); effect.count_max=effects.i32(base+112);
         effects.words(base+116,effect.parameters);
         effect.not_transparent=effects.i32(base+1012)!=0; effect.previous_effect=effects.i32(base+1016);
-        save.filenames[i]=resource(filenames,header_size+i*name_size,name_size,effect.flag!=0);
+        effect.padding=effects.i32(base+1020);
+        save.filenames[i]=resource(filenames,header_size+i*filename_size,filename_size,effect.flag!=0);
     }
 }
 
@@ -369,7 +368,7 @@ Log read_log(View view) {
 } // namespace
 
 Status parse_status_block(const nnn::Byte* bytes,std::size_t size) {
-    if (!bytes || (size!=legacy_status_size && size!=status_size)) invalid("unsupported GAMESTATUS layout");
+    if (!bytes || !supported_status_size(size)) invalid("unsupported GAMESTATUS layout");
     const View view(bytes,size);
     const auto header=read_header(view);
     if (header.size!=size || header.code!=2 || header.name!="GAMESTATUS")
@@ -384,11 +383,8 @@ std::vector<nnn::Byte> write_status_block(const Status& status) {
     return bytes;
 }
 
-Save parse_save(const std::vector<nnn::Byte>& bytes,std::string_view expected_header,
-                std::optional<std::uint32_t> replacement_code) {
+Save parse_save(const std::vector<nnn::Byte>& bytes,std::string_view expected_header) {
     if (bytes.size()<header_size || bytes.size()>max_save_bytes) invalid("invalid file size");
-    if (replacement_code && (*replacement_code<first_extension_code || *replacement_code>last_extension_code))
-        invalid("invalid okikae extension code");
     const View input(bytes.data(),bytes.size());
     std::map<std::uint32_t,Block> blocks;
     for (std::size_t offset=0;offset<bytes.size();) {
@@ -413,7 +409,9 @@ Save parse_save(const std::vector<nnn::Byte>& bytes,std::string_view expected_he
     Save save;
     save.header=blocks.at(0).header;
     save.info=read_info(required(1,"INFO"));
-    save.status=read_status(required(2,"GAMESTATUS"));
+    const auto status=required(2,"GAMESTATUS");
+    save.status=read_status(status);
+    save.status_bytes=status.size();
     save.thumbnail=read_thumbnail(required(3,"MINICG"));
     const auto vars=required(4,"GAMEVAR");
     if (vars.size()!=header_size+1024*4 && vars.size()!=header_size+2224*4)
@@ -422,24 +420,37 @@ Save parse_save(const std::vector<nnn::Byte>& bytes,std::string_view expected_he
     for (std::size_t i=0;i<save.vars.size();++i) save.vars[i]=vars.i32(header_size+i*4);
     read_effects(required(5,"EFFECT"),required(6,"EFFECTFILENAME"),save);
     const auto messages=required(7,"MESSAGE");
-    constexpr std::size_t message_width=1024;
-    if (messages.size()!=header_size+message_limit*message_width) invalid("unsupported MESSAGE layout");
+    const auto message_width=message_width_from_block_size(messages.size());
+    if (!message_width) invalid("unsupported MESSAGE layout");
+    save.message_width=*message_width;
     const int active_messages=save.status.game_mode==print_mode ? save.status.message_count :
         (save.status.game_mode==select_mode ? save.status.select_count : 0);
     for (std::size_t i=0;i<save.messages.size();++i)
-        save.messages[i]=messages.text(header_size+i*message_width,message_width,i<static_cast<std::size_t>(active_messages));
+        save.messages[i]=messages.text(header_size+i*save.message_width,save.message_width,i<static_cast<std::size_t>(active_messages));
 
     const auto& info=save.info;
     if ((blocks.count(8)!=0)!=info.has_omake || (blocks.count(9)!=0)!=info.has_cutin ||
         (blocks.count(10)!=0)!=info.has_log) invalid("optional blocks disagree with INFO");
-    if (info.has_omake && required(8,"OMAKECLASS").size()!=header_size+3200*4)
-        invalid("unsupported OMAKECLASS layout");
-    if (info.has_cutin && required(9,"CUTIN").size()!=header_size+64*4*4)
-        invalid("unsupported CUTIN layout");
+    if (info.has_omake) {
+        const auto block=required(8,"OMAKECLASS");
+        auto& words=save.omake.emplace();
+        if (block.size()!=header_size+words.size()*4) invalid("unsupported OMAKECLASS layout");
+        block.words(header_size,words);
+    }
+    if (info.has_cutin) {
+        const auto block=required(9,"CUTIN");
+        auto& words=save.cutin.emplace();
+        if (block.size()!=header_size+words.size()*4) invalid("unsupported CUTIN layout");
+        block.words(header_size,words);
+    }
     if (info.has_log) save.log=read_log(required(10,"LOG"));
     const auto expected_ext_end=first_extension_code+static_cast<std::uint32_t>(info.extension_count);
-    for (auto code=first_extension_code;code<expected_ext_end;++code)
-        required(code,"EXT"+std::to_string(code-first_extension_code+1));
+    save.extensions.reserve(static_cast<std::size_t>(info.extension_count));
+    for (auto code=first_extension_code;code<expected_ext_end;++code) {
+        const auto block=required(code,"EXT"+std::to_string(code-first_extension_code+1));
+        const auto* first=block.at(header_size,block.size()-header_size);
+        save.extensions.emplace_back(first,first+block.size()-header_size);
+    }
     // The PC writer excludes LOG from INFO.dataKosuu. Unknown blocks are kept
     // opaque, so let them contribute to the count without assuming a schema.
     const auto declared_min=8+info.extension_count+int(info.has_omake)+int(info.has_cutin);
@@ -448,50 +459,50 @@ Save parse_save(const std::vector<nnn::Byte>& bytes,std::string_view expected_he
     for (const auto& item:blocks) {
         const auto code=item.first;
         const auto& block=item.second;
-        if (code<8 || code==10) continue;
-        if (code>=expected_ext_end && code<=last_extension_code) invalid("undeclared extension block");
-        if (replacement_code && code==*replacement_code) {
-            constexpr std::size_t replacement_count=100, replacement_width=64;
-            if (block.view.size()!=header_size+replacement_count*replacement_width)
-                invalid("unsupported okikae layout");
-            save.replacements.reserve(replacement_count);
-            for (std::size_t i=0;i<replacement_count;++i)
-                save.replacements.push_back(block.view.text(header_size+i*replacement_width,replacement_width));
-        } else {
-            const auto size=block.view.size()-header_size;
-            const auto* payload=block.view.at(header_size,size);
-            save.unsupported_blocks.push_back({block.header,{payload,payload+size}});
+        if (code<=10) continue;
+        if (code>=first_extension_code && code<=last_extension_code) {
+            if (code>=expected_ext_end) invalid("undeclared extension block");
+            continue;
         }
+        const auto size=block.view.size()-header_size;
+        const auto* payload=block.view.at(header_size,size);
+        save.unsupported_blocks.push_back({block.header,{payload,payload+size}});
     }
     return save;
 }
 
 std::vector<nnn::Byte> write_save(const Save& save) {
-    if (!save.unsupported_blocks.empty() || save.info.has_cutin || save.info.has_omake)
+    if (!save.unsupported_blocks.empty())
         invalid("cannot write unresolved PC state");
     if (save.header.name.empty() || (save.vars.size()!=1024 && save.vars.size()!=2224) ||
-        (!save.replacements.empty() && save.replacements.size()!=100))
+        (save.layer_records!=classic_layer_count && save.layer_records!=layer_count) ||
+        (save.message_width!=legacy_message_width && save.message_width!=classic_message_width &&
+         save.message_width!=expanded_message_width) ||
+        !supported_status_size(save.status_bytes) || save.extensions.size()>max_extensions)
         invalid("invalid PC output layout");
+    for (std::size_t i=save.layer_records;i<layer_count;++i)
+        if (save.effects[i].flag || !save.filenames[i].empty()) invalid("active layer exceeds the PC output layout");
     const auto& thumb=save.thumbnail;
     if (thumb.width<=0 || thumb.height<=0 || thumb.width>4096 || thumb.height>4096 ||
         static_cast<std::uint64_t>(thumb.width)*static_cast<unsigned>(thumb.height)!=thumb.pixels.size() ||
         thumb.pixels.size()>max_thumbnail_pixels)
         invalid("invalid output thumbnail");
-    const bool extended=!save.replacements.empty();
+    const auto extensions=static_cast<int>(save.extensions.size());
     std::vector<nnn::Byte> bytes;
     OutputBlock header(bytes,32,0,save.header.name);
     OutputBlock info(bytes,64,1,"INFO");
-    info.words(32,std::array<int,6>{8+(extended?1:0),save.info.version,extended?1:0,0,0,save.log?1:0});
-    append_status(bytes,save.status,false);
+    const int omake=save.omake?1:0,cutin=save.cutin?1:0;
+    info.words(32,std::array<int,6>{8+extensions+omake+cutin,save.info.version,extensions,omake,cutin,save.log?1:0});
+    append_status(bytes,save.status,save.status_bytes==preview_status_bytes);
     OutputBlock image(bytes,48+thumb.pixels.size()*4,3,"MINICG");
     image.i32(32,thumb.width);image.i32(36,thumb.height);
     for (std::size_t i=0;i<thumb.pixels.size();++i) image.u32(48+i*4,thumb.pixels[i]);
     OutputBlock vars(bytes,header_size+save.vars.size()*4,4,"GAMEVAR");
     vars.words(header_size,save.vars);
-    OutputBlock effects(bytes,header_size+layer_count*1024,5,"EFFECT");
-    OutputBlock filenames(bytes,header_size+layer_count*256,6,"EFFECTFILENAME");
-    for (std::size_t i=0;i<layer_count;++i) {
-        const auto at=header_size+i*1024;
+    OutputBlock effects(bytes,header_size+save.layer_records*effect_size,5,"EFFECT");
+    OutputBlock filenames(bytes,header_size+save.layer_records*filename_size,6,"EFFECTFILENAME");
+    for (std::size_t i=0;i<save.layer_records;++i) {
+        const auto at=header_size+i*effect_size;
         const auto& effect=save.effects[i];
         effects.words(at,std::array<int,3>{effect.flag,effect.picture,effect.command});
         effects.rect(at+12,effect.src);effects.rect(at+28,effect.dst);
@@ -500,10 +511,20 @@ std::vector<nnn::Byte> write_save(const Save& save) {
         effects.i32(at+108,effect.count);effects.i32(at+112,effect.count_max);
         effects.words(at+116,effect.parameters);
         effects.i32(at+1012,effect.not_transparent?1:0);effects.i32(at+1016,effect.previous_effect);
-        filenames.text(header_size+i*256,256,save.filenames[i]);
+        effects.i32(at+1020,effect.padding);
+        filenames.text(header_size+i*filename_size,filename_size,save.filenames[i]);
     }
-    OutputBlock messages(bytes,header_size+message_limit*1024,7,"MESSAGE");
-    for (std::size_t i=0;i<message_limit;++i) messages.text(header_size+i*1024,1024,save.messages[i]);
+    OutputBlock messages(bytes,header_size+message_limit*save.message_width,7,"MESSAGE");
+    for (std::size_t i=0;i<message_limit;++i)
+        messages.text(header_size+i*save.message_width,save.message_width-1,save.messages[i]);
+    if (save.omake) {
+        OutputBlock block(bytes,header_size+save.omake->size()*4,8,"OMAKECLASS");
+        block.words(header_size,*save.omake);
+    }
+    if (save.cutin) {
+        OutputBlock block(bytes,header_size+save.cutin->size()*4,9,"CUTIN");
+        block.words(header_size,*save.cutin);
+    }
     if (save.log) {
         const auto& log=*save.log;
         const bool modern=log.layout==LogLayout::MultiVoice;
@@ -526,11 +547,34 @@ std::vector<nnn::Byte> write_save(const Save& save) {
                 backlog.text(voice_at+(i*voice_stride+channel)*16,16,line.voices[channel]);
         }
     }
-    if (extended) {
-        OutputBlock replacement(bytes,header_size+100*64,first_extension_code,"EXT1");
-        for (std::size_t i=0;i<save.replacements.size();++i) replacement.text(header_size+i*64,64,save.replacements[i]);
+    for (std::size_t i=0;i<save.extensions.size();++i) {
+        const auto& payload=save.extensions[i];
+        if (payload.size()>max_save_bytes-header_size) invalid("extension exceeds output capacity");
+        OutputBlock extension(bytes,header_size+payload.size(),first_extension_code+static_cast<std::uint32_t>(i),
+            "EXT"+std::to_string(i+1));
+        std::copy(payload.begin(),payload.end(),bytes.end()-static_cast<std::ptrdiff_t>(payload.size()));
     }
-    parse_save(bytes,save.header.name,extended?std::optional<std::uint32_t>{first_extension_code}:std::nullopt);
+    parse_save(bytes,save.header.name);
+    return bytes;
+}
+
+std::vector<std::string> read_okikae(const std::vector<nnn::Byte>& payload) {
+    if (payload.size()!=okikae_count*okikae_width) invalid("unsupported okikae layout");
+    const View view(payload.data(),payload.size());
+    std::vector<std::string> replacements;
+    replacements.reserve(okikae_count);
+    for (std::size_t i=0;i<okikae_count;++i) replacements.push_back(view.text(i*okikae_width,okikae_width));
+    return replacements;
+}
+
+std::vector<nnn::Byte> write_okikae(const std::vector<std::string>& replacements) {
+    if (replacements.size()!=okikae_count) invalid("invalid okikae count");
+    std::vector<nnn::Byte> bytes(okikae_count*okikae_width);
+    for (std::size_t i=0;i<replacements.size();++i) {
+        const auto& text=replacements[i];
+        if (text.size()>=okikae_width || text.find('\0')!=std::string::npos) invalid("invalid okikae text");
+        std::copy(text.begin(),text.end(),bytes.data()+i*okikae_width);
+    }
     return bytes;
 }
 

@@ -10,6 +10,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstring>
+#include <deque>
 #include <mutex>
 #include <stdexcept>
 #include <utility>
@@ -30,6 +31,7 @@ struct StoryScreenLayer {
 };
 using PublishedScreenLayer=std::shared_ptr<StoryScreenLayer>;
 struct Player {
+    std::deque<std::string> script_debug_messages;
     std::unique_ptr<GameSession> game;
     SurfaceRef surface;
     unsigned width=0,height=0;
@@ -57,6 +59,22 @@ jbyteArray bytes(JNIEnv* env,std::string_view value) {
 void array_text(JNIEnv* env,jobjectArray result,jsize index,const std::string& value) {
     auto encoded=bytes(env,value);
     if (encoded) { env->SetObjectArrayElement(result,index,encoded); env->DeleteLocalRef(encoded); }
+}
+jobjectArray status_overlay_rows(JNIEnv* env,const emberfall::scene::ScriptModal& overlay,bool include_mode) {
+    auto out=env->NewObjectArray(static_cast<jsize>(1+2*overlay.rows.size()),env->FindClass("[B"),nullptr);
+    if (!out) return nullptr;
+    nnn::snapshot::Writer info;
+    if (include_mode) info(static_cast<nnn::Value>(overlay.mode));
+    info(overlay.group,overlay.selection);
+    for (const auto& row:overlay.rows) info(row.id,row.flags);
+    array_text(env,out,0,std::string(info.bytes.begin(),info.bytes.end()));
+    jsize index=1;
+    for (const auto& row:overlay.rows) {
+        if (env->ExceptionCheck()) return nullptr;
+        array_text(env,out,index++,row.label);
+        array_text(env,out,index++,row.detail);
+    }
+    return out;
 }
 jintArray int_array(JNIEnv* env,const std::vector<int>& values) {
     const auto size=static_cast<jsize>(values.size());
@@ -178,8 +196,13 @@ emberfall::scene::Wait step_title(Player& p) {
 #define FN(name) Java_com_tyranor_runtime_systemnnn_NativeGame_##name
 
 namespace {
-using RuntimeRef=std::shared_ptr<nnn::RuntimeContext>;
-jlong open_game(JNIEnv* env,jbyteArray path,jint rate,emberfall::scene::SessionOptions options={}) {
+using RuntimeRef=GameSession::RuntimeRef;
+void apply_runtime(emberfall::scene::SessionOptions& options,jlong token) {
+    const auto& ref=*reinterpret_cast<const RuntimeRef*>(token);
+    options.runtime=ref.runtime;
+    options.save_layout=ref.save_layout;
+}
+jlong open_game(JNIEnv* env,jbyteArray path,jint rate,emberfall::scene::SessionOptions options={},bool debug_mode=false) {
         if (!path) throw std::invalid_argument("Missing game directory");
         const auto size=env->GetArrayLength(path);
         if (size<=0 || size>32768) throw std::runtime_error("Invalid game directory");
@@ -190,6 +213,11 @@ jlong open_game(JNIEnv* env,jbyteArray path,jint rate,emberfall::scene::SessionO
         options.queue_audio_events=false;
         options.filename_encoder=emberfall::android::filename_encoder(env);
         auto p=std::make_unique<Player>();
+        if (debug_mode) options.script_debug_output=[owner=p.get()](std::string_view message) {
+            auto& messages=owner->script_debug_messages;
+            if (messages.size()==20) messages.pop_front();
+            messages.emplace_back(message.substr(0,254));
+        };
         p->game=std::make_unique<GameSession>(std::filesystem::u8path(root),options);
         const auto& surface=p->game->surface();
         p->width=surface.width; p->height=surface.height;
@@ -204,8 +232,17 @@ API jlong JNICALL FN(openWithRuntime)(JNIEnv* env,jclass,jbyteArray path,jint ra
     try {
         if (!token) throw std::invalid_argument("Missing runtime context");
         emberfall::scene::SessionOptions options;
-        options.runtime=*reinterpret_cast<const RuntimeRef*>(token);
+        apply_runtime(options,token);
         return open_game(env,path,rate,std::move(options));
+    } catch (const std::exception& e) { fail(env,e.what()); return 0; }
+}
+API jlong JNICALL FN(openWithOptions)(JNIEnv* env,jclass,jbyteArray path,jint rate,jlong token,
+                                     jboolean analyze_executable,jboolean debug_mode) {
+    try {
+        emberfall::scene::SessionOptions options;
+        if (token) apply_runtime(options,token);
+        options.analyze_executable=analyze_executable==JNI_TRUE;
+        return open_game(env,path,rate,std::move(options),debug_mode==JNI_TRUE);
     } catch (const std::exception& e) { fail(env,e.what()); return 0; }
 }
 API jlong JNICALL FN(openReplay)(JNIEnv* env,jclass,jbyteArray path,jint rate,jlong token,
@@ -221,7 +258,7 @@ API jlong JNICALL FN(openReplay)(JNIEnv* env,jclass,jbyteArray path,jint rate,jl
         options.entry=resource_name(env,script);
         if (!nnn::resource::valid_component(options.entry))
             throw std::invalid_argument("Invalid replay script name");
-        options.runtime=*reinterpret_cast<const RuntimeRef*>(token);
+        apply_runtime(options,token);
         options.replay_hidden_layers=static_cast<std::uint32_t>(hidden_layers);
         for (jint film:raw) {
             if (film<0) throw std::invalid_argument("Invalid replay film number");
@@ -231,7 +268,7 @@ API jlong JNICALL FN(openReplay)(JNIEnv* env,jclass,jbyteArray path,jint rate,jl
     } catch (const std::exception& e) { fail(env,e.what()); return 0; }
 }
 API jlong JNICALL FN(retainContext)(JNIEnv* env,jclass,jlong handle) {
-    try { return reinterpret_cast<jlong>(new RuntimeRef(player(handle).game->runtime())); }
+    try { return reinterpret_cast<jlong>(new RuntimeRef(player(handle).game->runtime_ref())); }
     catch (const std::exception& e) { fail(env,e.what()); return 0; }
 }
 API jlong JNICALL FN(cloneContext)(JNIEnv* env,jclass,jlong token) {
@@ -243,7 +280,8 @@ API jlong JNICALL FN(cloneContext)(JNIEnv* env,jclass,jlong token) {
 API jlong JNICALL FN(forkContext)(JNIEnv* env,jclass,jlong token) {
     try {
         if (!token) throw std::invalid_argument("Missing runtime context");
-        return reinterpret_cast<jlong>(new RuntimeRef((*reinterpret_cast<const RuntimeRef*>(token))->fork()));
+        const auto& ref=*reinterpret_cast<const RuntimeRef*>(token);
+        return reinterpret_cast<jlong>(new RuntimeRef{ref.runtime->fork(),ref.save_layout});
     } catch (const std::exception& e) { fail(env,e.what()); return 0; }
 }
 API void JNICALL FN(releaseContext)(JNIEnv*,jclass,jlong token) {
@@ -448,12 +486,76 @@ API jobjectArray JNICALL FN(content)(JNIEnv* env,jclass,jlong handle) {
     for (std::size_t i=0;i<count && !env->ExceptionCheck();++i) set(static_cast<int>(i+2),f.selection->options[i]);
     return result;
 }
+API jobjectArray JNICALL FN(dialogueVisuals)(JNIEnv* env,jclass,jlong handle) {
+    try {
+        const auto visuals=player(handle).game->dialogue_visuals();
+        if (!visuals.cutin && visuals.portraits.empty()) return nullptr;
+        const auto portrait_count=static_cast<jsize>(visuals.portraits.size());
+        const auto row_count=static_cast<jsize>(visuals.rows.size());
+        auto out=env->NewObjectArray(1+portrait_count+row_count,env->FindClass("[B"),nullptr);
+        if (!out) return nullptr;
+        nnn::snapshot::Writer info;
+        info(visuals.portrait_depth,visuals.cutin?1:0,portrait_count,row_count);
+        jsize index=1;
+        for (const auto& sprite:visuals.portraits) {
+            info(sprite.x,sprite.y,sprite.width,sprite.height,sprite.animation_type,sprite.frames,
+                 sprite.speed,sprite.wait_min,sprite.wait_max);
+            array_text(env,out,index++,sprite.image);
+            if (env->ExceptionCheck()) return nullptr;
+        }
+        for (const auto& row:visuals.rows) {
+            info(row.positioned?1:0,row.x,row.y,row.font_delta,row.window_type,row.window_x,row.window_y,
+                 row.pad_x,row.pad_y,row.step_x,row.step_y,row.window_rows,row.window_color);
+            array_text(env,out,index++,row.window_image);
+            if (env->ExceptionCheck()) return nullptr;
+        }
+        array_text(env,out,0,std::string(info.bytes.begin(),info.bytes.end()));
+        return out;
+    } catch (const std::exception& e) { fail(env,e.what()); return nullptr; }
+}
 API void JNICALL FN(frameInfo)(JNIEnv* env,jclass,jlong handle,jintArray meta) {
     if (!meta || env->GetArrayLength(meta)<7) {fail(env,"Missing frame metadata");return;}
     frame_meta(env,player(handle),meta);
 }
 API jint JNICALL FN(runtimeMode)(JNIEnv*,jclass,jlong handle) {
     return player(handle).game->mode();
+}
+API jobjectArray JNICALL FN(debugSnapshot)(JNIEnv* env,jclass,jlong handle) {
+    try {
+        auto& p=player(handle);
+        const auto& game=*p.game;
+        const auto& state=game.state();
+        const auto layout=game.pc_save_layout();
+        const auto playback=game.audio().state();
+        const auto active=[](const auto& tracks) {
+            return static_cast<int>(std::count_if(tracks.begin(),tracks.end(),[](const auto& track){return track.active;}));
+        };
+        const auto& layers=game.layers();
+        const auto active_layers=std::count_if(layers.begin(),layers.end(),[](const auto& layer){return layer.enabled;});
+        auto result=env->NewObjectArray(4,env->FindClass("java/lang/Object"),nullptr);
+        if (!result) return nullptr;
+        auto values=int_array(env,{static_cast<int>(state.wait),static_cast<int>(state.word),game.mode(),
+            static_cast<int>(p.width),static_cast<int>(p.height),static_cast<int>(active_layers),
+            static_cast<int>(layout.render_layers),static_cast<int>(layout.layer_limit),
+            static_cast<int>(layout.layer_records),static_cast<int>(layout.source),static_cast<int>(layout.message_width),
+            static_cast<int>(layout.loaded_message_width),active(playback.voices),active(playback.sounds),
+            static_cast<int>(game.warnings().size()),static_cast<int>(game.frame_ms())});
+        if (!values) return nullptr;
+        env->SetObjectArrayElement(result,0,values);
+        array_text(env,result,1,state.script);
+        if (!env->ExceptionCheck()) array_text(env,result,2,playback.bgm.active ? playback.bgm.name : std::string{});
+        if (!p.script_debug_messages.empty() && !env->ExceptionCheck()) {
+            const auto count=static_cast<jsize>(p.script_debug_messages.size());
+            auto messages=env->NewObjectArray(count,env->FindClass("[B"),nullptr);
+            if (!messages) return nullptr;
+            for (jsize i=0;i<count && !env->ExceptionCheck();++i)
+                array_text(env,messages,i,p.script_debug_messages[static_cast<std::size_t>(i)]);
+            if (env->ExceptionCheck()) return nullptr;
+            env->SetObjectArrayElement(result,3,messages);
+            if (!env->ExceptionCheck()) p.script_debug_messages.clear();
+        }
+        return result;
+    } catch (const std::exception& e) { fail(env,e.what()); return nullptr; }
 }
 API jlong JNICALL FN(systemMenuModes)(JNIEnv* env,jclass,jlong handle,jlong requested) {
     try {
@@ -558,25 +660,32 @@ API void JNICALL FN(setChartStorage)(JNIEnv* env,jclass,jlong handle,jbyteArray 
         player(handle).game->set_chart_storage(directory);
     } catch (const std::exception& e) { fail(env,e.what()); }
 }
-API jobjectArray JNICALL FN(statusOverlay)(JNIEnv* env,jclass,jlong handle,jint type,jint mode) {
-    if ((type!=38 && type!=49) || mode<1 || mode>49) return nullptr;
+API jobjectArray JNICALL FN(statusOverlays)(JNIEnv* env,jclass,jlong handle,jint mode) {
+    if (mode<1 || mode>49) return nullptr;
     try {
         auto& p=player(handle);
-        const auto value=p.game->status_overlay(static_cast<nnn::RuntimeMode>(type),static_cast<nnn::RuntimeMode>(mode),p.title);
-        if (!value) return nullptr;
-        auto out=env->NewObjectArray(static_cast<jsize>(1+2*value->rows.size()),env->FindClass("[B"),nullptr);
+        const auto overlays=p.game->status_overlays(static_cast<nnn::RuntimeMode>(mode),p.title);
+        auto out=env->NewObjectArray(static_cast<jsize>(overlays.size()),env->FindClass("[[B"),nullptr);
         if (!out) return nullptr;
-        nnn::snapshot::Writer info;
-        info(value->group,value->selection);
-        for (const auto& row:value->rows) info(row.id,row.flags);
-        array_text(env,out,0,std::string(info.bytes.begin(),info.bytes.end()));
-        jsize index=1;
-        for (const auto& row:value->rows) {
-            if (env->ExceptionCheck()) break;
-            array_text(env,out,index++,row.label);
-            array_text(env,out,index++,row.detail);
+        jsize layer=0;
+        for (const auto& overlay:overlays) {
+            auto data=status_overlay_rows(env,overlay,true);
+            if (!data) return nullptr;
+            env->SetObjectArrayElement(out,layer++,data);
+            env->DeleteLocalRef(data);
+            if (env->ExceptionCheck()) return nullptr;
         }
         return out;
+    } catch (const std::exception& e) { fail(env,e.what());return nullptr; }
+}
+API jobjectArray JNICALL FN(statusOverlay)(JNIEnv* env,jclass,jlong handle,jint type,jint mode) {
+    const auto kind=static_cast<nnn::RuntimeMode>(type);
+    if ((kind!=nnn::RuntimeMode::PrintStatus && kind!=nnn::RuntimeMode::PrintParty) || mode<1 || mode>49)
+        return nullptr;
+    try {
+        auto& p=player(handle);
+        const auto overlay=p.game->status_overlay(kind,static_cast<nnn::RuntimeMode>(mode),p.title);
+        return overlay ? status_overlay_rows(env,*overlay,false) : nullptr;
     } catch (const std::exception& e) { fail(env,e.what());return nullptr; }
 }
 API jint JNICALL FN(actModal)(JNIEnv* env,jclass,jlong handle,jint request,jint action,jint value) {
@@ -656,6 +765,55 @@ API void JNICALL FN(restorePcSave)(JNIEnv* env,jclass,jlong handle,jbyteArray ra
         p.repaint=true;
         present(p);
     } catch (const std::exception& e) { fail(env,e.what()); }
+}
+API jint JNICALL FN(detectPcSystemSaveVersion)(JNIEnv* env,jclass,jbyteArray path) {
+    try {
+        const auto root=resource_name(env,path);
+        if (env->ExceptionCheck() || root.empty() || root.find('\0')!=std::string::npos) return 0;
+        return GameSession::detect_pc_system_save_version(std::filesystem::u8path(root));
+    } catch (const std::exception&) { return 0; }
+}
+API jintArray JNICALL FN(pcSystemSaveVersions)(JNIEnv* env,jclass,jbyteArray path,jboolean analyze_executable) {
+    try {
+        const auto root=resource_name(env,path);
+        if (env->ExceptionCheck() || root.empty() || root.find('\0')!=std::string::npos) return nullptr;
+        const auto versions=GameSession::pc_system_save_versions(std::filesystem::u8path(root),analyze_executable==JNI_TRUE);
+        return int_array(env,{versions[0],versions[1]});
+    } catch (const std::exception&) { return nullptr; }
+}
+API jintArray JNICALL FN(pcSystemSaveFormat)(JNIEnv* env,jclass,jbyteArray path,jboolean analyze_executable) {
+    try {
+        const auto root=resource_name(env,path);
+        if (env->ExceptionCheck() || root.empty() || root.find('\0')!=std::string::npos) return nullptr;
+        const auto format=GameSession::pc_system_save_format(std::filesystem::u8path(root),analyze_executable==JNI_TRUE);
+        return int_array(env,{format[0],format[1]});
+    } catch (const std::exception& e) { fail(env,e.what());return nullptr; }
+}
+API jintArray JNICALL FN(currentPcSystemSaveFormat)(JNIEnv* env,jclass,jlong handle) {
+    try {
+        if (!handle) return nullptr;
+        const auto format=player(handle).game->pc_system_save_format();
+        return int_array(env,{format[0],format[1]});
+    } catch (const std::exception& e) { fail(env,e.what());return nullptr; }
+}
+API jobjectArray JNICALL FN(saveLayoutConfig)(JNIEnv* env,jclass,jbyteArray path,jboolean regenerate) {
+    try {
+        const auto root=resource_name(env,path);
+        if (env->ExceptionCheck() || root.empty() || root.find('\0')!=std::string::npos) return nullptr;
+        const auto config=GameSession::pc_save_configuration(std::filesystem::u8path(root),regenerate==JNI_TRUE);
+        if (!config) return nullptr;
+        const auto type=env->FindClass("java/lang/Object");
+        if (!type) return nullptr;
+        auto result=env->NewObjectArray(2,type,nullptr);
+        if (!result) return nullptr;
+        array_text(env,result,0,config->file.u8string());
+        if (env->ExceptionCheck()) return nullptr;
+        auto fields=int_array(env,{static_cast<int>(config->layer_records),static_cast<int>(config->message_width),
+            static_cast<int>(config->status_bytes),config->system_save_version,config->executable_layout,config->okikae,
+            config->system_save_source});
+        if (fields) env->SetObjectArrayElement(result,1,fields);
+        return result;
+    } catch (const std::exception& e) { fail(env,e.what());return nullptr; }
 }
 API jbyteArray JNICALL FN(exportPcSave)(JNIEnv* env,jclass,jlong handle,jintArray picture,jint width,jint height) {
     try {
@@ -1018,10 +1176,6 @@ API void JNICALL FN(restartLoopScriptAudio)(JNIEnv* env,jclass,jlong handle) {
     try { player(handle).game->audio().restart_loop_script_audio(); }
     catch (const std::exception& e) { fail(env,e.what()); }
 }
-API void JNICALL FN(restartReplayedMusic)(JNIEnv* env,jclass,jlong handle) {
-    try { player(handle).game->audio().restart_replayed_music(); }
-    catch (const std::exception& e) { fail(env,e.what()); }
-}
 API void JNICALL FN(stopScriptAudio)(JNIEnv* env,jclass,jlong handle) {
     try { player(handle).game->audio().stop_script_audio(); }
     catch (const std::exception& e) { fail(env,e.what()); }
@@ -1322,7 +1476,8 @@ API void JNICALL FN(restoreReadState)(JNIEnv* env,jclass,jlong handle,jintArray 
     try {
         if (!raw) throw std::invalid_argument("Missing read state");
         const auto count=env->GetArrayLength(raw);
-        if (count>100000) throw std::invalid_argument("Read state exceeds limit");
+        if (static_cast<std::size_t>(count)>nnn::RuntimeContext::max_read_messages)
+            throw std::invalid_argument("Read state exceeds limit");
         std::vector<jint> values(static_cast<std::size_t>(count));
         if (count) env->GetIntArrayRegion(raw,0,count,values.data());
         if (env->ExceptionCheck()) return;

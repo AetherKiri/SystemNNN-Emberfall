@@ -200,7 +200,7 @@ void ScriptScheduler::load_snapshot(snapshot::Reader& in,const ScriptScheduler* 
 
 bool ScriptScheduler::pc_adjustment_ids() const noexcept {
     Word header_size=0;
-    return slots_[0]->GetData(0,header_size) && header_size>=32;
+    return slots_[0]->GetData(0,header_size) && header_size==detail::adjustment_header_words;
 }
 
 Status ScriptScheduler::capture_pc_positions(std::array<PcScriptSlot,script_mode_count>& positions,
@@ -245,6 +245,7 @@ std::optional<SavedDialogue> CExecScript::saved_dialogue() const {
     if (!record || !is_dialogue(*record)) return {};
     const auto& words=program_->words;
     SavedDialogue result{record->pc,record->code,words[record->pc+4],words[record->pc+3],{}};
+    if (record->length>5) result.cutin=detail::value_from_word(words[record->pc+5]);
     return GetMessage(result.table_index,result.text) ? std::optional<SavedDialogue>(std::move(result)) : std::nullopt;
 }
 std::optional<SavedUserCommand> CExecScript::saved_user_command() const noexcept {
@@ -256,7 +257,12 @@ std::optional<SavedUserCommand> CExecScript::saved_user_command() const noexcept
 std::optional<Word> CExecScript::saved_selection_id() const {
     if (!program_ || !selection_) return {};
     const auto* previous=before_instruction(*program_,pc_);
-    if (!previous || previous->code!=detail::command_select) return {};
+    if (!previous || previous->identify!=detail::identify_systemcommand || previous->code!=detail::command_select) return {};
+    if (program_->words.front()==detail::legacy_header_words) {
+        const auto offset=4U+selection_->options.size()+selection_->messages.size();
+        if (offset>=previous->length) return {};
+        return program_->words[previous->pc+offset];
+    }
     const auto& table=program_->adjustments[1];
     const auto position=std::find(table.begin(),table.end(),previous->pc);
     return position==table.end() ? std::nullopt : std::optional<Word>{static_cast<Word>(position-table.begin())};
@@ -280,6 +286,9 @@ Status ScriptScheduler::restore_pc_positions(ScriptMode active,const std::array<
         auto loaded=vm->LoadFile(path,parameters_,reader_,registry,ScriptControlProfile::Foreground);
         if (!loaded) return loaded;
         const auto& program=*vm->program_;
+        const bool legacy=program.words.front()==detail::legacy_header_words;
+        if (legacy && (adjustment_ids || relocate))
+            return invalid(saved.pc,"Legacy PC save requires the matching script version and raw positions");
         const auto* command=command_adjustment(program,saved.command_call);
         if (command) vm->command_call_slot_=saved.command_call;
         vm->pc_=saved.pc;
@@ -287,8 +296,8 @@ Status ScriptScheduler::restore_pc_positions(ScriptMode active,const std::array<
             const auto* transfer=script_call(program,saved,adjustment_ids);
             if (!transfer) return invalid(saved.pc,"Invalid PC save SCRIPT call slot");
             vm->pc_=transfer->pc+transfer->length;
-            vm->script_call_slot_=program.words[transfer->pc+4];
-            vm->script_call_slot_valid_=true;
+            vm->script_call_slot_valid_=transfer->length==5;
+            if (vm->script_call_slot_valid_) vm->script_call_slot_=program.words[transfer->pc+4];
         } else {
             if (wait==PcScriptWait::Command && adjustment_ids) {
                 if (!command) return invalid(saved.pc,"Invalid PC save command adjustment");
@@ -309,8 +318,12 @@ Status ScriptScheduler::restore_pc_positions(ScriptMode active,const std::array<
                 const auto dialogue=vm->saved_dialogue();
                 if (!dialogue || dialogue->id!=wait_id) return invalid(vm->pc_,"PC save does not match the script's message");
             } else if (wait==PcScriptWait::Selection) {
-                const auto* selection=adjustment(program,1,wait_id);
-                if (!selection || selection->pc+selection->length!=vm->pc_ || !vm->rebuild_selection())
+                if (!legacy) {
+                    const auto* selection=adjustment(program,1,wait_id);
+                    if (!selection || selection->pc+selection->length!=vm->pc_)
+                        return invalid(vm->pc_,"PC save does not match the script's selection ID");
+                }
+                if (!vm->rebuild_selection())
                     return invalid(vm->pc_,"PC save does not match the script's selection");
             }
         }

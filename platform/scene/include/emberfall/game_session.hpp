@@ -1,5 +1,7 @@
 #pragma once
 
+#include "emberfall/dialogue_visuals.hpp"
+
 #include "emberfall/chart_view.hpp"
 
 #include "emberfall/layers.hpp"
@@ -14,6 +16,7 @@
 #include <string_view>
 
 namespace emberfall::scene {
+namespace pc { struct DirectorySaveLayout; }
 
 enum class Wait { Running, Draw, Overlap, Dialogue, Choice, Ended, Error, Movie, Place, Modal };
 enum class EndReason { None, End, Next, Exit, ReplayComplete };
@@ -108,6 +111,9 @@ struct SessionOptions {
     std::optional<std::uint32_t> random_seed; // Omitted: PC initRandomSeed policy.
     std::function<ScriptClockSample()> local_clock;
     nnn::resource::FilenameEncoder filename_encoder;
+    bool analyze_executable=true; // Probe the PC save layout if this game has no valid cached layout.
+    std::function<void(std::string_view)> script_debug_output;
+    std::shared_ptr<const pc::DirectorySaveLayout> save_layout; // Reused by sessions in the same player run.
 };
 struct SessionStats {
     std::size_t cache_hits=0, decodes=0, evictions=0, cached_bytes=0, packed_reads=0, loose_reads=0;
@@ -117,6 +123,10 @@ struct ScriptRestrictions { int auto_message=0, cannot_click=0, cannot_skip=0, o
 
 class GameSession {
 public:
+    struct RuntimeRef {
+        std::shared_ptr<nnn::RuntimeContext> runtime;
+        std::shared_ptr<const pc::DirectorySaveLayout> save_layout;
+    };
     explicit GameSession(const std::filesystem::path& game_root, SessionOptions options={});
     // Decorative peers share an asset cache. Their caller must serialize access to it.
     static std::unique_ptr<GameSession> create_ui_preview(const std::filesystem::path& game_root,
@@ -136,6 +146,8 @@ public:
     bool open_modal(nnn::RuntimeMode mode,nnn::RuntimeMode back_mode,bool from_title=false);
     bool menu_extension_enabled(nnn::RuntimeMode mode) const;
     std::optional<ScriptModal> status_overlay(nnn::RuntimeMode type,nnn::RuntimeMode mode,bool prefer_story=false);
+    std::vector<ScriptModal> status_overlays(nnn::RuntimeMode mode,bool prefer_story=false);
+    DialogueVisuals dialogue_visuals() const;
     void set_chart_storage(const std::filesystem::path& private_root);
     // A preparation failure returns -1 for a stale request, 0 to resume the script, or its external caller mode.
     int abort_modal(int request,const std::string& reason,unsigned elapsed_frames=0);
@@ -218,6 +230,29 @@ public:
     static void inspect_snapshot(nnn::snapshot::Reader& in,const std::function<bool(const FrameState&)>& verify={});
     // Import uses a staged owner and commits only a fully validated PC slot.
     void restore_pc_save(const std::vector<nnn::Byte>& bytes);
+    struct PcSaveLayout {
+        enum class Source { GameFiles=0, Executable=2 }; // Values used by Android debug metadata.
+        unsigned render_layers=0, layer_limit=0, layer_records=0;
+        std::size_t message_width=0, loaded_message_width=0; // The loaded width is diagnostic only.
+        Source source=Source::GameFiles;
+    };
+    PcSaveLayout pc_save_layout() const;
+    static int detect_pc_system_save_version(const std::filesystem::path& root);
+    // Game-file default and optional EXE version, in that order.
+    static std::array<int,2> pc_system_save_versions(const std::filesystem::path& root,bool analyze_executable);
+    // Resolved archive version and the trial-edition flag.
+    static std::array<int,2> pc_system_save_format(const std::filesystem::path& root,bool analyze_executable);
+    std::array<int,2> pc_system_save_format() const;
+    RuntimeRef runtime_ref() const;
+    struct PcSaveConfiguration {
+        std::filesystem::path file;
+        unsigned layer_records=0;
+        std::size_t message_width=0, status_bytes=0;
+        int system_save_version=0, system_save_source=0;
+        bool executable_layout=false, okikae=false;
+    };
+    // Inspection is read-only. Regeneration always analyzes the EXE before applying fallbacks.
+    static std::optional<PcSaveConfiguration> pc_save_configuration(const std::filesystem::path& root,bool regenerate);
     struct PcSavePreview {
         std::array<int,7> time{};
         int artwork=0, width=0, height=0;

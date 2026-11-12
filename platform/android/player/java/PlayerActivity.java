@@ -454,12 +454,14 @@ public final class PlayerActivity extends Activity implements GameRunner.Listene
             modeUnderPanel=null;
             boolean changed=refreshAfterLoad || currentFrame==null || currentFrame.wait!=frame.wait || currentFrame.line!=frame.line ||
                 currentFrame.word!=frame.word || !currentFrame.script.equals(frame.script) ||
-                !currentFrame.body.equals(frame.body) || !currentFrame.speaker.equals(frame.speaker) || currentFrame.nameWindow!=frame.nameWindow;
+                !currentFrame.body.equals(frame.body) || !currentFrame.speaker.equals(frame.speaker) ||
+                currentFrame.nameWindow!=frame.nameWindow || currentFrame.decorations!=frame.decorations;
             currentFrame=drawnStoryFrame=frame;
             if(slotPreview!=null&&slotPreview.frame!=frame)slotPreview=null;
             dialoguePanel.scriptCursorVariant(frame.scriptCursor);
             dialoguePanel.storyBody(frame.hasDialogueText());
             dialoguePanel.passive(frame.wait==NativeGame.DRAW);
+            dialoguePanel.decorations(frame.decorations,frame.frameMs,refreshAfterLoad);
             selectDialogueVariant();
             if (changed) {
                 refreshAfterLoad=false;
@@ -645,7 +647,7 @@ public final class PlayerActivity extends Activity implements GameRunner.Listene
         }
     }
     private void syncIndependentStatus(){
-        if(runner==null||uiAssets==null||!uiAssets.freeStatus||stage==null)return;
+        if(runner==null||uiAssets==null||!uiAssets.statusOverlays||stage==null)return;
         int mode=visiblePrintMode();
         if(mode!=independentMode){
             independentMode=mode;
@@ -671,20 +673,25 @@ public final class PlayerActivity extends Activity implements GameRunner.Listene
         runOnUiThread(()->{
             if(stage==null||uiAssets==null||mode!=independentMode||isDestroyed()||isFinishing())return;
             if(independentStatus==null){
-                if(overlays[0]==null&&overlays[1]==null)return;
+                if(overlays.length==0)return;
                 independentStatus=new FrameLayout(this);
                 independentStatus.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
             }
-            for(int i=0;i<overlays.length;i++){
-                GameStatusPartyPanel part=independentParts[i];
-                if(overlays[i]==null){
-                    if(part!=null)independentStatus.removeView(part);
-                    independentParts[i]=null;
-                }else if(part==null){
-                    part=new GameStatusPartyPanel(this,uiAssets,overlays[i],width,height);
-                    independentParts[i]=part;
-                    independentStatus.addView(part,i==1?independentStatus.getChildCount():0,new FrameLayout.LayoutParams(-1,-1));
-                }else {part.canvas(width,height);part.update(overlays[i]);}
+            int used=0;
+            for(GameRunner.Modal overlay:overlays){
+                int index=overlay.mode==GameRunner.Modal.PRINT_PARTY?1:0;
+                used|=1<<index;
+                GameStatusPartyPanel part=independentParts[index];
+                if(part==null){
+                    part=new GameStatusPartyPanel(this,uiAssets,overlay,width,height);
+                    independentParts[index]=part;
+                    independentStatus.addView(part,new FrameLayout.LayoutParams(-1,-1));
+                }else {part.canvas(width,height);part.update(overlay);}
+                independentStatus.bringChildToFront(part);
+            }
+            for(int i=0;i<independentParts.length;i++)if((used&(1<<i))==0&&independentParts[i]!=null){
+                independentStatus.removeView(independentParts[i]);
+                independentParts[i]=null;
             }
             independentStatus.setVisibility(independentStatus.getChildCount()==0?View.GONE:View.VISIBLE);
             placeIndependentStatus();

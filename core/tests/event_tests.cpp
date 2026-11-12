@@ -23,6 +23,7 @@ constexpr Word end_code=0x55560005U,print_code=0x22220001U,draw_code=0x22220004U
 constexpr Word story_code=0x33330051U,film_code=0x33330050U,load_code=0x33330015U,preload_code=0x3333001fU;
 constexpr Word effect_code=0x33330013U,rect_code=0x33330016U,clear_layer_code=0x33330014U,clear_all_code=0x33330012U;
 constexpr Word koma_code=0x3333001cU,message_code=0x3333001bU;
+constexpr Word debug_code=0x33330042U;
 
 void require(bool condition,const std::string& text) {if(!condition)throw std::runtime_error(text);}
 void status_is(const nnn::Status& actual,ErrorCode expected,const std::string& context) {
@@ -131,6 +132,22 @@ struct Suite{int passed=0,failed=0;void test(const std::string& name,const std::
 
 int main(){
     Suite suite;
+    suite.test("DEBUG dispatches a message table entry without yielding",[]{
+        Model m;m.messages={"Story",std::string("\x82\xa0",2)};m.strings={"wrong table"};
+        const auto debug=m.code.add({4,system_function,debug_code,1});
+        const auto dialogue=m.code.print();m.code.end();
+        Callback cb;nnn::CExecScript vm(cb);cb.vm=&vm;load(vm,m);exec(vm,print_code);
+        require(cb.retained_text==std::vector<std::string>{m.messages[1],m.messages[0]},"DEBUG selected the wrong message");
+        require(cb.states.size()==2&&cb.states[0].pc==debug&&cb.states[1].pc==dialogue,"DEBUG changed script position");
+        require(cb.events.front().find("\"para1\":1,")!=std::string::npos&&cb.skipped.empty(),"DEBUG used the wrong callback");
+        exec(vm,end_code);
+    });
+    suite.test("DEBUG requires a valid message table index",[]{
+        Model missing;missing.code.add({3,system_function,debug_code});missing.code.end();
+        reject(program_words(missing));
+        Model outside;outside.code.add({4,system_function,debug_code,UINT32_MAX});outside.code.end();
+        reject(program_words(outside));
+    });
     suite.test("additive API and old error ordinal contract",[]{
         require(nnn::max_numeric_event_parameters==258U,"numeric bound");
         require(static_cast<int>(ErrorCode::Busy)==10&&static_cast<int>(ErrorCode::CallStackUnderflow)==11&&static_cast<int>(ErrorCode::CallStackOverflow)==12&&static_cast<int>(ErrorCode::HostRejected)==13,"error ordinal changed");

@@ -71,12 +71,12 @@ Point window_origin(const Surface& out,const Layer& layer,const Texture& texture
                 static_cast<std::int64_t>(texture.canvas_height)-out.height))};
 }
 void normal_picture(Surface& out,const Texture& t,Rect src,Rect dst,bool alpha);
-void ordinary(Surface& out,const Layer& layer,unsigned slot) {
+void ordinary(Surface& out,const Layer& layer,bool background) {
     if (!layer.texture) return;
     Rect src=layer.source,dst=destination(layer);
     src.width=std::min(src.width,dst.width);src.height=std::min(src.height,dst.height);
     dst.width=src.width;dst.height=src.height;
-    normal_picture(out,*layer.texture,src,dst,slot>=4 && slot!=30 && !layer.opaque);
+    normal_picture(out,*layer.texture,src,dst,!background && !layer.opaque);
 }
 void screen_grey(Surface& out,int weight,const std::array<int,3>* sepia) {
     for (std::size_t i=0;i<out.rgb.size();i+=3) {
@@ -457,11 +457,11 @@ void sentence(Surface& out,const Layer& layer) {
     default:break;
     }
 }
-void once(Surface& out,const Layer& layer,unsigned slot) {
+void once(Surface& out,const Layer& layer,bool background) {
     const auto count=static_cast<std::int64_t>(layer.count);
     const auto begin=static_cast<std::int64_t>(value(layer,1));
     if (!layer.effect_state->once_drawn || (count>=begin && count<begin+value(layer,2)))
-        ordinary(out,layer,slot);
+        ordinary(out,layer,background);
     layer.effect_state->once_drawn=true;
 }
 void full_animation(Surface& out,const Layer& layer,const AnimationTexture& animation) {
@@ -493,7 +493,7 @@ void blend_animation_frames(Surface& out,const Texture& first,Point a_pos,const 
                 ((out.rgb[at+c]*remaining)>>14)));
     }
 }
-void external_animation(Surface& out,const Layer& layer,unsigned slot,
+void external_animation(Surface& out,const Layer& layer,bool background,
                         const AnimationTexture& animation,bool off) {
     if (!animation) return;
     const auto image=[&](int frame) { return animation("bg/bganime"+std::to_string(frame)); };
@@ -514,7 +514,7 @@ void external_animation(Surface& out,const Layer& layer,unsigned slot,
             return;
         }
     }
-    normal_picture(out,*texture,src,dst,slot>=4 && slot!=30 && !layer.opaque);
+    normal_picture(out,*texture,src,dst,!background && !layer.opaque);
 }
 void turn_new(Surface& out,const Layer& l) {
     if (!l.texture || !l.texture->has_mask) return;
@@ -1101,7 +1101,7 @@ void ellipse_overlay(Surface& out,const Ellipse& outer,const Ellipse* hole,
         } else fill(y,left,right);
     }
 }
-void geometry(Surface& out,const Layer& layer,unsigned slot) {
+void geometry(Surface& out,const Layer& layer,bool background) {
     const auto p=[&](std::size_t i){return value(layer,i);};
     if (layer.effect==88 || layer.effect==95 || layer.effect==113 || layer.effect==117) {
         // These commands all reduce to a full-screen RGB fill in the original.
@@ -1110,7 +1110,7 @@ void geometry(Surface& out,const Layer& layer,unsigned slot) {
             {p(start)&255,p(start+1)&255,p(start+2)&255},100);
         return;
     }
-    ordinary(out,layer,slot);
+    ordinary(out,layer,background);
     if (layer.effect==114 || layer.effect==118) {
         const auto count=static_cast<std::int64_t>(layer.count);
         const auto total=static_cast<std::int64_t>(duration(layer))-p(1)-p(2);
@@ -4188,41 +4188,41 @@ void advance(Layer& layer,int width,int height,Point cursor) {
 }
 
 void draw(Surface& out,const std::array<Layer,32>& layers,unsigned slot,const Surface& saved,
-          const AnimationTexture& animation,bool animation_off,bool speaking) {
+          bool background,const AnimationTexture& animation,bool animation_off,bool speaking) {
     const Layer& l=layers[slot];
     const auto p=[&](std::size_t i){return value(l,i);};
-    if (geometry_effect(l.effect)) { geometry(out,l,slot);return; }
+    if (geometry_effect(l.effect)) { geometry(out,l,background);return; }
     switch (l.effect) {
-    case 0: ordinary(out,l,slot);return;
-    case 12:case 14:case 57: ordinary(out,l,slot);falling_sprites(out,l,animation);return;
-    case 15: ordinary(out,l,slot);sun_rays(out,l);return;
-    case 18: ordinary(out,l,slot);shake(out,l);return;
+    case 0: ordinary(out,l,background);return;
+    case 12:case 14:case 57: ordinary(out,l,background);falling_sprites(out,l,animation);return;
+    case 15: ordinary(out,l,background);sun_rays(out,l);return;
+    case 18: ordinary(out,l,background);shake(out,l);return;
     case 19: buffer_animation(out,layers,l);return;
-    case 26: ordinary(out,l,slot);remembered_edges(out,l);return;
+    case 26: ordinary(out,l,background);remembered_edges(out,l);return;
     case 27:case 108: wandering_sprites(out,l);return;
-    case 28: ordinary(out,l,slot);circular_mask(out,l);return;
-    case 32: ordinary(out,l,slot);melt_down(out,l);return;
-    case 33: ordinary(out,l,slot);relief(out,l);return;
+    case 28: ordinary(out,l,background);circular_mask(out,l);return;
+    case 32: ordinary(out,l,background);melt_down(out,l);return;
+    case 33: ordinary(out,l,background);relief(out,l);return;
     case 36: stretch(out,l);return;
-    case 39: ordinary(out,l,slot);scrolling_picture(out,l);return;
-    case 42: ordinary(out,l,slot);sparkles(out,l,animation);return;
+    case 39: ordinary(out,l,background);scrolling_picture(out,l);return;
+    case 42: ordinary(out,l,background);sparkles(out,l,animation);return;
     case 48: boss_death(out,l);return;
-    case 51: ordinary(out,l,slot);sun_flare(out,l);return;
+    case 51: ordinary(out,l,background);sun_flare(out,l);return;
     case 59: simple_layer_wipe(out,layers,slot,saved);return;
     case 63: sprite_animation(out,l);return;
-    case 68: ordinary(out,l,slot);curtain(out,l);return;
+    case 68: ordinary(out,l,background);curtain(out,l);return;
     case 69: ripple(out,layers,slot,saved);return;
     case 70: petals(out,l);return;
     case 72: camouflage(out,l);return;
-    case 75: once(out,l,slot);return;
+    case 75: once(out,l,background);return;
     case 76: slash_blur(out,l);return;
     case 78: dual_mask(out,layers,slot);return;
     case 79: full_animation(out,l,animation);return;
     case 80: staff_roll(out,l,slot,animation);return;
     case 82: clouds(out,l);return;
-    case 83: ordinary(out,l,slot);shore(out,l);return;
+    case 83: ordinary(out,l,background);shore(out,l);return;
     case 84: fusuma(out,layers,l);return;
-    case 85: ordinary(out,l,slot);speed_streaks(out,l);return;
+    case 85: ordinary(out,l,background);speed_streaks(out,l);return;
     case 90: character_flash(out,l);return;
     case 91: waterfall(out,layers,slot);return;
     case 92: sway(out,layers,slot);return;
@@ -4231,7 +4231,7 @@ void draw(Surface& out,const std::array<Layer,32>& layers,unsigned slot,const Su
     case 97: bath_window(out,l);return;
     case 98: face_animation(out,layers,slot,speaking);return;
     case 101: moving_mask_wipe(out,layers,slot,saved);return;
-    case 103: ordinary(out,l,slot);target(out,l);return;
+    case 103: ordinary(out,l,background);target(out,l);return;
     case 104: spiral_sprites(out,l);return;
     case 105: movie_warp(out,l);return;
     case 107: character_raster(out,l);return;
@@ -4241,10 +4241,10 @@ void draw(Surface& out,const std::array<Layer,32>& layers,unsigned slot,const Su
     case 130: psychedelic(out,l);return;
     case 132: chara_bure(out,l,slot);return;
     case 133: sentence(out,l);return;
-    case 137: external_animation(out,l,slot,animation,animation_off);return;
+    case 137: external_animation(out,l,background,animation,animation_off);return;
     default:break;
     }
-    if (l.effect==13 || l.effect==20 || l.effect==22 || l.effect==23 || l.effect==24 || l.effect==29 || l.effect==31 || l.effect==43 || l.effect==50 || l.effect==55 || l.effect==71 || l.effect==74 || l.effect==128 || l.effect==129) ordinary(out,l,slot);
+    if (l.effect==13 || l.effect==20 || l.effect==22 || l.effect==23 || l.effect==24 || l.effect==29 || l.effect==31 || l.effect==43 || l.effect==50 || l.effect==55 || l.effect==71 || l.effect==74 || l.effect==128 || l.effect==129) ordinary(out,l,background);
     if (l.effect==81) {
         shards(out,l);
     } else if (l.effect==67) {
@@ -4385,7 +4385,7 @@ void draw(Surface& out,const std::array<Layer,32>& layers,unsigned slot,const Su
         const Rect dst=destination(l);
         const Rect src{0,0,l.texture->canvas_width,l.texture->canvas_height};
         normal_picture(out,*l.texture,src,{clamp_int(static_cast<std::int64_t>(dst.x)+coord(0)),
-            clamp_int(static_cast<std::int64_t>(dst.y)+coord(1)),src.width,src.height},!(slot<4||slot==30));
+            clamp_int(static_cast<std::int64_t>(dst.y)+coord(1)),src.width,src.height},!background);
     } else if (l.effect==94 && l.texture) {
         int x=l.effect_state->offset_x,y=l.effect_state->offset_y;
         const int width=static_cast<int>(out.width),height=static_cast<int>(out.height);

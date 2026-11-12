@@ -37,6 +37,7 @@ final class GameRunner {
         final boolean windowVisible,nameWindow,optionsAllowed;
         final String script,speaker,body;
         final DialogueMarkup displayBody;
+        final DialogueDecorations decorations;
         final String[] choices,choiceMessages;
         final int[] choiceInfo,places,placeCharacters;
         final Bitmap[] placePortraits;
@@ -44,10 +45,12 @@ final class GameRunner {
         final boolean alreadyRead;
         Frame(int wait,int width,int height,String script,int line,int word,String speaker,String body,DialogueMarkup displayBody,String[] choices,boolean read,
               int messageId,int windowType,int fontType,int scriptCursor,boolean windowVisible,boolean nameWindow,boolean optionsAllowed,int command,int layoutCommand,int drawMessage,int frameMs,
-              String[] choiceMessages,int[] choiceInfo,int[] places,int placeMode,int[] placeCharacters,Bitmap[] placePortraits,Modal modal) {
+              String[] choiceMessages,int[] choiceInfo,int[] places,int placeMode,int[] placeCharacters,Bitmap[] placePortraits,Modal modal,
+              DialogueDecorations decorations) {
             this.wait=wait;this.width=width;this.height=height;this.script=script;this.line=line;this.word=word;
             this.speaker=speaker;this.body=body;this.choices=choices;this.alreadyRead=read;
             this.displayBody=displayBody;
+            this.decorations=decorations;
             this.messageId=messageId;this.windowType=windowType;this.fontType=fontType;this.scriptCursor=scriptCursor;this.windowVisible=windowVisible;
             this.nameWindow=nameWindow;this.optionsAllowed=optionsAllowed;this.command=command;this.layoutCommand=layoutCommand;this.drawMessage=drawMessage;this.frameMs=frameMs;
             this.choiceMessages=choiceMessages;this.choiceInfo=choiceInfo;this.places=places;
@@ -178,13 +181,19 @@ final class GameRunner {
     private static final ConcurrentHashMap<File,CompletableFuture<Void>> PROGRESS_HANDOFFS=new ConcurrentHashMap<>();
     private static final class ProgressWriteFailure extends IOException {
         final GameProgress.State state;
+        final int[] gallery;
         volatile boolean recovered;
-        ProgressWriteFailure(GameProgress.State state,Exception cause){super(cause.getMessage(),cause);this.state=state;}
+        ProgressWriteFailure(GameProgress.State state,int[] gallery,Exception cause){
+            super(cause.getMessage(),cause);this.state=state;this.gallery=gallery;
+        }
     }
     private volatile boolean closing;
     private volatile boolean audioForeground;
     private final GalleryStore galleryStore;
     private final GameProgress progressStore;
+    private PcSystemSave pcSystemSave;
+    private boolean pcProgressLive, preserveDamagedProgress;
+    private int[] initialGallery;
     private final CompletableFuture<Void> previousProgress;
     private final Listener ui;
     private final Context context;
@@ -210,6 +219,8 @@ final class GameRunner {
     private GameSave history;
     private GameTextDecoder codec;
     private Frame current;
+    private byte[][] dialogueVisualFields;
+    private DialogueDecorations dialogueDecorations=DialogueDecorations.EMPTY;
     private DialogueStyle dialogueStyle;
     private GameUiAssets uiAssets;
     private RuntimeHandle runtime;
@@ -247,8 +258,7 @@ final class GameRunner {
     private int galleryCue=-1,gallerySong=-1,galleryVolume=100;
     private volatile int configMask;
     private int overlayMode,overlaysSentMode=-1;
-    private final byte[][][] overlayRows=new byte[2][][];
-    private final Modal[] overlayModels=new Modal[2];
+    private byte[][][] overlayRows;
     private final GameUiAssets.ModeAssets[] overlayAssets=new GameUiAssets.ModeAssets[2];
 
     private long openNative(){
@@ -299,13 +309,31 @@ final class GameRunner {
         ProgressWriteFailure recovery=null;
         if(previousProgress!=null)try{saveResult(previousProgress);}catch(ProgressWriteFailure failure){recovery=failure;}
         ProgressWriteFailure pending=recovery;
-        saveResult(SAVE_FILES.submit(()->{
-            if(saveAccess==null)saveAccess=savePaths.open(legacyFiles,legacySource);
-            if(pending==null)readReadLines();else recoverProgress(previousProgress,pending);
-            slots.preload(root,codec);
+        if(saveAccess==null)saveResult(SAVE_FILES.submit(()->{
+            saveAccess=savePaths.open(legacyFiles,legacySource);
             return null;
         }));
-        openTitle();
+        long candidate=openNative();
+        boolean loaded=false;
+        try{
+            int[] format=NativeGame.currentPcSystemSaveFormat(candidate);
+            saveResult(SAVE_FILES.submit(()->{
+                GameUiAssets.Config game=GameUiAssets.readConfig(root,"game",codec),chart=null;
+                int chartDefault=game.number("SelectChartIsDefault",0)!=0?0:1;
+                if(game.number("SelectChartClassDisable",chartDefault)==0)try{
+                    chart=GameUiAssets.readConfig(root,"selectChart",codec);
+                }catch(IOException invalid){Log.w("SystemNNN","Unable to read PC chart configuration",invalid);}
+                pcSystemSave=PcSystemSave.open(root,savePaths.directory(),game,chart,format);
+                if(pending==null)readReadLines();else recoverProgress(previousProgress,pending);
+                slots.preload(root,codec);
+                return null;
+            }));
+            loaded=true;
+        }finally{if(!loaded)NativeGame.close(candidate);}
+        openTitle(null,candidate);
+        if(!pcProgressLive)writeReadLines();
+        initialProgress=null;
+        initialGallery=null;
         initialized=true;
     }
     private void configure(long candidate){
@@ -370,40 +398,36 @@ final class GameRunner {
         publishParameters();
     });}
     private long restoreGallery(long candidate) {
-        try { NativeGame.mergeGallery(candidate,galleryStore.read()); }
-        catch (IOException | RuntimeException e) { Log.w("SystemNNN","Unable to read gallery progress",e); }
+        if(runtime==null && initialGallery!=null)NativeGame.mergeGallery(candidate,initialGallery);
         return NativeGame.galleryRevision(candidate);
     }
     private final Runnable flushGallery=this::writeGallery;
     private boolean galleryWritePending;
     private void queueGalleryWrite() {
-        if (!galleryWritePending && handle!=0 && galleryWritten!=NativeGame.galleryRevision(handle)) {
+        if (!replaying && !galleryWritePending && handle!=0 && galleryWritten!=NativeGame.galleryRevision(handle)) {
             galleryWritePending=true; tasks.postDelayed(flushGallery,900);
         }
     }
     private void writeGallery() {
         tasks.removeCallbacks(flushGallery); galleryWritePending=false;
-        if (handle==0) return;
-        long revision=NativeGame.galleryRevision(handle);
-        if (revision==galleryWritten) return;
-        try {
-            int[] saved=galleryStore.merge(NativeGame.galleryState(handle));
-            NativeGame.mergeGallery(handle,saved);
-            galleryWritten=revision;
-        } catch (IOException | RuntimeException e) { Log.w("SystemNNN","Unable to save gallery progress",e); }
+        if(handle!=0 && galleryWritten!=NativeGame.galleryRevision(handle))writeReadLines();
     }
     private void openTitle() throws IOException {
         openTitle(null);
     }
     private void openTitle(Capture previous) throws IOException {
-        tasks.removeCallbacks(ticker);stopSound();autoMode=false;skipMode=false;ui.mode(false,false);
-        writeGallery();
-        boolean unsaved=handle!=0 && galleryWritten!=NativeGame.galleryRevision(handle);
+        openTitle(previous,0);
+    }
+    private void openTitle(Capture previous,long candidate) throws IOException {
         boolean launching=runtime==null;
-        long candidate=openNative();
+        boolean unsaved;
         int[] state=new int[NativeGame.META_SIZE];TitleMenu title=null;long stored;
         List<LogoPanel.Slide> logos=java.util.Collections.emptyList();
         try{
+            tasks.removeCallbacks(ticker);stopSound();autoMode=false;skipMode=false;ui.mode(false,false);
+            writeGallery();
+            unsaved=handle!=0 && galleryWritten!=NativeGame.galleryRevision(handle);
+            if(candidate==0)candidate=openNative();
             configure(candidate);
             stored=restoreGallery(candidate);
             if (replaying) NativeGame.mergeGallery(candidate,NativeGame.galleryState(handle));
@@ -419,7 +443,7 @@ final class GameRunner {
             if(uiAssets==null)uiAssets=GameUiAssets.load(root,candidate);
             if(dialogueStyle==null)dialogueStyle=DialogueStyle.load(root,codec,uiAssets);
             NativeGame.tick(candidate,0,0,0,false,0,false,state);
-        }catch(Exception|LinkageError e){NativeGame.close(candidate);if(handle!=0)schedule();throw e;}
+        }catch(Exception|LinkageError e){if(candidate!=0)NativeGame.close(candidate);if(handle!=0)schedule();throw e;}
         if(handle!=0)NativeGame.close(handle);
         offerScreenLayer(-1);
         handle=candidate;commitRuntime(candidate);onTitle=true;menuOpen=false;menuModal=null;systemMenuModal=false;
@@ -789,7 +813,7 @@ final class GameRunner {
         }
         postProgressFlush(()->{
             active=false;
-            tasks.removeCallbacks(ticker);stopSound();writeGallery();
+            tasks.removeCallbacks(ticker);stopSound();
             return writeReadLines();
         });
     }
@@ -834,30 +858,31 @@ final class GameRunner {
         publishStatusOverlays();
     });}
     private void publishStatusOverlays(){
-        if(overlayMode<=0||handle==0||uiAssets==null||!uiAssets.freeStatus||failed)return;
-        boolean changed=overlayMode!=overlaysSentMode;
+        if(overlayMode<=0||handle==0||uiAssets==null||!uiAssets.statusOverlays||failed)return;
         try{
-            for(int i=0;i<overlayRows.length;i++){
-                int type=i==0?Modal.PRINT_STATUS:Modal.PRINT_PARTY;
-                byte[][] raw=NativeGame.statusOverlay(handle,type,overlayMode);
-                if(Arrays.deepEquals(raw,overlayRows[i]))continue;
-                overlayRows[i]=raw;changed=true;
-                if(raw==null){overlayModels[i]=null;continue;}
-                if(overlayAssets[i]==null)overlayAssets[i]=uiAssets.statusAssets(handle,codec,i!=0);
-                int count=(raw.length-1)/2;
-                ByteBuffer values=ByteBuffer.wrap(raw[0]).order(java.nio.ByteOrder.LITTLE_ENDIAN);
-                if(raw.length!=1+2*count||values.remaining()!=8L+8L*count)throw new IOException("Invalid status layer fields");
-                int group=values.getInt(),selection=values.getInt();
+            byte[][][] raw=NativeGame.statusOverlays(handle,overlayMode);
+            if(overlayMode==overlaysSentMode&&Arrays.deepEquals(raw,overlayRows))return;
+            if(raw==null||raw.length>2)throw new IOException("Invalid status layer count");
+            Modal[] overlays=new Modal[raw.length];
+            for(int i=0;i<raw.length;i++){
+                byte[][] layer=raw[i];
+                int count=(layer.length-1)/2;
+                ByteBuffer values=ByteBuffer.wrap(layer[0]).order(java.nio.ByteOrder.LITTLE_ENDIAN);
+                if(layer.length!=1+2*count||values.remaining()!=12L+8L*count)throw new IOException("Invalid status layer fields");
+                int type=values.getInt(),group=values.getInt(),selection=values.getInt();
+                if(type!=Modal.PRINT_STATUS&&type!=Modal.PRINT_PARTY)throw new IOException("Invalid status layer mode");
+                int assetIndex=type==Modal.PRINT_PARTY?1:0;
+                if(overlayAssets[assetIndex]==null)overlayAssets[assetIndex]=uiAssets.statusAssets(handle,codec,assetIndex!=0);
                 Modal.Row[] rows=new Modal.Row[count];
                 for(int row=0;row<count;row++)
-                    rows[row]=new Modal.Row(values.getInt(),values.getInt(),decode(raw[1+2*row],true),"",decode(raw[2+2*row],true));
-                overlayModels[i]=new Modal(new int[]{0,type,0},null,null,new int[]{0,1,group,selection,0},
-                    rows,overlayAssets[i],codec,null,null);
+                    rows[row]=new Modal.Row(values.getInt(),values.getInt(),decode(layer[1+2*row],true),"",decode(layer[2+2*row],true));
+                overlays[i]=new Modal(new int[]{0,type,0},null,null,new int[]{0,1,group,selection,0},
+                    rows,overlayAssets[assetIndex],codec,null,null);
             }
-            if(changed){overlaysSentMode=overlayMode;ui.statusOverlays(overlayMode,overlayModels.clone());}
+            overlayRows=raw;overlaysSentMode=overlayMode;ui.statusOverlays(overlayMode,overlays);
         }catch(IOException|RuntimeException e){
             Log.w("SystemNNN","Unable to render independent status",e);
-            ui.statusOverlays(overlayMode,new Modal[2]);overlayMode=0;
+            ui.statusOverlays(overlayMode,new Modal[0]);overlayMode=0;
         }
     }
     void suspendScriptAudio(){tasks.post(()->{
@@ -1456,7 +1481,10 @@ final class GameRunner {
         }catch(Exception|LinkageError e){broken(e);}
     });}
     private void save(int slot,Runnable feedback,int marker,SlotPreview preview){
-        if(handle==0||failed||onTitle||replaying||(meta[0]!=NativeGame.DIALOGUE&&meta[0]!=NativeGame.CHOICE&&meta[0]!=NativeGame.PLACE)){
+        Modal modal=activeModal();
+        boolean chart=modal!=null&&modal.mode==Modal.SELECT_CHART;
+        if(handle==0||failed||onTitle||replaying||
+           (!chart&&meta[0]!=NativeGame.DIALOGUE&&meta[0]!=NativeGame.CHOICE&&meta[0]!=NativeGame.PLACE)){
             ui.notice("当前场景无法保存");
             return;
         }
@@ -1795,6 +1823,17 @@ final class GameRunner {
         // Keep the outgoing frame until the modal has captured its backdrop.
         if(shownWait!=NativeGame.MODAL)offerScreenLayer(NativeGame.takeScreenLayer(handle));
     }
+    private DialogueDecorations dialogueDecorations(){
+        byte[][] raw=NativeGame.dialogueVisuals(handle);
+        if(Arrays.deepEquals(raw,dialogueVisualFields))return dialogueDecorations;
+        dialogueVisualFields=raw;
+        try{dialogueDecorations=DialogueDecorations.load(raw,handle,uiAssets);}
+        catch(IOException|RuntimeException e){
+            Log.w("SystemNNN","Unable to draw original dialogue decorations",e);
+            dialogueDecorations=DialogueDecorations.EMPTY;
+        }
+        return dialogueDecorations;
+    }
     private void updateUi(){
         configMask=NativeGame.configMask(handle);
         refreshSystemMenuModes();
@@ -1812,7 +1851,9 @@ final class GameRunner {
         int[] properties=NativeGame.dialogueProperties(handle);
         boolean retained=drawMessage==Frame.DRAW_RETAINED_MESSAGE;
         String decoded=shownWait==NativeGame.DIALOGUE||retained?decode(raw[1]):"";
-        DialogueLayout.Message message=dialogueStyle.split(decoded,retained||properties[6]==0x22220001);
+        DialogueDecorations decorations=dialogueDecorations();
+        DialogueLayout.Message message=decorations.cutin?new DialogueLayout.Message("",decoded,false):
+            dialogueStyle.split(decoded,retained||properties[6]==0x22220001);
         String speaker=message.name,body=message.body;
         DialogueMarkup displayBody=dialogueStyle.markup(body);
         String[] options=new String[raw.length-2];for(int i=0;i<options.length;i++)options[i]=decode(raw[i+2]);
@@ -1825,7 +1866,7 @@ final class GameRunner {
         Bitmap[] portraits=placeMode!=0?placePortraits(placeMode,placeCharacters):new Bitmap[0];
         Modal modal=shownWait==NativeGame.MODAL?readModal():null;
         Frame next=new Frame(shownWait,meta[3],meta[4],script,shownLine,shownWord,speaker,body,displayBody,options,false,properties[0],properties[1],properties[2],scriptCursor,
-            properties[3]!=0,message.nameWindow,properties[4]!=0,properties[5],properties[6],drawMessage,meta[5],messages,choice,places,placeMode,placeCharacters,portraits,modal);
+            properties[3]!=0,message.nameWindow,properties[4]!=0,properties[5],properties[6],drawMessage,meta[5],messages,choice,places,placeMode,placeCharacters,portraits,modal,decorations);
         if(!replaying&&shownWait==NativeGame.DIALOGUE&&!readLines.isEmpty()){
             String previousBody=decode(NativeGame.dialogue(handle)[1]);
             if(readLines.remove(next.legacyReadKey(raw[0],previousBody)))NativeGame.markRead(handle,next.messageId);
@@ -1835,11 +1876,11 @@ final class GameRunner {
                 current.alreadyRead:NativeGame.isRead(handle,next.messageId));
         current=new Frame(next.wait,next.width,next.height,next.script,next.line,next.word,next.speaker,next.body,next.displayBody,next.choices,
             read,next.messageId,next.windowType,next.fontType,next.scriptCursor,
-            next.windowVisible,next.nameWindow,next.optionsAllowed,next.command,next.layoutCommand,next.drawMessage,next.frameMs,messages,choice,places,placeMode,placeCharacters,portraits,modal);
+            next.windowVisible,next.nameWindow,next.optionsAllowed,next.command,next.layoutCommand,next.drawMessage,next.frameMs,messages,choice,places,placeMode,placeCharacters,portraits,modal,decorations);
         textDone=false;visibleText=0;
         if(shownWait==NativeGame.DIALOGUE){
             int prefix=-1;
-            if(properties[5]==0x22220003){
+            if(properties[5]==0x22220003||decorations.cutin){
                 String previous=decode(NativeGame.appendPrefix(handle));
                 if(!previous.isEmpty()&&decoded.startsWith(previous)){
                     int oldBodyEnd=Math.max(0,previous.length()-(decoded.length()-body.length()));
@@ -1861,7 +1902,21 @@ final class GameRunner {
     }
     private void markRead(){if(!replaying&&handle!=0&&current!=null&&current.wait==NativeGame.DIALOGUE)NativeGame.markRead(handle,current.messageId);}
     private void readReadLines() throws IOException {
-        setInitialProgress(progressStore.read());
+        PcSystemSave.Initial pc=pcSystemSave.load();
+        pcProgressLive=pc.live;
+        preserveDamagedProgress=false;
+        GameProgress.State old=null;
+        try{old=progressStore.read();}
+        catch(GameProgress.InvalidBase invalid){
+            if(!pc.live)throw invalid;
+            preserveDamagedProgress=true;
+            Log.w("SystemNNN","Using PC progress with the damaged Emberfall file retained",invalid);
+        }
+        setInitialProgress(pcSystemSave.restore(pc,old));
+        int[] gallery=new int[0];
+        try{gallery=galleryStore.read();}
+        catch(IOException invalid){Log.w("SystemNNN","Unable to read legacy gallery progress",invalid);}
+        initialGallery=pcSystemSave.restoreGallery(pc,gallery);
     }
     private void setInitialProgress(GameProgress.State state){
         initialProgress=state;
@@ -1871,26 +1926,35 @@ final class GameRunner {
         systemStateEstablished=state.variables!=null;
     }
     private void recoverProgress(CompletableFuture<Void> predecessor,ProgressWriteFailure failure) throws IOException {
-        if(failure.recovered)readReadLines();
-        else{
-            progressStore.write(failure.state);
+        if(!failure.recovered){
+            persistProgress(failure.state,failure.gallery);
             failure.recovered=true;
-            setInitialProgress(failure.state);
         }
+        readReadLines();
         PROGRESS_HANDOFFS.remove(readFile,predecessor);
+    }
+    private void persistProgress(GameProgress.State state,int[] gallery) throws IOException {
+        pcSystemSave.write(state,gallery);
+        if(!preserveDamagedProgress)progressStore.write(state);
+        try{galleryStore.write(gallery);}
+        catch(IOException | RuntimeException e){Log.w("SystemNNN","Unable to save legacy gallery progress",e);}
     }
     private CompletableFuture<Void> writeReadLines(){
         if(handle==0||replaying)return null;
+        long owner=handle,revision=NativeGame.galleryRevision(owner);
+        int[] gallery=NativeGame.galleryState(owner);
         GameProgress.State state=new GameProgress.State(NativeGame.readState(handle),NativeGame.systemVariables(handle),
             NativeGame.scriptProgress(handle),NativeGame.runtimeText(handle),NativeGame.optionalProgress(handle),
             NativeGame.chartProgress(handle),new ArrayList<>(readLines));
+        tasks.removeCallbacks(flushGallery);galleryWritePending=false;galleryWritten=revision;
         systemStateEstablished=true;
         CompletableFuture<Void> saved=new CompletableFuture<>();
         CompletableFuture<Void> pending=PROGRESS_HANDOFFS.get(readFile);
         SAVE_FILES.execute(()->{
-            try{progressStore.write(state);}
+            try{persistProgress(state,gallery);}
             catch(IOException|RuntimeException e){
-                saved.completeExceptionally(new ProgressWriteFailure(state,e));
+                saved.completeExceptionally(new ProgressWriteFailure(state,gallery,e));
+                tasks.post(()->{if(handle==owner&&galleryWritten==revision)galleryWritten=-1;});
                 Log.w("SystemNNN","Global progress save failed",e);
                 if(!closing)ui.notice("全局进度保存失败 · "+e.getMessage());
                 return;
@@ -1918,7 +1982,7 @@ final class GameRunner {
         replaceSurface(0);
         postProgressFlush(() -> {
             try{
-                active=false;tasks.removeCallbacks(ticker);stopSound();writeGallery();
+                active=false;tasks.removeCallbacks(ticker);stopSound();
                 return writeReadLines();
             }finally{
                 try{

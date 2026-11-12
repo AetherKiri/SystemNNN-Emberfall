@@ -34,11 +34,12 @@ final class NativeGame {
     static native byte[] snapshot(long handle);
     static native boolean inspectSaveSnapshot(ByteBuffer data,int length,int wait,int word,int line,byte[][] content);
     static native void restorePcSave(long handle,byte[] save,int[] meta);
+    static native int[] currentPcSystemSaveFormat(long gameHandle);
+    static native Object[] saveLayoutConfig(byte[] gameDirectory,boolean regenerate);
     static native byte[] exportPcSave(long handle,int[] pixels,int width,int height);
     static native Object[] inspectPcSave(byte[] save,int pictureBudget);
     static native boolean restoreSnapshot(long handle,byte[] data,int wait,int word,int line,byte[][] content,int[] meta,
                                           boolean keepMusicPosition,boolean migrateLegacySystemVariables,boolean restartMusic);
-    static native void restartReplayedMusic(long handle);
     // meta = wait, word, dialogue sequence, logical width/height, frame time and remaining wait frames.
     static native void tick(long handle, int ms, int x, int y, boolean advance, int choice, boolean replay, int[] meta);
     static native byte[][] content(long handle);
@@ -56,7 +57,7 @@ final class NativeGame {
     static native int[] chartGeometry(long handle);
     static native byte[][] chartText(long handle);
     static native void setChartStorage(long handle,byte[] path);
-    static native byte[][] statusOverlay(long handle,int type,int mode);
+    static native byte[][][] statusOverlays(long handle,int mode);
     static native boolean openModal(long handle,int mode,int caller);
     static native int actModal(long handle,int request,int action,int value);
     static native int abortModal(long handle,int request,String reason);
@@ -66,6 +67,7 @@ final class NativeGame {
     static native boolean storyExited(long handle);
     // Raw game-encoded speaker and body; content indices remain unchanged for save replay.
     static native byte[][] dialogue(long handle);
+    static native byte[][] dialogueVisuals(long handle);
     // Each backlog entry contributes speaker, body, four raw voice names and style.
     static native byte[][] backlog(long handle);
     static native long[] backlogJumpIds(long handle);
