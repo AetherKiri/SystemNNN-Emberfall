@@ -114,8 +114,12 @@ def main():
         classes.mkdir()
         run([java_home / "bin/javac.exe", "-encoding", "UTF-8", "--release", "8", "-classpath", jar,
              "-d", classes, *sorted((stage / "java").rglob("*.java"))], stage)
+        # One archive keeps the D8 command line within the Windows length limit.
+        with zipfile.ZipFile(stage / "classes.jar", "w") as bundle:
+            for item in sorted(classes.rglob("*.class")):
+                bundle.write(item, item.relative_to(classes).as_posix())
         run([java, "-cp", bt / "lib/d8.jar", "com.android.tools.r8.D8", "--release", "--min-api", "26",
-             "--lib", jar, "--output", "classes.zip", *sorted(classes.rglob("*.class"))], stage)
+             "--lib", jar, "--output", "classes.zip", "classes.jar"], stage)
         with zipfile.ZipFile(stage / "resources.apk") as resources, zipfile.ZipFile(stage / "player.apk", "w") as apk, zipfile.ZipFile(stage / "classes.zip") as dex:
             for item in resources.infolist():
                 apk.writestr(item.filename, resources.read(item), item.compress_type)
