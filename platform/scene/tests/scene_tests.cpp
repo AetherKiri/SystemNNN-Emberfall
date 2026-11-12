@@ -1878,6 +1878,27 @@ int main(){
         require(log.size()==2&&log[0].action=="music.stop"&&log[1].action=="voice.skipped","music or voice gate");
         require(game.skip_active(),"STARTKOMA stopped skip");
     });
+    suite.test("SETVAR stores its value and PC no-op functions stay silent",[]{
+        Model m;m.code.number(0x33330062U,{300,7});
+        for(Word code:{0x33330019U,0x3333001dU,0x3333005eU,0x3333006bU})m.code.number(code,{1});
+        m.code.present();m.code.end();TempGame temp(m);scene::GameSession game(temp.root,test_options());
+        require(game.step_frame(0).wait==scene::Wait::Draw&&game.variable(300)==7,"SETVAR did not store the value");
+        const auto& warnings=game.warnings();
+        require(std::none_of(warnings.begin(),warnings.end(),[](const std::string& message){
+            return message.find("Unhandled command")!=std::string::npos;
+        }),"a PC no-op function was reported as unhandled");
+    });
+    for(const bool same:{false,true})suite.test(same?"notPlaySameMusic keeps the current track":"MUSIC restarts the same track by default",[same]{
+        Model m;m.code.number(nnn::audio::music,{1});m.code.number(nnn::audio::music,{1});
+        m.code.present();m.code.end();TempGame temp(m);
+        temp.text("spt/bgmlist.xtx","missing,Missing track\n");
+        temp.text("wgq/missing.mml","missing_intro [0: missing_loop]\n");
+        if(same)temp.text("init/game.xtx","notPlaySameMusic 1\n");
+        scene::GameSession game(temp.root,test_options());
+        require(game.step_frame(0).wait==scene::Wait::Draw,"draw not reached");const auto log=game.audio().stats().log;
+        require(log.size()==2&&!log[0].error.empty()&&(log[1].action=="music.same")==same&&log[1].error.empty()==same,
+            "repeated MUSIC handling");
+    });
     suite.test("a title scenario entry presets its variable before the first frame",[]{
         Model m;m.message=true;
         m.code.add({6,control,0x55560002U,0xa0000000U,1,0x80000000U|300U});

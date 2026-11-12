@@ -3191,6 +3191,11 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
                 if (a[4]==0 || a[4]==1 ? value==0 || value==1 : value==a[4]) cg(a);
             }
             return true;
+        case 0x33330062U: // SETVAR stores a literal variable number and value.
+            if (a.size()>=2 && a[0]>=0 && static_cast<unsigned>(a[0])<vars.size()) SetVarData(static_cast<nnn::Word>(a[0]),a[1]);
+            return true;
+        // The PC has no handler for SETSCENE, STARTFILM, FILMEXPSTATUS or SETACHIEVEMENT.
+        case 0x33330019U: case 0x3333001dU: case 0x3333005eU: case 0x3333006bU: return true;
         default: return false;
         }
     }
