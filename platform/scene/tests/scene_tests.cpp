@@ -1878,6 +1878,21 @@ int main(){
         require(log.size()==2&&log[0].action=="music.stop"&&log[1].action=="voice.skipped","music or voice gate");
         require(game.skip_active(),"STARTKOMA stopped skip");
     });
+    suite.test("background script runs one segment per frame",[]{
+        Model m;m.code.end();TempGame temp(m);
+        Model back;
+        for(int koma=0;koma<3;++koma){back.code.present(2);back.code.add({3,control,0x5556000eU});}
+        back.code.add({3,control,0x5556000cU});back.code.end();
+        temp.write("spt/back.spt",script(back));
+        auto preview=scene::GameSession::create_ui_preview(temp.root,test_options());
+        preview->start_ui_background("back",12);
+        using scene::Wait;
+        std::vector<Wait> waits;
+        while(waits.size()<16&&(waits.empty()||waits.back()!=Wait::Ended))
+            waits.push_back(preview->step_ui_background({},false).wait);
+        require(waits==std::vector<Wait>{Wait::Draw,Wait::Draw,Wait::Running,Wait::Draw,Wait::Draw,Wait::Running,
+            Wait::Draw,Wait::Draw,Wait::Running,Wait::Running,Wait::Ended},"ENDKOMA or ENDFILM did not end the frame");
+    });
     suite.test("message skip runs music commands and gallery unlocks",[]{
         Model m;m.code.number(0x3333001cU,{UINT32_MAX});m.code.number(nnn::audio::music,{1});
         m.code.number(nnn::audio::music,{UINT32_MAX});m.code.number(0x33330018U,{1,1});

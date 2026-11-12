@@ -34,6 +34,7 @@ constexpr nnn::Word draw=0x22220004U, overlap=0x22220005U, select=0x22220006U;
 constexpr nnn::Word prepare=0x33330011U, clear_all=0x33330012U, effect=0x33330013U, clear=0x33330014U;
 constexpr nnn::Word load=0x33330015U, rect=0x33330016U, preload=0x3333001fU;
 constexpr nnn::Word end=0x55560005U, next=0x55560006U, exit_script=0x5556000bU;
+constexpr nnn::Word end_koma=0x5556000eU, user_command=0x11110001U;
 constexpr nnn::Word end_film=0x5556000cU, set_cg=0x33330018U, set_film=0x3333001aU, set_cg_by_var=0x33330061U;
 constexpr nnn::Word set_demo_flag=0x3333001eU, frame_control=0x33330028U, default_frame=0x33330029U;
 constexpr nnn::Word start_message=0x3333001bU, start_koma=0x3333001cU;
@@ -4597,6 +4598,9 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
                 if (input.play_movies) { frame.wait=Wait::Movie; set_mode(nnn::RuntimeMode::PrintMovie); return frame; }
                 frame.movie=0;
             }
+            // CBackExecClass calls Exec once per frame, so each of these returns ends the frame.
+            if (ui_mode && (result.return_code==end_koma || result.return_code==end_film ||
+                            result.return_code==user_command)) return frame;
             switch (result.return_code) {
             case print: frame.wait=Wait::Dialogue; set_mode(nnn::RuntimeMode::PrintMessage); return frame;
             case select:
