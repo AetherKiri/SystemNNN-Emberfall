@@ -171,12 +171,13 @@ bool reads_capture(const Layer& layer) {
     default: return false;
     }
 }
-void draw(Surface& out,const std::array<Layer,32>& slots,unsigned slot,const Surface& saved,Surface& save_target,
+void draw(Surface& out,const std::array<Layer,32>& slots,unsigned slot,unsigned screen_slot,const Surface& saved,Surface& save_target,
           const Layers::TextureReader& animation,bool animation_off,bool speaking,bool chart=false) {
     const auto& l=slots[slot];
     if (!l.enabled || l.effect==66) return; // BUFFER keeps the picture available without drawing the slot.
+    const bool background=slot<4 || slot+1==screen_slot;
     if (effects::known(l.effect) || (chart && l.effect==0)) {
-        effects::draw(out,slots,slot,saved,animation,animation_off,speaking); return;
+        effects::draw(out,slots,slot,saved,background,animation,animation_off,speaking); return;
     }
     const int duration=duration_of(l);
     const double time=curve(l.count,duration);
@@ -186,7 +187,8 @@ void draw(Surface& out,const std::array<Layer,32>& slots,unsigned slot,const Sur
         Rect src=l.source;
         const auto& size=time>=1.0 ? l.to : l.from;
         src.width=std::min(src.width,size.width); src.height=std::min(src.height,size.height);
-        picture(out,*l.texture,src,{mix(l.from.x,l.to.x,time),mix(l.from.y,l.to.y,time),src.width,src.height},100,{},!l.opaque);
+        picture(out,*l.texture,src,{mix(l.from.x,l.to.x,time),mix(l.from.y,l.to.y,time),src.width,src.height},
+                100,{},!background && !l.opaque);
     }
     if (l.effect==10 || l.effect==11) {
         const double f=curve(l.count,duration,arg(l,4),arg(l,5));
@@ -222,7 +224,7 @@ void draw(Surface& out,const std::array<Layer,32>& slots,unsigned slot,const Sur
     src.width=std::min(src.width,dst.width); src.height=std::min(src.height,dst.height);
     dst.width=src.width; dst.height=src.height;
     int opacity=100;
-    bool use_alpha=true;
+    bool use_alpha=l.effect!=0 || !background;
     Color add{};
     if (l.effect==8) opacity=arg(l,1,50);
     if (l.effect==9) {
@@ -286,10 +288,12 @@ void paint_texture(Surface& out,const Texture& texture,Rect source,Point origin,
     picture(out,texture,source,{origin.x,origin.y,source.width,source.height},opacity,{});
 }
 
-Layers::Layers(int width,int height) {
+Layers::Layers(int width,int height,unsigned layer_count) {
     if (width<=0 || height<=0 || width>static_cast<int>(max_dimension) || height>static_cast<int>(max_dimension)
         || static_cast<std::uint64_t>(width)*static_cast<unsigned>(height)>max_pixels)
         throw std::invalid_argument("Invalid game canvas size");
+    if (layer_count!=16 && layer_count!=32) throw std::invalid_argument("Invalid game layer count");
+    screen_slot_=layer_count-1;
     output_={static_cast<unsigned>(width),static_cast<unsigned>(height),std::vector<Byte>(static_cast<std::size_t>(width)*static_cast<unsigned>(height)*3)};
     clear_all();
 }
@@ -333,7 +337,7 @@ bool Layers::restore_layer(unsigned slot,Layer layer,const FragmentMesh* mesh) {
     auto& l=slots_.at(slot);
     l=std::move(layer);
     const auto number=l.effect;
-    if (effects::known(number)) effects::configure(l,slot,static_cast<int>(width()),static_cast<int>(height()),mesh);
+    if (l.enabled && effects::known(number)) effects::configure(l,slot,static_cast<int>(width()),static_cast<int>(height()),mesh);
     invalidate();
     return known(number) || effects::known(number);
 }
@@ -397,15 +401,14 @@ void chart_over(Surface& out,ChartLayerSource pane,const std::vector<std::size_t
     }
 }
 
-bool keeps_once_pixels(const std::array<Layer,32>& layers,std::uint32_t hidden) {
-    // In the PC renderer these background slots suppress the pre-draw clear.
-    constexpr std::array<unsigned,5> background{0,1,2,3,30};
-    const bool has_background=std::any_of(background.begin(),background.end(),[&](unsigned slot) {
-        const auto& layer=layers[slot];
+bool keeps_once_pixels(const std::array<Layer,32>& layers,std::uint32_t hidden,unsigned screen_slot) {
+    const auto background=[](const Layer& layer) {
         return layer.enabled && ((layer.texture && layer.effect!=66) || layer.effect==54 || layer.effect==79);
-    });
-    if (!has_background) return false;
-    for (unsigned slot=0;slot<layers.size();++slot) {
+    };
+    // The expanded PC renderer also checks layer 30 before clearing the frame.
+    if (!std::any_of(layers.begin(),layers.begin()+4,background) &&
+        (screen_slot!=31 || !background(layers[30]))) return false;
+    for (unsigned slot=0;slot<=screen_slot;++slot) {
         const auto& layer=layers[slot];
         if (!(hidden&(std::uint32_t{1}<<slot)) && layer.enabled && layer.effect==75 && layer.texture) return true;
     }
@@ -413,9 +416,9 @@ bool keeps_once_pixels(const std::array<Layer,32>& layers,std::uint32_t hidden) 
 }
 }
 bool Layers::screen_layer_active() const noexcept {
-    const auto& layer=slots_.back();
+    const auto& layer=slots_[screen_slot_];
     return !overlapping() && (screen_backdrop_ ||
-        (!(hidden_&(std::uint32_t{1}<<31U)) && layer.enabled && layer.effect!=-1 && layer.effect!=66));
+        (!(hidden_&(std::uint32_t{1}<<screen_slot_)) && layer.enabled && layer.effect!=-1 && layer.effect!=66));
 }
 
 void Layers::capture_screen_layer(bool enable,OverlapDecoration backdrop) {
@@ -428,12 +431,13 @@ void Layers::capture_screen_layer(bool enable,OverlapDecoration backdrop) {
 }
 
 bool ScreenLayerFrame::captures_screen() const noexcept {
-    return draw_last_ && slots_.back().enabled && slots_.back().effect==73;
+    const auto& layer=slots_[screen_slot_];
+    return draw_last_ && layer.enabled && layer.effect==73;
 }
 
 Surface ScreenLayerFrame::capture_without_ui() const {
     auto result=scene_;
-    if (captures_screen()) draw_capture_picture(result,slots_.back());
+    if (captures_screen()) draw_capture_picture(result,slots_[screen_slot_]);
     return result;
 }
 
@@ -459,10 +463,11 @@ void ScreenLayerFrame::composite(Byte* pixels,std::size_t stride,bool show_backd
             if (item.first==name) return item.second;
         return std::shared_ptr<const Texture>{};
     };
-    const auto& state=slots_.back().effect_state;
+    const auto& layer=slots_[screen_slot_];
+    const auto& state=layer.effect_state;
     const bool once_drawn=state && state->once_drawn;
-    if (captures_screen()) draw_capture_picture(output_,slots_.back());
-    else if (draw_last_) draw(output_,slots_,31,saved_,saved_,animation,animation_off_,speaking_);
+    if (captures_screen()) draw_capture_picture(output_,layer);
+    else if (draw_last_) draw(output_,slots_,screen_slot_,screen_slot_,saved_,saved_,animation,animation_off_,speaking_);
     if (state) state->once_drawn=once_drawn;
     const auto* rgb=output_.rgb.data();
     for (unsigned y=0;y<height();++y) {
@@ -475,15 +480,15 @@ void ScreenLayerFrame::composite(Byte* pixels,std::size_t stride,bool show_backd
 }
 
 void Layers::compose(Surface& out,const OverlapDecoration& decorate) {
+    const auto last=screen_slot_;
     if (saved_background_ && !saved_.rgb.empty()) out=saved_;
-    else if (keeps_once_pixels(slots_,hidden_)) {
+    else if (keeps_once_pixels(slots_,hidden_,last)) {
         if (&out!=&output_) out=output_;
     } else if (out.width!=output_.width || out.height!=output_.height)
         out={output_.width,output_.height,std::vector<Byte>(output_.rgb.size())};
     else std::fill(out.rgb.begin(),out.rgb.end(),0);
-    for (unsigned i=0;i+1<slots_.size();++i)
-        if (!(hidden_&(std::uint32_t{1}<<i))) draw(out,slots_,i,saved_,saved_,animation_textures_,animation_off_,speaking_);
-    constexpr unsigned last=31;
+    for (unsigned i=0;i<last;++i)
+        if (!(hidden_&(std::uint32_t{1}<<i))) draw(out,slots_,i,last,saved_,saved_,animation_textures_,animation_off_,speaking_);
     if (&out==&output_) screen_layer_.reset();
     if (decorate) {
         // Keep a plain endpoint for resuming the script. The wipe shows the PC
@@ -494,14 +499,14 @@ void Layers::compose(Surface& out,const OverlapDecoration& decorate) {
         const auto& layer=slots_[last];
         auto* once=layer.effect==75 ? layer.effect_state.get() : nullptr;
         const bool was_drawn=once && once->once_drawn;
-        if (layer.effect!=73) draw(out,slots_,last,saved_,saved_,animation_textures_,animation_off_,speaking_);
+        if (layer.effect!=73) draw(out,slots_,last,last,saved_,saved_,animation_textures_,animation_off_,speaking_);
         if (once) once->once_drawn=was_drawn;
-        draw(overlap_display_,slots_,last,saved_,saved_,animation_textures_,animation_off_,speaking_);
+        draw(overlap_display_,slots_,last,last,saved_,saved_,animation_textures_,animation_off_,speaking_);
         return;
     }
     const bool draw_last=!(hidden_&(std::uint32_t{1}<<last));
     if (!capture_screen_layer_ || &out!=&output_ || !screen_layer_active()) {
-        if (draw_last) draw(out,slots_,last,saved_,saved_,animation_textures_,animation_off_,speaking_);
+        if (draw_last) draw(out,slots_,last,last,saved_,saved_,animation_textures_,animation_off_,speaking_);
         return;
     }
 
@@ -516,6 +521,7 @@ void Layers::compose(Surface& out,const OverlapDecoration& decorate) {
         }
         frame->saved_=saved_;
         frame->slots_=slots_;
+        frame->screen_slot_=last;
         frame->draw_last_=draw_last;
         // The effect can reference other slots' art and rectangles. Its own
         // animation state is the only one it reads or writes during drawing.
@@ -531,13 +537,13 @@ void Layers::compose(Surface& out,const OverlapDecoration& decorate) {
             return texture;
         };
     } catch (const std::bad_alloc&) {
-        if (draw_last) draw(out,slots_,last,saved_,saved_,animation_textures_,animation_off_,speaking_);
+        if (draw_last) draw(out,slots_,last,last,saved_,saved_,animation_textures_,animation_off_,speaking_);
         return;
     }
     // GET uses the actual host message plane. Do not replace the buffer that
     // the earlier script layers just consumed with this provisional scene.
-    if (frame->captures_screen()) draw_capture_picture(out,slots_.back());
-    else if (draw_last) draw(out,slots_,last,saved_,saved_,animation,animation_off_,speaking_);
+    if (frame->captures_screen()) draw_capture_picture(out,slots_[last]);
+    else if (draw_last) draw(out,slots_,last,last,saved_,saved_,animation,animation_off_,speaking_);
     screen_layer_=std::move(frame);
 }
 unsigned Layers::chart_layer_mask(unsigned center) const noexcept {
@@ -592,7 +598,7 @@ unsigned Layers::draw_chart_layers(unsigned center,const std::array<ChartLayerTa
                     if (white) once->once_drawn=once_drawn[slot];
                     else once_drawn[slot]=once->once_drawn;
                 }
-                draw(matte,slots_,slot,saved_,saved_,animation_textures_,animation_off_,speaking_,true);
+                draw(matte,slots_,slot,screen_slot_,saved_,saved_,animation_textures_,animation_off_,speaking_,true);
                 once_changed|=white && once && once->once_drawn!=once_drawn[slot];
             }
             for (unsigned y=0;y<h;++y) {
@@ -640,7 +646,7 @@ bool Layers::draw_chart_composite(unsigned center,ChartLayerSource base,ChartLay
             auto* once=layer.effect==75 ? layer.effect_state.get() : nullptr;
             const bool was_drawn=once && once->once_drawn;
             state_changed|=layer.effect==73 && saved_.rgb!=out.rgb;
-            draw(out,slots_,slot,saved_,saved_,animation_textures_,animation_off_,speaking_,true);
+            draw(out,slots_,slot,screen_slot_,saved_,saved_,animation_textures_,animation_off_,speaking_,true);
             state_changed|=once && once->once_drawn!=was_drawn;
         }
         if (group==0) chart_over(out,center_plane,input_columns,h);
@@ -667,7 +673,7 @@ void Layers::commit_screen_capture(Surface frame) {
     if (frame.width!=output_.width || frame.height!=output_.height || frame.rgb.size()!=output_.rgb.size())
         throw std::invalid_argument("Saved screen dimensions differ from the game canvas");
     bool used=saved_background_;
-    for (unsigned i=0;!used && i<slots_.size();++i)
+    for (unsigned i=0;!used && i<layer_count();++i)
         used=slots_[i].enabled && !(hidden_&(std::uint32_t{1}<<i)) && reads_capture(slots_[i]);
     if (used && frame.rgb!=saved_.rgb) invalidate();
     saved_=std::move(frame);
@@ -680,7 +686,8 @@ void Layers::advance(std::uint32_t frames,Point cursor) {
         else invalidate();
         return;
     }
-    for (auto& l:slots_) {
+    for (unsigned slot=0;slot<layer_count();++slot) {
+        auto& l=slots_[slot];
         if (!l.enabled) continue;
         if (effects::known(l.effect)) {
             const auto length=effects::duration(l);
@@ -742,7 +749,7 @@ void Layers::save_snapshot(nnn::snapshot::Writer& out,bool decorated_overlap) co
     const bool one_shot_picture=!dirty_ && std::any_of(slots_.begin(),slots_.end(),[](const Layer& layer){
         return layer.enabled && layer.effect==75 && layer.effect_state && layer.effect_state->once_drawn;
     });
-    const bool retained_once_base=!saved_background_ && keeps_once_pixels(slots_,hidden_);
+    const bool retained_once_base=!saved_background_ && keeps_once_pixels(slots_,hidden_,screen_slot_);
     if (!rebuild_wipe && (overlapping() || decorated_overlap || one_shot_picture || retained_once_base)) surface_fields(out,output_);
     else out(output_.width,output_.height,std::vector<Byte>{});
     for (const auto* s:{&previous_,&target_,&saved_}) surface_fields(out,*s);
@@ -842,6 +849,7 @@ void Layers::load_snapshot(nnn::snapshot::Reader& in,const std::function<std::sh
     overlap_display_={};
     if (decorated_overlap) read_surface(overlap_display_,false,false);
     if (inspect) return;
+    std::fill(slots_.begin()+layer_count(),slots_.end(),Layer{});
     if (rendered.rgb.empty()) dirty_=true;
     else output_=std::move(rendered);
     output_changed_=true; ++revision_;

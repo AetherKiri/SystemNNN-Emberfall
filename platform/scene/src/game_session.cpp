@@ -1,6 +1,7 @@
 #include "emberfall/game_session.hpp"
 #include "chart_node_store.hpp"
 #include "chart_view_model.hpp"
+#include "dialogue_features.hpp"
 #include "game_assets.hpp"
 #include "pc_save.hpp"
 #include "nnn/scheduler.hpp"
@@ -38,10 +39,11 @@ constexpr nnn::Word set_demo_flag=0x3333001eU, frame_control=0x33330028U, defaul
 constexpr nnn::Word start_message=0x3333001bU, start_koma=0x3333001cU;
 constexpr nnn::Word film_name=0x33330050U, story_name=0x33330051U, film_type_time=0x33330052U;
 constexpr nnn::Word config_mask=0x33330053U, var_control_layer=0x33330063U;
+constexpr nnn::Word cutin_mode=0x3333005bU, cutin_click=0x3333005cU, face_type=0x33330064U, must_face=0x33330065U;
 constexpr nnn::Word set_term=0x3333006dU;
 constexpr unsigned variable_count=32768;
 constexpr unsigned first_system_variable=200;
-constexpr std::uint32_t snapshot_magic=0x31534e4eU, snapshot_version=13;
+constexpr std::uint32_t snapshot_magic=0x31534e4eU, snapshot_version=14;
 constexpr int default_next_message_type=3;
 constexpr int heroine_limit=12,object_limit=1024;
 constexpr std::size_t backlog_capacity=100;
@@ -92,6 +94,41 @@ int config_int(const std::string& text,const std::string& name,int fallback) {
         if (s>>key>>value && fold_cp932(key)==fold_cp932(name)) return value;
     }
     return fallback;
+}
+unsigned render_layer_capacity(unsigned active_layers,bool has_var2,bool has_var) {
+    // Expanded builds can still cap active script layers at 16.
+    return active_layers==16 && !has_var2 && has_var ? 16U : 32U;
+}
+template<class Visit>
+void visit_pc_sub_extensions(const nnn::game_config::NameListSetup& setup,Visit visit) {
+    for (std::size_t i=1;i<=pc::max_extensions;++i) {
+        const auto value=setup.field("autoExtDataSub"+std::to_string(i));
+        if (!value) break;
+        visit(fold_cp932(std::string(*value)));
+    }
+}
+pc::FileSaveLayout game_files_save_layout(const fs::path& root) {
+    const auto init=nnn::game_config::read(root,"init","game.xtx");
+    const auto spt=nnn::resource::find_directory(root,"spt");
+    const bool has_var2=!nnn::game_config::find_file(spt,"var2.fxf").empty();
+    const bool has_var=!nnn::game_config::find_file(spt,"var.fxf").empty();
+    const unsigned active_layers=config_int(init,"layerExpand",16)>=32 ? 32U : 16U;
+    pc::FileSaveLayout layout;
+    layout.layer_records=render_layer_capacity(active_layers,has_var2,has_var);
+    const bool classic_layers=layout.layer_records==pc::classic_layer_count;
+    layout.message_width=classic_layers ? pc::classic_message_width : pc::expanded_message_width;
+    layout.registers_okikae=!classic_layers;
+    const nnn::game_config::NameListSetup setup(init);
+    visit_pc_sub_extensions(setup,[&](const std::string& name) {
+        if (name=="okikae") layout.registers_okikae=true;
+    });
+    const bool classic_vars=!has_var2 || (has_var && config_int(init,"varType",1)==0);
+    layout.system_save_version=classic_vars ? 1 : (setup.field("scriptseVolumeUseFlag") ? 3 : 2);
+    layout.trial=config_int(init,"taikenflag",0)!=0;
+    return layout;
+}
+pc::DirectorySaveLayout resolve_pc_save_layout(const fs::path& root,bool analyze_executable) {
+    return pc::directory_save_layout(root,analyze_executable,[&] { return game_files_save_layout(root); });
 }
 std::string config_text(const std::string& text,const std::string& name,std::string fallback) {
     for (const auto& line:lines_of(text)) {
@@ -318,6 +355,14 @@ std::vector<std::string> message_rows(const std::string& text) {
     }
     return rows;
 }
+std::string join_message_rows(const std::vector<std::string>& rows) {
+    std::string message;
+    for (std::size_t i=0;i<rows.size();++i) {
+        if (i) message+="\r\n";
+        message+=rows[i];
+    }
+    return message;
+}
 } // namespace
 
 struct GameSession::Impl final : nnn::CScriptCallBack {
@@ -399,16 +444,29 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
     std::string surname,given_name;
     bool one_byte_text=false;
     bool standalone_script=false;
-    std::optional<std::uint32_t> replacement_extension;
+    bool append_skip_name=true;
+    Faces faces;
+    Cutins cutins;
+    std::optional<pc::OmakeWords> omake;
+    std::array<std::optional<nnn::status_party::Visit>,2> attached_status;
+    enum class PcExtension { Empty, Chart, Face, Okikae, Game };
+    std::vector<PcExtension> pc_extensions;
+    std::size_t pc_sub_end=0;
+    bool pc_extension_count_valid=true;
+    std::array<std::string,4> loaded_pc_preview;
+    struct InactivePcLayer { pc::Effect effect; std::string filename; };
+    std::array<std::optional<InactivePcLayer>,pc::layer_count> inactive_pc_layers;
     std::string pc_save_header="SAVEDATA";
     unsigned save_slot_art_var=variable_count;
     nnn::Value pc_save_slot_art=30;
-    bool pc_export_layout=false,pc_save_log=true;
+    bool pc_save_log=true;
     bool clear_auto_after_load=false;
     int pc_log_voices=1;
     pc::LogLayout pc_log_layout=pc::LogLayout::Legacy;
     int pc_thumbnail_width=182,pc_thumbnail_height=102;
-    unsigned game_version=0,pc_layers=16;
+    unsigned game_version=0,layer_limit=16,render_layer_count=32;
+    const std::shared_ptr<const pc::DirectorySaveLayout> save_layout;
+    std::size_t loaded_save_message_width=0;
     std::vector<nnn::Word> replay_films;
     std::size_t replay_film=0;
     std::uint32_t hidden_layers=0;
@@ -516,6 +574,7 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
     std::array<unsigned,8> clock_ids{};
     std::vector<std::array<int,3>> holidays;
     std::function<ScriptClockSample()> clock_source;
+    std::function<void(std::string_view)> script_debug_output;
     nnn::resource::FilenameEncoder filename_encoder;
     std::optional<ScriptClockSample> sampled_clock;
     std::uint32_t random_state=1,legacy_random_state=1;
@@ -529,8 +588,11 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         : shared_runtime(options.runtime ? options.runtime : std::make_shared<nnn::RuntimeContext>(root)),
           shared_assets(peer ? std::move(peer) : std::make_shared<GameAssets>(root,options.cache_bytes,options.filename_encoder)),
           assets(*shared_assets),playback(root,options.audio,options.filename_encoder),
-          queue_audio_events(options.queue_audio_events),decorative_preview(decorative),replay_films(options.replay_films),
-          hidden_layers(options.replay_hidden_layers),clock_source(options.local_clock),filename_encoder(options.filename_encoder) {
+          queue_audio_events(options.queue_audio_events),decorative_preview(decorative),
+          save_layout(options.save_layout ? options.save_layout : std::make_shared<const pc::DirectorySaveLayout>()),
+          replay_films(options.replay_films),
+          hidden_layers(options.replay_hidden_layers),clock_source(options.local_clock),script_debug_output(options.script_debug_output),
+          filename_encoder(options.filename_encoder) {
         const bool legacy_volume_defaults=shared_runtime->legacy_volume_defaults();
         behavior=shared_runtime->with_parameters([&](nnn::RuntimeParameters& parameters) {
             return std::make_unique<nnn::PlayerBehavior>(parameters,root,legacy_volume_defaults);
@@ -539,6 +601,7 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         auto init=nnn::game_config::read(root,"init","game.xtx");
         if (!decorative_preview) {
             auto print_config=nnn::game_config::read(root,"init","printmessage.xtx");
+            append_skip_name=config_int(print_config,"appendSkipName",1)!=0;
             draw_window_with_message=config_int(print_config,"drawWindowWithMessageFlag",0)!=0;
             overlap_message_window=config_int(init,"noMessageWindowFlag",0)==0;
             if (overlap_message_window)
@@ -553,12 +616,19 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         pc_save_header=config_text(init,"saveHeaderName","SAVEDATA").substr(0,15);
         const auto version_part=[&](const char* key){return static_cast<unsigned>(std::clamp(config_int(init,key,0),0,255));};
         game_version=(version_part("highVersion")<<16U)|(version_part("middleVersion")<<8U)|version_part("lowVersion");
-        pc_layers=config_int(init,"layerExpand",16)>=32 ? 32U : 16U;
-        if (config_int(init,"facePrintMode",0)==0 && config_text(init,"autoExtDataMode1","").empty() &&
-            config_text(init,"autoExtDataSub1","").empty()) replacement_extension=pc::first_extension_code;
-        pc_export_layout=replacement_extension && config_int(init,"useCutinFlag",0)==0 && config_int(init,"useExtClass",0)==0;
+        layer_limit=config_int(init,"layerExpand",16)>=32 ? 32U : 16U;
+        if (!decorative_preview) {
+            try {
+                if (const auto depth=config_int(init,"facePrintMode",0);depth && !config_int(init,"noScriptFlag",0))
+                    faces.configure(depth,root,filename_encoder);
+            } catch (const std::exception& e) { warn(std::string("Face configuration: ")+e.what()); }
+            try {
+                if (config_int(init,"useCutinFlag",0)) cutins.configure(root,filename_encoder);
+            } catch (const std::exception& e) { warn(std::string("CUTIN configuration: ")+e.what()); }
+            if (config_int(init,"useExtClass",0)) omake.emplace();
+        }
+        configure_pc_extensions(init);
         clear_auto_after_load=config_int(init,"clearAutoAfterLoad",0)!=0;
-        pc_save_log=config_int(init,"saveLog",1)!=0;
         const auto log_config=nnn::game_config::read(root,"init","backlog.xtx");
         pc_log_voices=std::clamp(config_int(log_config,"voiceMultiCount",1),1,8);
         if (pc_log_voices>1) pc_log_layout=pc::LogLayout::MultiVoice;
@@ -618,11 +688,14 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         const int height=options.height ? options.height : config_int(setup,"mainScreenWindowSizeY1",720);
         period=options.frame_ms ? options.frame_ms : static_cast<unsigned>(std::clamp(config_int(init,"frameTime",20),1,1000));
         default_period=period;
-        renderer=make_renderer(width,height);
         auto varfile=assets.config("var2.fxf");
-        const bool extended=!varfile.empty() && (config_int(init,"varType",1)!=0 || assets.config("var.fxf").empty());
+        const auto classic_varfile=assets.config("var.fxf");
+        render_layer_count=render_layer_capacity(layer_limit,!varfile.empty(),!classic_varfile.empty());
+        pc_save_log=config_int(init,"saveLog",render_layer_count==pc::classic_layer_count ? 0 : 1)!=0;
+        renderer=make_renderer(width,height);
+        const bool extended=!varfile.empty() && (config_int(init,"varType",1)!=0 || classic_varfile.empty());
         system_variable_end=extended ? 1200 : 300;
-        if (!extended) varfile=assets.config("var.fxf");
+        if (!extended) varfile=classic_varfile;
         const auto names=fields(file_text(varfile));
         for (std::size_t i=0;i<names.size() && i<vars.size();++i)
             if (!names[i].empty()) ids.emplace(fold_cp932(names[i]),static_cast<unsigned>(i));
@@ -658,10 +731,12 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
             const auto id=variable_id(config_text(init,"layerOffVar"+std::to_string(i),""));
             if (id<variable_count) layer_visibility[id]|=std::uint32_t{1}<<i;
         }
-        const auto project=lines_of(file_text(assets.config("project.xtx")));
-        for (std::size_t i=0;i<project.size();++i) {
-            project_scripts.push_back(stem(project[i]));
-            script_ids.emplace(project_scripts.back(),static_cast<unsigned>(i));
+        const auto project=file_text(assets.config("project.xtx"));
+        std::size_t project_cursor=0;
+        while (const auto entry=nnn::game_config::name_token(project,project_cursor)) {
+            const auto index=static_cast<unsigned>(project_scripts.size());
+            project_scripts.push_back(stem(std::string(*entry)));
+            script_ids.emplace(project_scripts.back(),index);
         }
         movie_count=std::min<std::size_t>(4096,fields(file_text(assets.config("movielist.xtx"))).size()/2);
         const auto commands=file_text(assets.config("command.xtx"));
@@ -949,7 +1024,7 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         return {};
     }
     std::unique_ptr<render::Layers> make_renderer(int width,int height) {
-        auto layers=std::make_unique<render::Layers>(width,height);
+        auto layers=std::make_unique<render::Layers>(width,height,render_layer_count);
         layers->animation_textures([this](const std::string& name) -> std::shared_ptr<const render::Texture> {
             if (!animation_enabled && name.compare(0,10,"bg/bganime")==0) return {};
             return texture(name);
@@ -958,8 +1033,8 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         return layers;
     }
     bool slot(int index) {
-        if (index>=0 && index<32) return true;
-        warn("Layer outside 0..31: "+std::to_string(index));
+        if (index>=0 && static_cast<unsigned>(index)<render_layer_count) return true;
+        warn("Layer outside 0.."+std::to_string(render_layer_count-1)+": "+std::to_string(index));
         return false;
     }
     void cg(const std::vector<nnn::Value>& a) {
@@ -2017,20 +2092,51 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
                 request.rows.push_back({next++,0,"system"+std::to_string(i),{},std::move(text.system_replacements[i])});
         }
     }
-    std::optional<ScriptModal> status_overlay(nnn::RuntimeMode type,nnn::RuntimeMode mode,bool prefer_story) {
-        if (type!=nnn::RuntimeMode::PrintStatus && type!=nnn::RuntimeMode::PrintParty) return {};
-        const auto index=status_index(type);
-        if (!prepare_status(index)) return {};
-        const auto& catalog=*status_catalogs[index];
-        if (!catalog.overlay_for(mode)) return {};
+    std::vector<ScriptModal> status_overlays(nnn::RuntimeMode mode,bool prefer_story) {
+        constexpr std::array<nnn::RuntimeMode,2> types{nnn::RuntimeMode::PrintStatus,nnn::RuntimeMode::PrintParty};
+        constexpr int calculate=2,paint=4;
+        std::array<int,2> flags{-1,-1};
+        std::array<std::size_t,2> order{};
+        std::size_t count=0;
+        const auto parent=static_cast<std::size_t>(mode);
+        if (omake && parent<pc::omake_parent_count) {
+            for (std::size_t slot=0;slot<pc::omake_slots;++slot) {
+                const auto word=(*omake)[parent*pc::omake_slots+slot];
+                if (word==0) continue;
+                const auto child=static_cast<nnn::RuntimeMode>(word/256);
+                if (child!=types[0] && child!=types[1]) {
+                    warn("Unavailable OMAKECLASS controller "+std::to_string(word/256));
+                    continue;
+                }
+                const auto index=status_index(child);
+                if (flags[index]>=0) continue;
+                flags[index]=word&0xff;
+                order[count++]=index;
+            }
+        }
+        for (std::size_t i=0;i<flags.size();++i) if (flags[i]<0) {
+            attached_status[i].reset();
+            order[count++]=i;
+        }
         const auto story=prefer_story ? shared_runtime->preview_story() : nullptr;
         const auto read=modal_variables(story.get());
-        const auto visit=catalog.begin(read);
-        if (!catalog.overlay_visible(visit,read)) return {};
-        ScriptModal overlay;
-        overlay.mode=type;
-        status_rows(overlay,catalog,visit,read,true,story.get());
-        return overlay;
+        std::vector<ScriptModal> overlays;
+        for (const auto index:order) {
+            if (!prepare_status(index)) continue;
+            const auto& catalog=*status_catalogs[index];
+            const bool attached=flags[index]>=0;
+            auto& live=attached_status[index];
+            if (attached && !live) live=catalog.begin(read);
+            if (attached && (flags[index]&calculate)) catalog.refresh(*live,read);
+            const bool paint_attached=attached && (flags[index]&paint);
+            if (!paint_attached && !catalog.overlay_for(mode)) continue;
+            const auto visit=paint_attached ? *live : catalog.begin(read);
+            if (!catalog.overlay_visible(visit,read)) continue;
+            auto& overlay=overlays.emplace_back();
+            overlay.mode=types[index];
+            status_rows(overlay,catalog,visit,read,true,story.get());
+        }
+        return overlays;
     }
     ModalResult act_status(ScriptModal& request,ModalAction action,int value) {
         if (action==ModalAction::Back) {
@@ -2154,7 +2260,7 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         const auto display=variable_id(setup.display_page_var);
         try {
             ChartNodeSave saved;
-            saved.status=make_pc_command_status(plan.mode);
+            saved.status=make_pc_status(plan.mode);
             saved.vars=nnn::chart::capture_variables([&](std::size_t i){return GetVarData(static_cast<nnn::Word>(i));});
             saved.run=current_chart_run();
             if (slot<saved.vars.size()) saved.vars[slot]=plan.slot;
@@ -2775,7 +2881,62 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         next_window=-1;
     }
 
+    std::size_t dialogue_connect(std::string_view row,nnn::Word command) const {
+        if (command==lprint || row.size()<3) return 0;
+        const std::string_view marker=one_byte_text ? "#-" : "#\x91\xb1";
+        return row.compare(0,marker.size(),marker)==0 ? marker.size() : 0;
+    }
+
+    std::vector<std::string> cutin_message_rows(const std::string& text,int type,nnn::Word command) const {
+        auto rows=message_rows(text);
+        if (command==append && append_skip_name && !rows.empty() && speaker_names.count(rows.front()))
+            rows.erase(rows.begin());
+        cutins.strip_name(rows,type);
+        return rows;
+    }
+
+    void update_cutin_dialogue(DialogueState& line,const std::string& text,int type,bool appending) {
+        auto added=cutin_message_rows(text,type,line.command);
+        auto rows=appending ? message_rows(line.display_bytes) : std::vector<std::string>{};
+        auto first=rows.size();
+        for (auto& row:added) {
+            if (const auto marker=dialogue_connect(row,line.command)) {
+                row.erase(0,marker);
+                if (!rows.empty()) {
+                    first=std::min(first,rows.size()-1);
+                    rows.back()+=row;
+                    continue;
+                }
+            }
+            rows.push_back(std::move(row));
+        }
+        if (rows.size()>pc::message_limit) {
+            const auto drop=rows.size()-pc::message_limit;
+            for (std::size_t i=0;i<std::min(drop,pc::message_limit);++i) cutins.discard_first_row();
+            rows.erase(rows.begin(),rows.begin()+static_cast<std::ptrdiff_t>(drop));
+            first-=std::min(first,drop);
+            append_prefix_bytes=0;
+        }
+        cutins.tag(first,rows.size()-first,type);
+        line.display_bytes=join_message_rows(rows);
+    }
+
+    void select_dialogue_face() {
+        if (!faces.enabled()) return;
+        const auto& line=frame.dialogue;
+        if (!line.window_visible || line.layout_command!=print || cutins.active()) {
+            faces.hide();
+            return;
+        }
+        const std::string_view text=line.display_bytes;
+        faces.select(text.substr(0,text.find_first_of("\r\n")));
+    }
+
     bool ReceiveSystemEvent(const nnn::SystemEvent& e) override {
+        if (e.payload==nnn::SystemPayload::Debug) {
+            if (script_debug_output && e.text) script_debug_output(*e.text);
+            return true;
+        }
         const auto& a=e.parameters;
         if (e.opcode==set_term || e.opcode==nnn::audio::set_voice_flag) {
             if (!a.empty()) {
@@ -2786,9 +2947,13 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
             if (e.opcode==set_term) return true;
         }
         if (e.payload==nnn::SystemPayload::Dialogue) {
+            loaded_pc_preview={};
             location();
             auto& d=frame.dialogue;
-            const bool appending=e.opcode==append && d.layout_command!=0;
+            d.raw_bytes=e.text.value_or("");
+            const auto text=replace_dialogue(d.raw_bytes);
+            const bool appending=d.layout_command!=0 && (e.opcode==append ||
+                (cutins.active() && e.opcode==print && dialogue_connect(text,e.opcode)));
             d.command=e.opcode; d.script=frame.script; ++d.sequence;
             if (!appending) d.layout_command=e.opcode==lprint ? lprint : print;
             d.table_index=a.empty() ? 0 : static_cast<unsigned>(a.front());
@@ -2797,17 +2962,19 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
                 shared_runtime->check_dialogue_skip(d.message_id);
                 sync_skip();
             }
-            d.raw_bytes=e.text.value_or("");
-            append_prefix_bytes=e.opcode==append && d.layout_command==print ? d.display_bytes.size() : 0;
-            if (e.opcode==append) d.display_bytes+=replace_dialogue(d.raw_bytes);
-            else d.display_bytes=replace_dialogue(d.raw_bytes);
-            d.speaker=speaker(d.display_bytes);
+            append_prefix_bytes=appending && d.layout_command==print ? d.display_bytes.size() : 0;
+            cutins.begin_message(appending);
+            if (cutins.active()) update_cutin_dialogue(d,text,e.trailing.value_or(0),appending);
+            else if (e.opcode==append) d.display_bytes+=text;
+            else d.display_bytes=text;
+            d.speaker=cutins.active() ? std::string{} : speaker(d.display_bytes);
             d.window_type=window_type; d.font_type=font_type;
             d.window_visible=d.layout_command==print;
             apply_next_window();
+            select_dialogue_face();
             jump_pending=false;
             if (!ui_mode && !d.display_bytes.empty() && d.display_bytes.size()<=16384U) {
-                const bool joined=e.opcode==append && !backlog.empty() && backlog.back().color<0;
+                const bool joined=(e.opcode==append || appending) && !backlog.empty() && backlog.back().color<0;
                 if (joined) {
                     backlog.back().speaker=d.speaker;
                     backlog.back().text=d.display_bytes;
@@ -2870,7 +3037,10 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
                     }
                 }
                 if (!image) image=texture(name);
-                if (image) renderer->bind(layer,std::move(image),e.opcode==preload);
+                if (image) {
+                    inactive_pc_layers[layer].reset();
+                    renderer->bind(layer,std::move(image),e.opcode==preload || layer>=layer_limit);
+                }
             }
             return true;
         }
@@ -2939,6 +3109,7 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         case 0x33330017U: frame.dialogue.window_visible=true; return true;
         case rect:
             if (a.size()>=9 && slot(a[0])) {
+                inactive_pc_layers[static_cast<unsigned>(a[0])].reset();
                 auto bounds=[&](std::size_t n) {
                     return render::Rect{std::clamp(a[n],-1000000,1000000),std::clamp(a[n+1],-1000000,1000000),
                                         std::clamp(a[n+2],0,1000000),std::clamp(a[n+3],0,1000000)};
@@ -2948,14 +3119,36 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
             return true;
         case effect:
             if (a.size()>=2 && slot(a[0])) {
+                const auto layer=static_cast<unsigned>(a[0]);
+                if (a[1]!=-1 && layer>=layer_limit) return true;
+                if (a[1]!=1) inactive_pc_layers[layer].reset();
                 std::vector<nnn::Value> parameters(a.begin()+2,a.end());
                 const auto mesh=a[1]==81 ? fragment_mesh(parameters) : std::optional<render::FragmentMesh>{};
-                if (!renderer->effect(static_cast<unsigned>(a[0]),a[1],std::move(parameters),mesh ? &*mesh : nullptr))
+                if (!renderer->effect(layer,a[1],std::move(parameters),mesh ? &*mesh : nullptr))
                     warn("Effect "+std::to_string(a[1])+" uses basic alpha drawing");
             }
             return true;
-        case clear_all: renderer->clear_all(); layer_variables.fill(0); return true;
-        case clear: if (!a.empty() && slot(a[0])) renderer->clear(static_cast<unsigned>(a[0])); return true;
+        case clear_all:
+            renderer->clear_all(); inactive_pc_layers={}; layer_variables.fill(0);cutins.wait_click=false; return true;
+        case face_type:
+            if (faces.enabled() && a.size()>=2) faces.expression(a[0],a[1]);
+            return true;
+        case must_face:
+            if (faces.enabled() && !a.empty()) faces.force(a[0]);
+            return true;
+        case cutin_mode:
+            if (!a.empty()) cutins.mode(a[0]);
+            return true;
+        case cutin_click:
+            if (cutins.enabled() && !a.empty() && a[0]==1) cutins.wait_click=true;
+            return true;
+        case clear:
+            if (!a.empty() && slot(a[0])) {
+                const auto layer=static_cast<unsigned>(a[0]);
+                inactive_pc_layers[layer].reset();
+                renderer->clear(layer);
+            }
+            return true;
         case prepare: renderer->prepare_overlap(); return true;
         case overlap: {
             if (frame.dialogue.layout_command) frame.dialogue.layout_command=print;
@@ -2968,9 +3161,11 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         case draw:
             if (frame.dialogue.layout_command) frame.dialogue.layout_command=print;
             apply_next_window();
+            if (draw_window_with_message && (next_message_type==0 || next_message_type==3)) select_dialogue_face();
             location(); draw_remaining=static_cast<unsigned>(a.empty() ? 0 : std::max(0,a[0]));
             ++counters.draws; return true;
         case select:
+            loaded_pc_preview={};
             frame.dialogue.window_visible=false;
             location(); return true;
         case set_cg: cg(a); return true;
@@ -3268,18 +3463,21 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
             status.loop_voice_names[i]=audio.voice_names[i];
             status.voice_exist_count[i]=audio.voice_names[i].empty()?0:1;
         }
-        for (unsigned i=0;i<pc_layers;++i) {
+        for (unsigned i=0;i<layer_limit;++i) {
             const auto binding=layer_variables[i];
-            if (binding<0 || binding>(pc_layers==32?127:32767)) throw std::runtime_error("Layer binding exceeds the PC save layout");
+            if (binding<0 || binding>(layer_limit==32?127:32767)) throw std::runtime_error("Layer binding exceeds the PC save layout");
             status.layer_variables[i%16]|=static_cast<std::uint16_t>(static_cast<unsigned>(binding)<<(i>=16?8U:0U));
         }
     }
-    pc::Status make_pc_command_status(nnn::RuntimeMode mode,bool allow_raw_position=false) const {
+    pc::Status make_pc_status(nnn::RuntimeMode mode,bool allow_raw_position=false) const {
         pc::Status status;
         capture_pc_status(status,mode);
         status.save_count=1;
         bool adjusted=vm->pc_adjustment_ids();
-        const auto wait=mode==nnn::RuntimeMode::Title ? nnn::PcScriptWait::Raw : nnn::PcScriptWait::Command;
+        auto wait=nnn::PcScriptWait::Command;
+        if (mode==nnn::RuntimeMode::Title) wait=nnn::PcScriptWait::Raw;
+        else if (mode==nnn::RuntimeMode::PrintMessage) wait=nnn::PcScriptWait::Dialogue;
+        else if (mode==nnn::RuntimeMode::SelectMessage) wait=nnn::PcScriptWait::Selection;
         std::array<nnn::PcScriptSlot,nnn::script_mode_count> positions;
         auto result=vm->capture_pc_positions(positions,adjusted,wait);
         if (!result && adjusted && allow_raw_position) {
@@ -3347,6 +3545,7 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         }
         if (title) {
             renderer.swap(next_renderer);
+            inactive_pc_layers={};loaded_pc_preview={};
             vars=title->vars;
             replacements.swap(title_replacements);
             ui_mode.reset();ui_script.clear();ui_click.reset();
@@ -3372,10 +3571,10 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         chart_run=std::move(node->run);
         shared_runtime->set_chart_selection(chart_graph->slot_capacity(),chart_run->can_select);
         renderer->hide_layers(status.layer_off);
-        for (unsigned i=0;i<pc_layers;++i) {
+        for (unsigned i=0;i<layer_limit;++i) {
             const auto packed=static_cast<unsigned>(status.layer_variables[i%16]);
-            const auto binding=pc_layers==16 ? packed : (packed>>(i>=16?8U:0U))&255U;
-            layer_variables[i]=binding<=(pc_layers==16 ? 32767U : 127U) ? static_cast<nnn::Value>(binding) : 0;
+            const auto binding=layer_limit==16 ? packed : (packed>>(i>=16?8U:0U))&255U;
+            layer_variables[i]=binding<=(layer_limit==16 ? 32767U : 127U) ? static_cast<nnn::Value>(binding) : 0;
         }
         const auto work=variable_id(chart_graph->setup().work_var);
         if (branch.restore_node) {
@@ -3414,27 +3613,137 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         restore_pc_audio(status);
         return true;
     }
+    void configure_pc_extensions(const std::string& init) {
+        const nnn::game_config::NameListSetup setup(init);
+        for (std::size_t i=1;i<=pc::max_extensions;++i) {
+            const auto value=setup.field("autoExtDataMode"+std::to_string(i));
+            if (!value) break;
+            const auto name=fold_cp932(std::string(*value));
+            if (name=="selectchart") pc_extensions.push_back(PcExtension::Chart);
+            else if (!name.empty() && std::find(nnn::system_mode_names.begin(),nnn::system_mode_names.end(),name)!=
+                     nnn::system_mode_names.end()) pc_extensions.push_back(PcExtension::Empty);
+        }
+        const bool face_enabled=config_int(init,"facePrintMode",0)!=0;
+        visit_pc_sub_extensions(setup,[&](const std::string& name) {
+            if (name=="face") pc_extensions.push_back(faces.enabled() ? PcExtension::Face : PcExtension::Empty);
+            if (name=="okikae") pc_extensions.push_back(PcExtension::Okikae);
+        });
+        if (face_enabled) pc_extensions.push_back(faces.enabled() ? PcExtension::Face : PcExtension::Empty);
+        pc_sub_end=pc_extensions.size();
+        const auto count=config_int(init,"extSaveDataNumber",0);
+        pc_extension_count_valid=count>=0 && static_cast<std::size_t>(count)<=pc::max_extensions &&
+            pc_sub_end+static_cast<std::size_t>(count)<=pc::max_extensions;
+        if (pc_extension_count_valid)
+            pc_extensions.resize(pc_sub_end+static_cast<std::size_t>(count),PcExtension::Game);
+    }
+
+    std::vector<PcExtension> pc_extension_order(bool automatic_okikae) const {
+        if (!pc_extension_count_valid) throw std::runtime_error("Invalid PC extension configuration");
+        std::vector<PcExtension> order;
+        for (std::size_t i=0;i<=pc_extensions.size();++i) {
+            if (i==pc_sub_end && automatic_okikae) order.push_back(PcExtension::Okikae);
+            if (i<pc_extensions.size() && (pc_extensions[i]!=PcExtension::Okikae || automatic_okikae))
+                order.push_back(pc_extensions[i]);
+        }
+        if (order.size()>pc::max_extensions) throw std::runtime_error("Too many PC extensions");
+        return order;
+    }
+
+    void load_pc_extensions(const std::vector<std::vector<nnn::Byte>>& payloads) {
+        bool okikae=save_layout->executable.registers_okikae.value_or(false);
+        auto order=pc_extension_order(okikae);
+        if (order.size()!=payloads.size()) {
+            okikae=!okikae;
+            order=pc_extension_order(okikae);
+        }
+        if (order.size()!=payloads.size()) throw std::runtime_error("PC extension count differs from this game");
+        for (std::size_t i=0;i<order.size();++i) {
+            const auto& payload=payloads[i];
+            switch (order[i]) {
+            case PcExtension::Empty:
+                if (!payload.empty()) throw std::runtime_error("Unexpected data in a PC extension");
+                break;
+            case PcExtension::Okikae:
+                replacements=pc::read_okikae(payload);
+                break;
+            case PcExtension::Chart: {
+                if (!configure_chart()) throw std::runtime_error("Missing PC chart configuration");
+                auto run=chart_graph->run_defaults();
+                if (payload.size()!=run.can_select.size()*sizeof(nnn::Word)+run.move_road.size())
+                    throw std::runtime_error("PC chart extension has a different layout");
+                nnn::snapshot::Reader input(payload);
+                for (auto& word:run.can_select) input(word);
+                std::copy_n(input.raw(run.move_road.size()),run.move_road.size(),run.move_road.begin());
+                shared_runtime->set_chart_selection(chart_graph->slot_capacity(),run.can_select);
+                chart_run=std::move(run);
+                break;
+            }
+            case PcExtension::Face:
+                faces.restore_pc(payload);
+                break;
+            case PcExtension::Game: throw std::runtime_error("Unsupported game-defined PC extension");
+            }
+        }
+    }
+
+    void save_pc_extensions(pc::Save& saved) {
+        for (auto extension:pc_extension_order(save_layout->registers_okikae())) {
+            switch (extension) {
+            case PcExtension::Empty:
+                saved.extensions.emplace_back();
+                break;
+            case PcExtension::Okikae: {
+                std::vector<std::string> table;
+                table.reserve(nnn::runtime_replacement_count);
+                for (std::size_t i=0;i<nnn::runtime_replacement_count;++i) table.push_back(local_replacement(i));
+                saved.extensions.push_back(pc::write_okikae(table));
+                break;
+            }
+            case PcExtension::Chart: {
+                if (!configure_chart()) throw std::runtime_error("Missing PC chart configuration");
+                const auto& run=current_chart_run();
+                nnn::snapshot::Writer output;
+                for (const auto word:run.can_select) output(word);
+                output.raw(run.move_road.data(),run.move_road.size());
+                saved.extensions.push_back(std::move(output.bytes));
+                break;
+            }
+            case PcExtension::Face:
+                saved.extensions.push_back(faces.pc_payload());
+                break;
+            case PcExtension::Game: throw std::runtime_error("Unsupported game-defined PC extension");
+            }
+        }
+    }
+
     void load_pc_save(const std::vector<nnn::Byte>& bytes) {
-        const auto saved=pc::parse_save(bytes,pc_save_header,replacement_extension);
+        const auto saved=pc::parse_save(bytes,pc_save_header);
+        loaded_save_message_width=saved.message_width;
         if (saved.log) { pc_log_layout=saved.log->layout;pc_log_voices=saved.log->voice_count; }
         if (!saved.unsupported_blocks.empty())
             throw std::runtime_error("Unsupported PC save block "+std::to_string(saved.unsupported_blocks.front().header.code));
         if (saved.info.version<0 || static_cast<unsigned>(saved.info.version)>game_version ||
             (static_cast<unsigned>(saved.info.version)>>8U)!=(game_version>>8U))
             throw std::runtime_error("PC save version differs from this game");
+        for (std::size_t i=layer_limit;i<saved.layer_records;++i) {
+            if (saved.effects[i].flag)
+                throw std::runtime_error("PC save uses layer "+std::to_string(i+1)+
+                    ", but this game restores only "+std::to_string(layer_limit)+" layers");
+        }
         const bool relocate=static_cast<unsigned>(saved.info.version)<game_version;
         const auto& status=saved.status;
         const auto mode=static_cast<nnn::RuntimeMode>(status.game_mode);
         const auto* place=place_config(status.game_mode);
-        if (!place && mode!=nnn::RuntimeMode::PrintMessage && mode!=nnn::RuntimeMode::SelectMessage)
+        const bool chart=mode==nnn::RuntimeMode::SelectChart;
+        if (!place && !chart && mode!=nnn::RuntimeMode::PrintMessage && mode!=nnn::RuntimeMode::SelectMessage)
             throw std::runtime_error("Unsupported PC save mode "+std::to_string(status.game_mode));
-        if (place && relocate && status.adjust_version==0)
-            throw std::runtime_error("PC place save needs the matching script version");
+        if ((place || chart) && relocate && status.adjust_version==0)
+            throw std::runtime_error("PC command save needs the matching script version");
         const bool dialogue=mode==nnn::RuntimeMode::PrintMessage;
         const auto active=static_cast<std::size_t>(status.run_mode);
         const auto positions=pc_positions(status);
         const auto id=static_cast<nnn::Word>(dialogue ? status.last_message_id : status.last_select_id);
-        const auto waiting=place ? nnn::PcScriptWait::Command :
+        const auto waiting=place || chart ? nnn::PcScriptWait::Command :
             dialogue ? nnn::PcScriptWait::Dialogue : nnn::PcScriptWait::Selection;
         const auto result=vm->restore_pc_positions(static_cast<nnn::ScriptMode>(active),positions,status.adjust_version!=0,waiting,id,relocate);
         if (!result) throw std::runtime_error(result.detail);
@@ -3445,28 +3754,33 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         if (saved.vars.size()!=(extended ? 2224U : 1024U)) throw std::runtime_error("PC save variable layout differs from this game");
         std::copy_n(saved.vars.begin(),first_system_variable,vars.begin());
         std::copy(saved.vars.begin()+system_variable_end,saved.vars.begin()+local_end,vars.begin()+system_variable_end);
+        if (cutins.enabled() && saved.cutin) cutins.words=*saved.cutin;
+        if (omake && saved.omake) *omake=*saved.omake;
+        load_pc_extensions(saved.extensions);
+        loaded_pc_preview=status.log_messages;
         pc_save_slot_art=status.remaining;
         last_heroine=status.last_heroine>=0 && status.last_heroine<heroine_limit ? status.last_heroine : 0;
         renderer->hide_layers(status.layer_off);
-        for (unsigned i=0;i<pc_layers;++i) {
+        for (unsigned i=0;i<layer_limit;++i) {
             const auto packed=static_cast<unsigned>(status.layer_variables[i%16]);
-            const auto binding=pc_layers==16 ? packed : (packed>>(i>=16?8U:0U))&255U;
-            const auto limit=pc_layers==16 ? 32767U : 127U;
+            const auto binding=layer_limit==16 ? packed : (packed>>(i>=16?8U:0U))&255U;
+            const auto limit=layer_limit==16 ? 32767U : 127U;
             layer_variables[i]=binding<=limit ? static_cast<nnn::Value>(binding) : 0;
             const auto& source=saved.effects[i];
-            if (!source.flag) continue;
-            if (source.count<0 || source.count_max<0 || source.count>10000000)
+            if (i>=saved.layer_records) continue;
+            if (source.flag && (source.count<0 || source.count_max<0 || source.count>10000000))
                 throw std::runtime_error("Invalid PC layer effect counter");
             render::Layer layer;
-            layer.enabled=true;layer.opaque=source.not_transparent;
+            layer.enabled=source.flag!=0;layer.opaque=source.not_transparent;
             layer.effect=source.command;
-            layer.count=static_cast<unsigned>(source.count);
+            layer.count=static_cast<unsigned>(std::clamp(source.count,0,10000000));
             layer.source=pc_rectangle(source.src);layer.from=pc_rectangle(source.dst_from);layer.to=pc_rectangle(source.dst_to);
-            if (!saved.filenames[i].empty()) layer.texture=assets.image(saved.filenames[i],true);
+            if (layer.enabled && !saved.filenames[i].empty()) layer.texture=assets.image(saved.filenames[i],true);
+            if (!layer.enabled) inactive_pc_layers[i]=InactivePcLayer{source,saved.filenames[i]};
             layer.parameters.assign(source.parameters.begin(),source.parameters.end());
-            const auto mesh=layer.effect==81 ? fragment_mesh(layer.parameters) : std::optional<render::FragmentMesh>{};
+            const auto mesh=source.flag && layer.effect==81 ? fragment_mesh(layer.parameters) : std::optional<render::FragmentMesh>{};
             const auto effect=layer.effect;
-            if (!renderer->restore_layer(i,std::move(layer),mesh ? &*mesh : nullptr))
+            if (!renderer->restore_layer(i,std::move(layer),mesh ? &*mesh : nullptr) && source.flag)
                 warn("PC save effect "+std::to_string(effect)+" uses basic alpha drawing");
         }
         if (status.frame_ms>0) {
@@ -3477,7 +3791,7 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         window_type=std::max(0,status.window_number);font_type=std::max(0,status.font_type);
         frame.script_cursor=status.cursor_number;
         auto_message=status.auto_message;cannot_click=status.cannot_click;cannot_skip=status.cannot_skip;
-        replacements=saved.replacements;surname=status.surname;given_name=status.given_name;
+        surname=status.surname;given_name=status.given_name;
         if (saved.log) for (const auto& old:saved.log->entries) {
             BacklogEntry line;
             line.text=replace_dialogue(old.text);
@@ -3486,7 +3800,22 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
             remember(std::move(line));
         }
         const auto* script=vm->GetVM(vm->ActiveMode());
-        if (place) {
+        if (chart) {
+            if (!configure_chart()) throw std::runtime_error("Missing PC chart configuration");
+            if (!chart_run) {
+                const auto current=chart_variables()(chart_graph->setup().slot_var);
+                if (current && chart_graph->node(*current)) {
+                    const auto checkpoint=chart_store->read(*current,*chart_graph);
+                    if (checkpoint) chart_run=std::move(checkpoint->run);
+                }
+            }
+            frame.wait=Wait::Running;
+            ScriptModal request;
+            request.mode=mode;
+            if (!prepare_chart_view(request,true))
+                throw std::runtime_error("PC chart save does not match this game's chart");
+            enter_modal(std::move(request),ModalMusic{},std::nullopt);
+        } else if (place) {
             const auto command=script->saved_user_command();
             if (!command || command->command!=place->command || !check_place(mode,*place))
                 throw std::runtime_error("PC save place does not match the script or game configuration");
@@ -3504,11 +3833,18 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
                 if (i) line.display_bytes+="\r\n";
                 line.display_bytes+=replace_dialogue(saved.messages[static_cast<std::size_t>(i)]);
             }
-            const auto expected=compact_message(replace_dialogue(message->text));
+            auto expected_text=replace_dialogue(message->text);
+            if (cutins.active()) {
+                auto rows=cutin_message_rows(expected_text,message->cutin,message->command);
+                for (auto& row:rows) row.erase(0,dialogue_connect(row,message->command));
+                expected_text=join_message_rows(rows);
+            }
+            const auto expected=compact_message(expected_text);
             const auto actual=compact_message(line.display_bytes);
             if (expected.empty() || actual.find(expected)==std::string::npos)
                 throw std::runtime_error("PC save dialogue does not match this installation");
-            line.speaker=speaker(line.display_bytes);
+            line.speaker=cutins.active() ? std::string{} : speaker(line.display_bytes);
+            select_dialogue_face();
             frame.word=message->word;
             frame.wait=Wait::Dialogue;
         } else {
@@ -3528,7 +3864,7 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         restore_pc_audio(status);
         const auto first_voice=std::max(playback.voice_duration_ms(0),playback.voice_duration_ms(1));
         message_has_voice=first_voice!=0;message_voice_ms=first_voice;
-        if (!place) begin_line(message_has_voice,message_voice_ms,0);
+        if (!place && !chart) begin_line(message_has_voice,message_voice_ms,0);
         set_mode(mode);
         shared_runtime->set_skip_active(false);
         shared_runtime->set_system_parameter(nnn::NNNPARAM_AUTOMODE,0);
@@ -3542,13 +3878,32 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         publish_preview_story();
     }
 
+    GameSession::PcSaveLayout pc_save_layout() const {
+        using Source=GameSession::PcSaveLayout::Source;
+        GameSession::PcSaveLayout layout;
+        layout.render_layers=render_layer_count;
+        layout.layer_limit=layer_limit;
+        layout.message_width=save_layout->message_width();
+        layout.loaded_message_width=loaded_save_message_width;
+        layout.layer_records=save_layout->layers();
+        if (save_layout->executable.layer_records) layout.source=Source::Executable;
+        return layout;
+    }
+
     pc::Save make_pc_save(const std::vector<std::uint32_t>& pixels, int picture_width, int picture_height) {
         const bool place=frame.wait==Wait::Place;
-        if (!pc_export_layout || ui_mode || !replay_films.empty() ||
-            (!place && frame.wait!=Wait::Dialogue && frame.wait!=Wait::Choice))
+        const bool chart=modal_savable() && frame.modal && frame.modal->mode==nnn::RuntimeMode::SelectChart;
+        if (ui_mode || !replay_films.empty() ||
+            (!place && !chart && frame.wait!=Wait::Dialogue && frame.wait!=Wait::Choice))
             throw std::runtime_error("This game mode or save layout cannot be exported to the PC engine");
         pc::Save saved;
         saved.header.name=pc_save_header;saved.info.version=static_cast<int>(game_version);
+        if (cutins.enabled()) saved.cutin=cutins.words;
+        saved.omake=omake;
+        const auto layout=pc_save_layout();
+        saved.layer_records=layout.layer_records;
+        saved.message_width=layout.message_width;
+        saved.status_bytes=save_layout->status_bytes();
         auto& status=saved.status;
         if (place) {
             const auto mode=shared_runtime->mode();
@@ -3556,31 +3911,11 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
             const auto command=vm->GetVM(vm->ActiveMode())->saved_user_command();
             if (!setup || !command || command->command!=setup->command)
                 throw std::runtime_error("No exportable place at the current script position");
-            status=make_pc_command_status(static_cast<nnn::RuntimeMode>(mode),true);
+            status=make_pc_status(static_cast<nnn::RuntimeMode>(mode),true);
+        } else if (chart) {
+            status=make_pc_status(nnn::RuntimeMode::SelectChart,true);
         } else {
-            capture_pc_status(status,frame.wait==Wait::Dialogue ? nnn::RuntimeMode::PrintMessage : nnn::RuntimeMode::SelectMessage);
-            status.adjust_version=1;
-            status.save_count=1;
-            for (std::size_t i=0;i<=static_cast<std::size_t>(status.run_mode);++i) {
-                auto& slot=saved.status.vm[i];
-                const auto* script=vm->GetVM(static_cast<nnn::ScriptMode>(i));
-                slot.pc=static_cast<int>(script->GetPC());
-                if (i!=0) {
-                    const auto id=script_ids.find(stem(script->Identity()));
-                    if (id==script_ids.end()) throw std::runtime_error("Active script is outside the PC project table");
-                    slot.script_number=static_cast<int>(id->second);
-                }
-                slot.stack_pointer=static_cast<int>(script->GetCallDepth());
-                for (int j=0;j<slot.stack_pointer;++j) {
-                    nnn::CallFrame call;
-                    if (!script->GetCallFrame(static_cast<std::size_t>(j),call) || call.id>INT32_MAX)
-                        throw std::runtime_error("Invalid PC export SUB frame");
-                    slot.call_stack[static_cast<std::size_t>(j)]=static_cast<int>(call.id);
-                }
-                nnn::Word call=0;
-                if (script->GetScriptCallSlot(call) && call<=INT32_MAX) slot.call_stack[253]=static_cast<int>(call);
-                else if (i<static_cast<std::size_t>(status.run_mode)) throw std::runtime_error("Missing PC export SCRIPT slot");
-            }
+            status=make_pc_status(frame.wait==Wait::Dialogue ? nnn::RuntimeMode::PrintMessage : nnn::RuntimeMode::SelectMessage);
         }
         status.remaining=save_slot_art();
         const auto* script=vm->GetVM(vm->ActiveMode());
@@ -3594,10 +3929,10 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
             // A complete script message can be saved as original bytes, so PC
             // reads it with the currently active system substitutions.
             const auto& raw=frame.dialogue.raw_bytes;
-            const bool raw_complete=frame.dialogue.command!=append && replace_dialogue(raw)==frame.dialogue.display_bytes;
+            const bool raw_complete=!cutins.active() && frame.dialogue.command!=append && replace_dialogue(raw)==frame.dialogue.display_bytes;
             rows=message_rows(raw_complete ? raw : frame.dialogue.display_bytes);
             status.message_count=static_cast<int>(rows.size());
-        } else if (!place) {
+        } else if (!place && !chart) {
             const auto id=script->saved_selection_id();
             if (!id || *id>INT32_MAX || !frame.selection) throw std::runtime_error("No exportable choice at the current script position");
             const auto& choice=*frame.selection;
@@ -3609,16 +3944,37 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
             rows.insert(rows.end(),choice.options.begin(),choice.options.end());
             status.select_count=static_cast<int>(rows.size());
         }
-        if ((!place && rows.empty()) || rows.size()>saved.messages.size())
+        if ((!place && !chart && rows.empty()) || rows.size()>saved.messages.size())
             throw std::runtime_error("Invalid PC save message rows");
+        if (saved.status_bytes==pc::preview_status_bytes && !place && !chart) {
+            status.log_messages=loaded_pc_preview;
+            if (std::none_of(status.log_messages.begin(),status.log_messages.end(),[](const auto& row){return !row.empty();})) {
+                const auto display=frame.wait==Wait::Dialogue ? message_rows(frame.dialogue.display_bytes) : rows;
+                const auto count=std::min(display.size(),status.log_messages.size());
+                for (std::size_t i=0;i<count;++i) {
+                    const bool muted=frame.wait==Wait::Dialogue
+                        ? i==0 && frame.dialogue.layout_command==print && !frame.dialogue.speaker.empty()
+                        : i<static_cast<std::size_t>(status.select_add_count);
+                    auto line=muted ? ";"+display[i] : display[i];
+                    if (line.size()<2 || line.size()>=256) break;
+                    status.log_messages[i]=std::move(line);
+                }
+            }
+        }
         std::move(rows.begin(),rows.end(),saved.messages.begin());
         saved.vars.assign(vars.begin(),vars.begin()+(system_variable_end==1200?2224:1024));
         std::fill(saved.vars.begin()+first_system_variable,saved.vars.begin()+system_variable_end,0);
-        for (unsigned i=0;i<pc_layers;++i) {
+        for (unsigned i=0;i<layer_limit;++i) {
             const auto& layer=renderer->slots()[i];
-            if (!layer.enabled) continue;
+            if (!layer.enabled && i>=saved.layer_records) continue;
+            if (!layer.enabled && inactive_pc_layers[i]) {
+                saved.effects[i]=inactive_pc_layers[i]->effect;
+                saved.filenames[i]=inactive_pc_layers[i]->filename;
+                continue;
+            }
             auto& effect=saved.effects[i];
-            effect.flag=1;effect.picture=layer.texture&&layer.effect!=54?static_cast<int>(i):-1;effect.command=layer.effect;
+            effect.flag=layer.enabled?1:0;
+            effect.picture=layer.texture&&layer.effect!=54?static_cast<int>(i):-1;effect.command=layer.effect;
             effect.count=static_cast<int>(layer.count);effect.count_max=static_cast<int>(renderer->duration(i));
             effect.previous_effect=effect.command;effect.not_transparent=layer.opaque;
             const auto rectangle=[](const render::Rect& r){return pc::Rect{r.x,r.y,r.width,r.height};};
@@ -3676,8 +4032,7 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
             }
             if (log.entries.size()>pc::log_limit) log.entries.erase(log.entries.begin(),log.entries.end()-pc::log_limit);
         }
-        for (std::size_t i=0;i<nnn::runtime_replacement_count;++i)
-            saved.replacements.push_back(local_replacement(i));
+        save_pc_extensions(saved);
         return saved;
     }
 
@@ -3704,10 +4059,12 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         if (ui_mode || !replay_films.empty() || (wait>Wait::Choice && wait!=Wait::Place && !pending_modal))
             nnn::snapshot::invalid("Cannot snapshot this game mode");
         const bool decorated_overlap=renderer->has_overlap_decoration();
-        const bool draw_message_format=decorated_overlap || next_message_type!=default_next_message_type;
+        const bool optional_classes=faces.enabled() || cutins.enabled() || omake.has_value();
+        const bool draw_message_format=decorated_overlap || optional_classes || next_message_type!=default_next_message_type;
         const bool cursor_format=frame.script_cursor!=0 || draw_message_format;
         const bool chart_format=chart_available || cursor_format;
-        out(snapshot_magic,decorated_overlap ? snapshot_version : draw_message_format ? 12U : cursor_format ? 11U : chart_format ? 10U : 9U,
+        out(snapshot_magic,optional_classes ? snapshot_version : decorated_overlap ? 13U :
+            draw_message_format ? 12U : cursor_format ? 11U : chart_format ? 10U : 9U,
             static_cast<std::uint8_t>(last_heroine));
         if (cursor_format) out(frame.script_cursor);
         if (draw_message_format) out(next_message_type);
@@ -3746,6 +4103,15 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
                 out(chart_run->can_select);
             }
         }
+        if (optional_classes) {
+            out(decorated_overlap,faces.enabled(),cutins.enabled(),omake.has_value());
+            if (faces.enabled()) {
+                const auto& face=faces.state();
+                out(face.words,face.pin_next,face.speaker_side);
+            }
+            if (cutins.enabled()) out(cutins.words,cutins.wait_click);
+            if (omake) out(*omake);
+        }
         behavior->save_snapshot(out);
         vm->save_snapshot(out,chart_format,!save_place);
         renderer->save_snapshot(out,decorated_overlap);
@@ -3776,6 +4142,10 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         std::optional<nnn::chart::RunState> chart_run;
         std::optional<ChartInteraction> chart_visit;
         int chart_scroll=0;
+        std::optional<FaceSaveState> faces;
+        std::optional<pc::CutinWords> cutin;
+        std::optional<pc::OmakeWords> omake;
+        bool cutin_wait_click=false,decorated_overlap=false;
         std::uint32_t version=0;
         nnn::Value mode=0,return_mode=0,automatic=0;
         bool skip=false;
@@ -3894,11 +4264,25 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
             }
             if (next.chart_visit && !next.chart_run) invalid("Chart visit has no run state");
         }
+        next.decorated_overlap=version==13;
+        if (version>=14) {
+            bool face=false,cutin=false,omake=false;
+            in(next.decorated_overlap,face,cutin,omake);
+            if (game && ((face && !game->faces.enabled()) || (cutin && !game->cutins.enabled()) ||
+                         (omake && !game->omake))) invalid("Snapshot dialogue or attached class configuration differs");
+            if (face) {
+                auto& state=next.faces.emplace();
+                in(state.words,state.pin_next,state.speaker_side);
+                if (state.speaker_side< -1 || state.speaker_side>1) invalid("Invalid face side in snapshot");
+            }
+            if (cutin) in(next.cutin.emplace(),next.cutin_wait_click);
+            if (omake) in(next.omake.emplace());
+        }
         return staged;
     }
 
-    static void check_snapshot_overlap(const FrameState& frame,std::uint32_t version,unsigned remaining) {
-        if (version>=13 && frame.wait!=Wait::Overlap && frame.wait!=Wait::Running)
+    static void check_snapshot_overlap(const FrameState& frame,bool decorated,unsigned remaining) {
+        if (decorated && frame.wait!=Wait::Overlap && frame.wait!=Wait::Running)
             nnn::snapshot::invalid("Decorated transition outside its frame wait");
         if (frame.wait==Wait::Overlap && remaining!=frame.remaining_frames)
             nnn::snapshot::invalid("Invalid snapshot transition");
@@ -3918,8 +4302,8 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
             invalid("Invalid snapshot modal mode");
         if (verify && !verify(saved->frame)) invalid("Native snapshot does not match the save position");
         const auto remaining=render::Layers::inspect_snapshot(in,version>=2,version>=3,version>=5,
-            version>=6,version>=7,version>=13);
-        check_snapshot_overlap(saved->frame,version,remaining);
+            version>=6,version>=7,saved->decorated_overlap);
+        check_snapshot_overlap(saved->frame,saved->decorated_overlap,remaining);
         nnn::audio::GameAudio::inspect_snapshot(in);
     }
 
@@ -4034,9 +4418,9 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         }
         auto next_renderer=make_renderer(static_cast<int>(renderer->width()),static_cast<int>(renderer->height()));
         next_renderer->load_snapshot(in,[&](const std::string& name){return assets.image(name);},
-            version>=2,version>=3,version>=5,version>=6,version>=7,version>=13);
+            version>=2,version>=3,version>=5,version>=6,version>=7,next.decorated_overlap);
         next_renderer->set_speaking(next.speaking_ms!=0);
-        check_snapshot_overlap(position,version,next_renderer->overlap_remaining());
+        check_snapshot_overlap(position,next.decorated_overlap,next_renderer->overlap_remaining());
         if (jumping) next_renderer->surface();
         std::optional<std::array<std::string,2>> restored_names;
         if (version>=5) {
@@ -4057,6 +4441,12 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
             (frame.wait==Wait::Draw || frame.wait==Wait::Overlap ||
              (frame.wait==Wait::Running && mode==static_cast<nnn::Value>(nnn::RuntimeMode::PrintOverlap))))
             frame.dialogue.layout_command=print;
+        cutins.words=next.cutin.value_or(pc::CutinWords{});
+        cutins.wait_click=next.cutin_wait_click;
+        if (next.faces) faces.restore(std::move(*next.faces));
+        else if (faces.enabled()) { faces.reset(); select_dialogue_face(); }
+        if (omake) *omake=next.omake.value_or(pc::OmakeWords{});
+        attached_status={};
         // Older native snapshots carried a copy of the system segment.
         // Its canonical state now lives in RuntimeContext across all restores.
         const auto system_begin=vars.begin()+first_system_variable,system_end=vars.begin()+system_variable_end;
@@ -4089,6 +4479,7 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         remainder=next.remainder;draw_remaining=next.draw_remaining;input=next.input;
         period=next.period;layer_variables=next.layer_variables;choice_appear_remaining=next.choice_appear_remaining;
         behavior.swap(next_behavior);vm.swap(next_vm);renderer.swap(next_renderer);
+        inactive_pc_layers={};loaded_pc_preview={};
         audio.clear();system_save_requested=restored_names.has_value();pending_notice=0;SetSkipFlags(flags);
         if (restored_names) shared_runtime->set_system_name(std::move((*restored_names)[0]),std::move((*restored_names)[1]));
         if (!jumping) {
@@ -4255,7 +4646,24 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
     }
 };
 
-GameSession::GameSession(const fs::path& root,SessionOptions options) : data_(std::make_unique<Impl>(root,options)) {}
+GameSession::GameSession(const fs::path& root,SessionOptions options) {
+    if (options.save_layout && options.runtime && options.runtime->root().lexically_normal()!=root.lexically_normal())
+        throw std::invalid_argument("Save layout belongs to another game directory");
+    if (options.replay_films.empty()) {
+        if (!options.save_layout)
+            options.save_layout=std::make_shared<const pc::DirectorySaveLayout>(resolve_pc_save_layout(root,options.analyze_executable));
+        if (!options.runtime) {
+            using Version=nnn::RuntimeSystemFileVersion;
+            using Edition=nnn::RuntimeSystemEdition;
+            constexpr std::array<Version,4> versions{Version::Automatic,Version::Classic,Version::Extended,Version::Version2};
+            const auto& system=options.save_layout->system;
+            const nnn::RuntimeDefaultsOptions defaults{versions[static_cast<std::size_t>(system.version)],
+                system.trial ? Edition::TrialOrNetwork : Edition::Full};
+            options.runtime=std::make_shared<nnn::RuntimeContext>(root,defaults);
+        }
+    }
+    data_=std::make_unique<Impl>(root,options);
+}
 GameSession::GameSession(std::unique_ptr<Impl> data) : data_(std::move(data)) {}
 GameSession::~GameSession()=default;
 std::unique_ptr<GameSession> GameSession::create_ui_preview(const fs::path& root,SessionOptions options,const GameSession* peer) {
@@ -4292,7 +4700,20 @@ void GameSession::set_chart_storage(const fs::path& private_root) {
     if (data_->chart_store) data_->chart_store->private_root(private_root);
 }
 std::optional<ScriptModal> GameSession::status_overlay(nnn::RuntimeMode type,nnn::RuntimeMode mode,bool prefer_story) {
-    return data_->status_overlay(type,mode,prefer_story);
+    auto overlays=status_overlays(mode,prefer_story);
+    for (auto& overlay:overlays) if (overlay.mode==type) return std::move(overlay);
+    return {};
+}
+std::vector<ScriptModal> GameSession::status_overlays(nnn::RuntimeMode mode,bool prefer_story) {
+    return data_->status_overlays(mode,prefer_story);
+}
+DialogueVisuals GameSession::dialogue_visuals() const {
+    DialogueVisuals result;
+    const auto& game=*data_;
+    if (game.ui_mode || (game.frame.wait!=Wait::Dialogue && draw_message()!=DrawMessage::RetainedMessage)) return result;
+    if (game.cutins.active()) game.cutins.visuals(result,message_rows(game.frame.dialogue.display_bytes).size());
+    else if (game.frame.dialogue.window_visible) game.faces.visuals(result);
+    return result;
 }
 bool GameSession::modal_savable() const { return data_->modal_savable(); }
 bool GameSession::menu_extension_enabled(nnn::RuntimeMode mode) const { return data_->menu_extension_enabled(mode); }
@@ -4359,9 +4780,11 @@ void GameSession::restore_pc_save(const std::vector<nnn::Byte>& bytes) {
     options.width=static_cast<int>(data_->renderer->width());options.height=static_cast<int>(data_->renderer->height());
     options.frame_ms=data_->default_period;options.audio.sample_rate=data_->playback.sample_rate();
     options.queue_audio_events=data_->queue_audio_events;options.runtime=data_->shared_runtime->fork();
+    options.save_layout=data_->save_layout;
     options.standalone_script=data_->standalone_script;
     options.random_seed=data_->random_state;
     options.local_clock=data_->clock_source;
+    options.script_debug_output=data_->script_debug_output;
     options.filename_encoder=data_->filename_encoder;
     auto candidate=std::make_unique<Impl>(options.runtime->root(),options);
     candidate->chart_private_root=data_->chart_private_root;
@@ -4372,7 +4795,7 @@ GameSession::PcSavePreview GameSession::inspect_pc_save(const std::vector<nnn::B
     if (bytes.size()<32) throw std::runtime_error("Incomplete PC save header");
     const auto start=bytes.begin()+16;
     const auto end=std::find(start,bytes.begin()+32,0);
-    const auto saved=pc::parse_save(bytes,std::string(start,end),std::nullopt);
+    const auto saved=pc::parse_save(bytes,std::string(start,end));
     const auto& status=saved.status;
     const auto& time=status.saved_at;
     PcSavePreview result;
@@ -4393,6 +4816,35 @@ GameSession::PcSavePreview GameSession::inspect_pc_save(const std::vector<nnn::B
 }
 std::vector<nnn::Byte> GameSession::export_pc_save(const std::vector<std::uint32_t>& pixels, int width, int height) {
     return pc::write_save(data_->make_pc_save(pixels,width,height));
+}
+GameSession::PcSaveLayout GameSession::pc_save_layout() const { return data_->pc_save_layout(); }
+int GameSession::detect_pc_system_save_version(const fs::path& root) {
+    return pc_system_save_versions(root,true)[1];
+}
+std::array<int,2> GameSession::pc_system_save_versions(const fs::path& root,bool analyze_executable) {
+    const auto layout=resolve_pc_save_layout(root,analyze_executable);
+    return {layout.files.system_save_version,
+        layout.system.source==pc::SystemSaveSource::Executable ? layout.system.version : 0};
+}
+std::array<int,2> GameSession::pc_system_save_format(const fs::path& root,bool analyze_executable) {
+    const auto system=resolve_pc_save_layout(root,analyze_executable).system;
+    return {system.version,system.trial ? 1 : 0};
+}
+std::array<int,2> GameSession::pc_system_save_format() const {
+    const auto& system=data_->save_layout->system;
+    return {system.version,system.trial ? 1 : 0};
+}
+GameSession::RuntimeRef GameSession::runtime_ref() const {
+    return {data_->shared_runtime,data_->save_layout};
+}
+std::optional<GameSession::PcSaveConfiguration> GameSession::pc_save_configuration(const fs::path& root,bool regenerate) {
+    const auto config=regenerate ? pc::regenerate_save_layout(root,[&] { return game_files_save_layout(root); })
+                                 : pc::read_save_layout(root);
+    if (!config) return {};
+    const auto& layout=config->layout;
+    return PcSaveConfiguration{config->file,layout.layers(),layout.message_width(),layout.status_bytes(),
+        layout.system.version,static_cast<int>(layout.system.source),layout.executable.layer_records.has_value(),
+        layout.registers_okikae()};
 }
 nnn::Value GameSession::save_slot_art() const { return data_->save_slot_art(); }
 void GameSession::restore_snapshot(const nnn::snapshot::Bytes& bytes,const std::function<bool(const FrameState&)>& verify,
@@ -4448,7 +4900,7 @@ void GameSession::set_ui_place_preview(unsigned place) {
     const auto* setup=data_->ui_mode ? data_->place_config(*data_->ui_mode) : nullptr;
     if (place>(setup ? setup->choices.size() : static_cast<std::size_t>(object_limit))) return;
     data_->SetVarData(setup ? setup->hover : data_->object_hover,static_cast<nnn::Value>(place));
-    for (unsigned i=0;i<tags->size();++i) {
+    for (unsigned i=0;i<data_->render_layer_count;++i) {
         const auto& tag=(*tags)[i];
         if (!tag.empty()) data_->renderer->bind(i,data_->texture(tag+std::to_string(place)),true);
     }

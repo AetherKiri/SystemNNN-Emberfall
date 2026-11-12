@@ -13,9 +13,11 @@ Tyranor-Next 维护者可从 Emberfall 源码在本地导出接入材料。运�
 
 `SystemNnnHost.canOpen(File)` 以不区分 ASCII 大小写的 `spt/sys.spt` 作为目录识别标记。播放器启动后会校验脚本和资源。宿主先将游戏库目录解析成可访问的绝对文件系统路径，再用 `SystemNnnHost.createLaunchIntent(context, folder, title)` 构造同应用内的显式 Intent。Intent 沿用 `LAUNCH`、`FOLDER_PATH`、`GAME_TITLE` 和 `PROTOCOL_VERSION=1` 协议。标题文案仍由游戏自己的配置和贴图决定。
 
-独立版和内置 TYN 都使用游戏目录下的 `sav`，兼容安装中已有的 `SAV` 等大小写。宿主可通过 `SystemNnnHost.saveDirectory(context, folder)` 获取该路径，播放器启动时会按需创建目录。Emberfall 的槽位、已读和鉴赏使用 `emberfall` 前缀，流程图节点放在 `emberfall.chart/`，原版的 `data1.sav`、`sysfile.*` 和 `chartN/` 仍由 PC 格式使用。移动整个游戏目录会带上这些 Emberfall 存档。宿主若提供备份入口，应筛选 Emberfall 数据，避免把原版存档或迁移暂存文件纳入。切换播放器前请先退出当前游戏。
+独立版和内置 TYN 都使用游戏目录下的 `sav`，兼容安装中已有的 `SAV` 等大小写。宿主可通过 `SystemNnnHost.saveDirectory(context, folder)` 获取该路径，播放器启动时会按需创建目录。剧情档使用 `dataN.sav` 或 `tdataN.sav`，全局进度使用对应的 `sysfile*.sav` 或 `tsysfile*.sav`。启用原版结果表的游戏同时使用 `result.sav`。宿主可通过 `SystemNnnHost.isPcGlobalSave` 筛选 PC 全局档。备份旧版未包含 PC 全局档时，恢复应保留现有 PC 全局档。切换播放器前请先退出当前游戏。
 
-首次用新版打开原游戏路径时，播放器会从当前应用的旧私有目录复制可迁移的存档及进度。旧档保留，`sav` 中已有的存档优先。旧独立 APK 与内置 TYN 各自只能访问自己的私有目录。要把旧独立版存档带到 TYN，先用新版独立 APK 在原路径打开一次，迁移完成后退出，再用 TYN 启动同一游戏目录。应用设置仍各自保存。保存面板长按「返回」继续提供 PC 存档导出。
+游戏的存档格式保存在 `emberfall-system.cfg`。启动先查 `init2`，再查 `init`。首次初始化全局档版号时，依次使用启用的 EXE 分析、通过区块校验的原版 `.org` 模板、游戏文件回退。配置记录最终版号、正式或试玩标记和判定来源，之后据此打开对应的全局档。配置写入失败时，本次游戏仍复用首次确定的存档格式。已有 `init2` 优先存放，其次是 `init`，两处都没有时创建 `init`。宿主可在单游戏引擎设置调用 `SystemNnnHost.saveLayoutConfig` 查看配置或手动重新分析。重生成的结果在下次打开游戏时使用。
+
+首次用新版打开原游戏路径时，播放器会从当前应用的旧私有目录复制可迁移的全局进度。旧档保留，`sav` 中已有的 PC 全局档优先。要把旧独立版的进度带到 TYN，先用新版独立 APK 在原路径打开一次，迁移完成后退出，再用 TYN 启动同一游戏目录。应用设置各自保存。
 
 宿主可在替换 Emberfall 存档前调用 `SystemNnnHost.canReplaceSaveSnapshot` 校验解包后的受管文件。校验只读取内容，覆盖输入日志顺序、存档文本和原生快照结构。游戏脚本和资源的一致性在实际读档时核对。仅含有效全局进度的备份可恢复到没有剧情档和流程图检查点的目录。迁移旧私有全局进度优先选择有效主档及与它匹配的扩展。
 

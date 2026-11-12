@@ -82,8 +82,8 @@ public:
                     (optional_progress && other.optional_progress && *optional_progress==*other.optional_progress));
         }
     };
-    static constexpr std::size_t max_read_messages=100000;
-    static constexpr std::size_t max_gallery_unlocks=150000;
+    static constexpr std::size_t max_read_messages=262144;
+    static constexpr std::size_t max_gallery_unlocks=180224;
     explicit RuntimeContext(std::filesystem::path root, RuntimeDefaultsOptions options={})
         : root_(std::move(root)), initial_(load_initial_runtime_parameters(root_,{},options)) {}
 

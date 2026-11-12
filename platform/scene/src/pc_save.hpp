@@ -3,6 +3,8 @@
 #include "nnn/script.hpp"
 
 #include <array>
+#include <filesystem>
+#include <functional>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -11,11 +13,85 @@
 namespace emberfall::scene::pc {
 
 inline constexpr std::size_t max_save_bytes=16U*1024U*1024U;
+inline constexpr std::size_t header_size=32;
+inline constexpr std::size_t effect_size=1024, filename_size=256;
+inline constexpr std::size_t classic_layer_count=16;
 inline constexpr std::size_t layer_count=32;
 inline constexpr std::size_t vm_count=4;
 inline constexpr std::size_t message_limit=64;
+inline constexpr std::size_t legacy_message_width=128;
+inline constexpr std::size_t classic_message_width=256;
+inline constexpr std::size_t expanded_message_width=1024;
 inline constexpr std::size_t log_limit=256;
 inline constexpr std::uint32_t first_extension_code=100;
+inline constexpr std::size_t max_extensions=256;
+inline constexpr std::size_t classic_status_bytes=7088, preview_status_bytes=8112;
+inline constexpr std::size_t okikae_count=100, okikae_width=64;
+using CutinWords=std::array<nnn::Value,message_limit*4>;
+inline constexpr std::size_t omake_parent_count=100, omake_slots=32;
+using OmakeWords=std::array<nnn::Value,omake_parent_count*omake_slots>;
+
+constexpr bool supported_status_size(std::size_t size) {
+    return size==classic_status_bytes || size==preview_status_bytes;
+}
+
+constexpr std::optional<std::size_t> message_width_from_block_size(std::size_t size) {
+    switch (size) {
+    case header_size+message_limit*legacy_message_width: return legacy_message_width;
+    case header_size+message_limit*classic_message_width: return classic_message_width;
+    case header_size+message_limit*expanded_message_width: return expanded_message_width;
+    default: return std::nullopt;
+    }
+}
+
+struct ExecutableSaveLayout {
+    std::optional<unsigned> layer_records;
+    std::optional<std::size_t> message_width;
+    std::optional<std::size_t> status_bytes;
+    std::optional<bool> registers_okikae;
+    std::optional<int> system_save_version;
+};
+
+// Recognizes SystemNNN write headers in PE32 x86 code sections.
+ExecutableSaveLayout executable_save_layout(const std::filesystem::path& game_root);
+
+struct FileSaveLayout {
+    unsigned layer_records=layer_count;
+    std::size_t message_width=expanded_message_width, status_bytes=classic_status_bytes;
+    bool registers_okikae=true;
+    int system_save_version=1;
+    bool trial=false;
+};
+
+enum class SystemSaveSource { Pending=0, Executable, Template, GameFiles };
+
+struct SystemSaveFormat {
+    int version=0;
+    bool trial=false;
+    SystemSaveSource source=SystemSaveSource::Pending;
+};
+
+struct DirectorySaveLayout {
+    FileSaveLayout files;
+    ExecutableSaveLayout executable;
+    SystemSaveFormat system;
+
+    unsigned layers() const { return executable.layer_records.value_or(files.layer_records); }
+    std::size_t message_width() const { return executable.message_width.value_or(files.message_width); }
+    std::size_t status_bytes() const { return executable.status_bytes.value_or(files.status_bytes); }
+    bool registers_okikae() const { return executable.registers_okikae.value_or(files.registers_okikae); }
+};
+
+struct SaveLayoutConfig {
+    DirectorySaveLayout layout;
+    std::filesystem::path file;
+};
+
+DirectorySaveLayout directory_save_layout(const std::filesystem::path& game_root,bool analyze_executable,
+                                          const std::function<FileSaveLayout()>& file_defaults);
+std::optional<SaveLayoutConfig> read_save_layout(const std::filesystem::path& game_root);
+std::optional<SaveLayoutConfig> regenerate_save_layout(const std::filesystem::path& game_root,
+                                                       const std::function<FileSaveLayout()>& file_defaults);
 
 struct Header {
     std::uint32_t size=0, code=0, dummy1=0, dummy2=0;
@@ -75,6 +151,7 @@ struct Effect {
     std::array<std::int32_t,224> parameters{};
     bool not_transparent=false;
     int previous_effect=0;
+    int padding=0;
 };
 
 struct Thumbnail {
@@ -107,20 +184,26 @@ struct Save {
     Status status;
     Thumbnail thumbnail;
     std::vector<std::int32_t> vars;
+    std::size_t layer_records=layer_count;
+    std::size_t message_width=expanded_message_width;
+    std::size_t status_bytes=classic_status_bytes;
     std::array<Effect,layer_count> effects;
     std::array<std::string,layer_count> filenames;
     std::array<std::string,message_limit> messages;
     std::optional<Log> log;
-    std::vector<std::string> replacements;
+    std::optional<CutinWords> cutin;
+    std::optional<OmakeWords> omake;
+    // Slot order is the PC registration order. A slot number carries no type.
+    std::vector<std::vector<nnn::Byte>> extensions;
     std::vector<UnsupportedBlock> unsupported_blocks;
 };
 
 // Throws std::runtime_error for malformed or unrecognized layouts. Strings
-// retain the original game encoding. EXT numbers have no intrinsic payload
-// type, so supply replacement_code only for a confirmed okikae block.
-Save parse_save(const std::vector<nnn::Byte>& bytes,std::string_view expected_header="SAVEDATA",
-                std::optional<std::uint32_t> replacement_code={});
+// retain the original game encoding. The session resolves EXT owners.
+Save parse_save(const std::vector<nnn::Byte>& bytes,std::string_view expected_header="SAVEDATA");
 std::vector<nnn::Byte> write_save(const Save& save);
+std::vector<std::string> read_okikae(const std::vector<nnn::Byte>& payload);
+std::vector<nnn::Byte> write_okikae(const std::vector<std::string>& replacements);
 
 // A chart checkpoint starts with this standalone code 2 block. Read both
 // original widths and write the current 8112-byte layout.

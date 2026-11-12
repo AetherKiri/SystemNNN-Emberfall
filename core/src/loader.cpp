@@ -349,8 +349,12 @@ public:
 
 Status validate_program(Program& p) {
     const auto& w = p.words;
-    if (w.size() < 32 || w[0] != 32 || w[1] != identify_data || w[2] != data_header)
-        return failure(ErrorCode::InvalidFormat, "Invalid 32-word SPT header");
+    if (w.size() < legacy_header_words || w[0] > w.size() ||
+        (w[0] != legacy_header_words && w[0] != adjustment_header_words) ||
+        w[1] != identify_data || w[2] != data_header)
+        return failure(ErrorCode::InvalidFormat, "Invalid 20- or 32-word SPT header");
+    const Word header_words=w[0];
+    const bool has_adjustments=header_words==adjustment_header_words;
     constexpr std::array<Word,4> magic{0x48545053U,0x45444145U,0x20203052U,0x00202020U};
     if (!std::equal(magic.begin(), magic.end(), w.begin()+12)) return failure(ErrorCode::UnsupportedFormat, "Expected SPTHEADER0", 12);
 
@@ -361,7 +365,7 @@ Status validate_program(Program& p) {
     // text regions by independently typed neighbouring tables, never by looking
     // for an arbitrary marker inside text. Executable record lengths stay strict.
     const auto raw_table = [&](WordIndex pc, Word kind) {
-        return pc >= 32 && pc <= w.size()-4 && w[pc] >= 4 &&
+        return pc >= header_words && pc <= w.size()-4 && w[pc] >= 4 &&
                w[pc+1] == identify_data && w[pc+2] == data_table && w[pc+3] == kind;
     };
     const auto header_table = [&](WordIndex field, Word kind) -> WordIndex {
@@ -375,7 +379,7 @@ Status validate_program(Program& p) {
     if (constant_record != no_word && w[constant_record] > w.size()-constant_record)
         constant_record = no_word;
     bool relocated_empty_constants = false;
-    if (constant_record == no_word) {
+    if (has_adjustments && constant_record == no_word) {
         const WordIndex sub_record = header_table(20,0x44440005U);
         // EndBuild writes STRING, INT32, SUB in this order. A stale optional
         // INT32 pointer is recoverable only for the exact empty table directly
@@ -411,7 +415,10 @@ Status validate_program(Program& p) {
     constexpr std::array<Word,7> kinds{0x44440002U,0x44440001U,0x44440004U,0x44440005U,0x44440006U,0x44440007U,0x44440008U};
     constexpr std::array<WordIndex,7> fields{5,7,18,20,21,22,23};
     std::array<Range,7> tables{};
-    for (std::size_t i=0; i<tables.size(); ++i) {
+    // Some 20-word scripts omit the INT32 table and leave its pointer at zero.
+    const std::size_t legacy_table_count=w[18]==0 ? 2U : 3U;
+    const auto table_count=has_adjustments ? tables.size() : legacy_table_count;
+    for (std::size_t i=0; i<table_count; ++i) {
         const WordIndex address = i == 2 && relocated_empty_constants ? constant_record+4 : w[fields[i]];
         if (address < 4 || !table(address-4,kinds[i],tables[i])) return failure(ErrorCode::InvalidFormat,"Invalid base table pointer",fields[i]);
     }
@@ -434,11 +441,12 @@ Status validate_program(Program& p) {
         }
     }
     for (WordIndex i=tables[2].first; i<tables[2].end; ++i) p.constants.push_back(value_from_word(w[i]));
-    for (std::size_t i=0; i<p.adjustments.size(); ++i) {
-        const Range range = tables[i+3];
-        p.adjustments[i].assign(w.begin()+range.first,w.begin()+range.end);
+    for (std::size_t i=3; i<table_count; ++i) {
+        const Range range = tables[i];
+        p.adjustments[i-3].assign(w.begin()+range.first,w.begin()+range.end);
     }
-    if (w[9] || w[16] || w[17] || w[8] || w[10]) {
+    const bool has_labels=w[9] || w[16] || w[17] || w[8] || w[10];
+    if (has_labels) {
         Range labels, films, koma;
         if (w[9]<4 || !table(w[9]-4,table_label,labels) || !table(w[16],table_label,films) || !table(w[17],table_label,koma) ||
             w[8]!=labels.end-labels.first || w[10]>w[8] || films.end-films.first!=w[8]-w[10])
@@ -487,7 +495,8 @@ Status validate_program(Program& p) {
             case control_exit: case control_endfilm: case control_endkoma: case control_endif: case control_close:
                 required=3; break;
             case control_open: case control_goto: case control_case: case control_scriptjump: required=4; break;
-            case control_sub: case control_script: case control_subscript: required=5; break;
+            case control_sub: required=5; break;
+            case control_script: case control_subscript: required=has_adjustments ? 5U : 4U; break;
             default: break;
             }
             if (required && r.length!=required) return failure(ErrorCode::InvalidFormat,"Invalid control record length",pc);
@@ -516,7 +525,7 @@ Status validate_program(Program& p) {
                     if (after<w.size() && p.record_index[after]!=no_word) branch_ends[p.record_index[after]]=true;
                 }
             }
-            if ((w[9] || w[16] || w[17] || w[8] || w[10]) && (r.code==control_sub || r.code==control_goto)) {
+            if (has_adjustments && has_labels && (r.code==control_sub || r.code==control_goto)) {
                 if (sub_slot>=p.adjustments[0].size() ||
                     (r.code==control_sub && (w[pc+4]!=sub_slot || p.adjustments[0][sub_slot]!=pc)))
                     return failure(ErrorCode::InvalidFormat,"Invalid SUB adjustment registry",pc);
@@ -552,7 +561,7 @@ Status validate_program(Program& p) {
             if (r.code==control_sub && (i+1>=p.records.size() || p.records[i+1].identify==identify_data))
                 return failure(ErrorCode::InvalidFormat,"SUB lacks executable return record",pc);
             if (r.code==control_script || r.code==control_subscript || r.code==control_scriptjump) {
-                if (r.length<(r.code==control_scriptjump?4U:5U) || w[pc+3]>=p.strings.offsets.size())
+                if (w[pc+3]>=p.strings.offsets.size())
                     return failure(ErrorCode::InvalidFormat,"Invalid script transfer fields",pc);
             }
         }
@@ -561,6 +570,9 @@ Status validate_program(Program& p) {
             const bool dialogue=!function && (r.code==command_print || r.code==command_lprint || r.code==command_append);
             if (dialogue) {
                 if (r.length<5 || w[pc+3]>=p.messages.offsets.size()) return failure(ErrorCode::InvalidFormat,"Invalid dialogue fields",pc);
+            } else if (function && r.code==function_debug) {
+                // DEBUG carries a message table index in word 3.
+                if (r.length<4 || w[pc+3]>=p.messages.offsets.size()) return failure(ErrorCode::InvalidFormat,"Invalid DEBUG message index",pc);
             } else if (function && has_string_argument(r.code)) {
                 if (r.length<5 || (w[pc+4]!=UINT32_MAX && w[pc+4]>=p.strings.offsets.size()))
                     return failure(ErrorCode::InvalidFormat,"Invalid string argument",pc);
@@ -602,7 +614,7 @@ Status validate_program(Program& p) {
         p.loop_back[next-1]=pc;
     }
     if (!blocks.empty()) return failure(ErrorCode::InvalidFormat,"Unclosed block",blocks.back().first);
-    if ((w[9] || w[16] || w[17] || w[8] || w[10]) && sub_slot!=p.adjustments[0].size())
+    if (has_adjustments && has_labels && sub_slot!=p.adjustments[0].size())
         return failure(ErrorCode::InvalidFormat,"Extra SUB adjustment entries",tables[3].first);
     return {};
 }

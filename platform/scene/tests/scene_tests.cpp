@@ -97,6 +97,89 @@ void success(const scene::FrameResult& result,Word width,Word height,const Bytes
 void failure(const scene::FrameResult& result){require(!result.error.empty(),"failure was acknowledged as success");require(result.surface.width==0&&result.surface.height==0&&result.surface.rgb.empty(),"failure exposed partial/stale pixels");}
 Model single(Word index=1){Model m;m.code.image(4,index);m.code.number(effect,{4,0});m.code.present();m.code.end();return m;}
 void le32(Bytes& bytes,std::size_t offset,Word value){for(unsigned n=0;n<4;++n)bytes[offset+n]=static_cast<Byte>(value>>(8U*n));}
+Bytes executable_save_fixture(Word effect_layers,Word filename_layers,Word message_size=0,Word status_size=0) {
+    constexpr std::size_t pe=0x80, optional=pe+24, table=optional+0xe0;
+    constexpr std::size_t code=0x200, names=0x400;
+    constexpr Word base=0x400000, name_rva=0x2000;
+    Bytes bytes(0x600);
+    le32(bytes,0,0x5a4d);
+    le32(bytes,60,static_cast<Word>(pe));
+    le32(bytes,pe,0x4550);
+    le32(bytes,pe+4,0x0002014c); // x86, two sections.
+    le32(bytes,pe+20,0x000200e0); // Optional header size, executable image flag.
+    le32(bytes,optional,0x10b);
+    le32(bytes,optional+16,0x1000);
+    le32(bytes,optional+28,base);
+    le32(bytes,table+12,0x1000);
+    le32(bytes,table+16,0x200);
+    le32(bytes,table+20,static_cast<Word>(code));
+    le32(bytes,table+36,0x60000020);
+    le32(bytes,table+40+12,name_rva);
+    le32(bytes,table+40+16,0x200);
+    le32(bytes,table+40+20,static_cast<Word>(names));
+    le32(bytes,table+40+36,0x40000040);
+    const auto write=[&](std::size_t at,std::size_t name_offset,std::string_view name,Word type,Word size,bool wide) {
+        std::copy(name.begin(),name.end(),bytes.begin()+static_cast<std::ptrdiff_t>(names+name_offset));
+        Bytes writer{0xc7,0x02,0,0,0,0,
+            0xc7,0x42,4,0,0,0,0,0xc7,0x42,8,0,0,0,0,0xc7,0x42,12,0,0,0,0};
+        le32(writer,2,size);
+        le32(writer,9,type);
+        if (wide) writer.insert(writer.end(),{0xf3,0x0f,0x7e,0x05});
+        else writer.push_back(0xa1);
+        const auto address=writer.size();
+        writer.resize(address+4);
+        le32(writer,address,base+name_rva+static_cast<Word>(name_offset));
+        if (wide) writer.insert(writer.end(),{0x66,0x0f,0xd6,0x42,16});
+        else writer.insert(writer.end(),{0x89,0x42,16});
+        std::copy(writer.begin(),writer.end(),bytes.begin()+static_cast<std::ptrdiff_t>(at));
+    };
+    write(code,0,"EFFECT",5,32+effect_layers*1024,false);
+    write(code+64,16,"EFFECTFILENAME",6,32+filename_layers*256,true);
+    if (message_size) write(code+128,32,"MESSAGE",7,message_size,false);
+    if (status_size) write(code+256,48,"GAMESTATUS",2,status_size,true);
+    return bytes;
+}
+void system_save_names(Bytes& image,int version,bool reference=true) {
+    const auto index=static_cast<std::size_t>(version-1);
+    const auto name_at=0x4c0+index*0x40;
+    const auto code_at=0x340+index*0x20;
+    const std::string stem=version==1 ? "sysfile" : "sysfile"+std::to_string(version);
+    std::copy(stem.begin(),stem.end(),image.begin()+static_cast<std::ptrdiff_t>(name_at));
+    image[name_at+32]='t';
+    std::copy(stem.begin(),stem.end(),image.begin()+static_cast<std::ptrdiff_t>(name_at+33));
+    if (!reference) return;
+    const auto address=static_cast<Word>(0x402000+name_at-0x400);
+    if (version==1) {
+        constexpr std::array<Byte,6> store{{0xc7,0x82,0xcc,0xe4,0,0}};
+        std::copy(store.begin(),store.end(),image.begin()+static_cast<std::ptrdiff_t>(code_at));
+        std::copy(store.begin(),store.end(),image.begin()+static_cast<std::ptrdiff_t>(code_at+12));
+        le32(image,code_at+6,address);
+        le32(image,code_at+18,address+32);
+    } else {
+        image[code_at]=0xba;le32(image,code_at+1,address);
+        image[code_at+5]=0xb8;le32(image,code_at+6,address+32);
+    }
+}
+Bytes system_template_fixture(int version) {
+    constexpr std::array<Word,16> codes{{0,1,5,6,7,8,9,10,11,12,13,14,15,16,17,18}};
+    constexpr std::array<Word,16> sizes{{64,2048,32800,4128,1312,2080,16416,1056,1056,1056,6432,4128,4128,65568,1056,4128}};
+    constexpr std::array<std::string_view,16> names{{"FILE INFO","SYSTEM DATA","MES FLAG","SYSTEMVAR","CGFLAG",
+        "SCENEFLAG","FILMFLAG","VOICEFLAG","MOVIEFLAG","MUSICFLAG","OKIKAE","ACHIEVEMENT","TERM",
+        "CHARAVOICEFLAG","SYSTEMFLAG2","SELECTMESSAGE"}};
+    const Word count=version==1 ? 10U : version==2 ? 14U : 16U;
+    Bytes bytes;
+    for (std::size_t i=0;i<count;++i) {
+        const auto offset=bytes.size();
+        const auto length=i==3 && version==1 ? 544U : sizes[i];
+        bytes.resize(offset+length);
+        le32(bytes,offset,length);le32(bytes,offset+4,codes[i]);
+        const auto label=bytes.begin()+static_cast<std::ptrdiff_t>(offset+16);
+        std::fill_n(label,15,' ');
+        std::copy(names[i].begin(),names[i].end(),label);
+    }
+    le32(bytes,32,count);
+    return bytes;
+}
 void be32(Bytes& bytes,Word value){for(int shift=24;shift>=0;shift-=8)bytes.push_back(static_cast<Byte>(value>>static_cast<unsigned>(shift)));}
 Word crc(const Bytes& bytes){Word value=UINT32_MAX;for(Byte byte:bytes){value^=byte;for(int bit=0;bit<8;++bit)value=(value>>1U)^(0xedb88320U&(0U-(value&1U)));}return value^UINT32_MAX;}
 Bytes metadata_heavy(){
@@ -871,7 +954,8 @@ int main(){
         model.code.print(2);
         model.code.end();
         TempGame temp(model);
-        temp.text("init/game.xtx","SelectChartIsDefault 1\nclearAutoAfterLoad 1\nPrintStatusClassDisable 0\n");
+        temp.text("init/game.xtx","SelectChartIsDefault 1\nclearAutoAfterLoad 1\nPrintStatusClassDisable 0\n"
+            "autoExtDataMode1 printstatus\nautoExtDataMode2 selectchart\n");
         temp.text("init/printStatus.xtx","set1_1VarName now\n");
         temp.text("init/selectChart.xtx","chartListNumber 2\nbasicChartNumber 2\nautoNextOn 1\n"
             "slotSizeX 1\nslotSizeY 1\nslotAreaStartX 0\nslotVarName now\nworkVarName prior\n"
@@ -900,6 +984,32 @@ int main(){
         require(scene::parse_chart_node(initial,graph).vars[1]==0 && moved.run.move_road[0]==1 && moved.vars[2]==1 &&
             game.runtime()->chart_progress()->seen[1]==1 && game.runtime()->chart_progress()->seen[1000]==1,
             "PC node checkpoints and global seen flags are separate");
+        auto slot=scene::pc::parse_save(game.export_pc_save());
+        const auto chart_bytes=moved.run.can_select.size()*4+moved.run.move_road.size();
+        require(slot.status.game_mode==34 && slot.extensions.size()==2 && slot.extensions[0].empty() &&
+            slot.extensions[1].size()==chart_bytes && slot.extensions[1][moved.run.can_select.size()*4]==1,
+            "chart state follows the original mode registration order");
+        std::vector<std::string> substitutions(scene::pc::okikae_count);
+        substitutions[0]="PC name";
+        slot.extensions.push_back(scene::pc::write_okikae(substitutions));
+        const auto slot_with_replacements=scene::pc::write_save(slot);
+        slot.extensions.pop_back();
+        auto restore_options=options;restore_options.runtime=game.runtime()->fork();
+        scene::GameSession restored_chart(temp.root,restore_options);
+        restored_chart.set_chart_storage(temp.root/"pc-loaded");
+        restored_chart.restore_pc_save(slot_with_replacements);
+        const auto& loaded_modal=restored_chart.state().modal;
+        const auto loaded_story=restored_chart.runtime()->preview_story();
+        require(loaded_modal && loaded_modal->chart && loaded_modal->selection==1000 && loaded_modal->page==1 &&
+            loaded_story && loaded_story->replacements==substitutions,
+            "ordinary PC slot did not restore the chart and replacement text");
+        require(scene::pc::parse_save(restored_chart.export_pc_save()).extensions==slot.extensions,
+            "modified replacement text alone added an okikae extension to the classic save");
+        const auto loaded_request=loaded_modal->request;
+        require(restored_chart.act_modal(loaded_request,1,30*65536+55)==4 &&
+            restored_chart.act_modal(loaded_request,8,0)==2 &&
+            restored_chart.step_frame(0).wait==scene::Wait::Dialogue &&
+            restored_chart.variable(0)==1001,"chart slot resumes the script after a node is chosen");
         const auto snapshot=game.snapshot();
         const auto request=modal->request;
         require(snapshot[4]==10 && game.act_modal(request,7,60)==0 && game.state().modal->chart->scroll==60,
@@ -1286,6 +1396,7 @@ int main(){
         model.code.number(0x33330056U,{2});model.code.print(2);
         model.code.number(0x33330056U,{0});model.code.print(3);model.code.end();
         TempGame temp(model);
+        temp.write("game.exe",executable_save_fixture(32,32,0,scene::pc::preview_status_bytes));
         Model background;background.code.number(0x33330056U,{3});background.code.present(10);background.code.end();
         temp.write("spt/cursor_back.spt",script(background));
         Model quiet;quiet.code.present(10);quiet.code.end();
@@ -1305,10 +1416,29 @@ int main(){
         require(game.state().script_cursor==2,"native snapshot lost the script cursor");
         game.restore_snapshot(legacy);
         require(game.state().script_cursor==0,"old snapshot inherited a later script cursor");
-        auto pc_state=scene::pc::parse_save(pc,"SAVEDATA",scene::pc::first_extension_code);pc_state.status.cursor_number=1;
-        game.restore_pc_save(scene::pc::write_save(pc_state));
-        require(game.state().script_cursor==1 && scene::pc::parse_save(game.export_pc_save()).status.cursor_number==1,
-            "PC slot cursor was not restored and exported");
+        auto pc_state=scene::pc::parse_save(pc);pc_state.status.cursor_number=1;
+        pc_state.status_bytes=scene::pc::preview_status_bytes;
+        pc_state.status.log_messages[0]="PC save preview";
+        pc_state.effects[7].count=42;
+        pc_state.effects[7].previous_effect=36;
+        pc_state.effects[7].padding=57;
+        const auto pc_with_preview=scene::pc::write_save(pc_state);
+        game.restore_pc_save(pc_with_preview);
+        const auto pc_roundtrip=scene::pc::parse_save(game.export_pc_save());
+        require(game.state().script_cursor==1 && pc_roundtrip.status.cursor_number==1 &&
+            pc_roundtrip.status_bytes==scene::pc::preview_status_bytes &&
+            pc_roundtrip.status.log_messages[0]=="PC save preview" && !pc_roundtrip.effects[7].flag &&
+            pc_roundtrip.effects[7].count==42 && pc_roundtrip.effects[7].previous_effect==36 &&
+            pc_roundtrip.effects[7].padding==57,
+            "PC status width, cursor, preview and disabled layer must survive resaving");
+        auto without_analysis=test_options();
+        without_analysis.analyze_executable=false;
+        std::filesystem::remove(temp.root/"init/emberfall-system.cfg");
+        scene::GameSession file_only(temp.root,without_analysis);
+        file_only.restore_pc_save(pc_with_preview);
+        const auto classic=scene::pc::parse_save(file_only.export_pc_save());
+        require(classic.status_bytes==scene::pc::classic_status_bytes && classic.status.cursor_number==1,
+            "importing an 8112-byte status changed the fallback or lost the restored cursor");
         scene::GameSession fresh(temp.root,test_options());
         require(fresh.step_frame(0).script_cursor==0,"new story inherited a previous cursor");
         auto options=test_options();options.runtime=game.runtime();
@@ -1348,7 +1478,7 @@ int main(){
         scene::GameSession replay(temp.root,test_options());
         replay.seed_legacy_replay_variables();
         require(replay.variable(205)==3 && game.variable(205)==17,"legacy replay did not isolate its initial variables");
-        auto current=scene::pc::parse_save(good,"SAVEDATA",scene::pc::first_extension_code);
+        auto current=scene::pc::parse_save(good);
         require(current.log && current.log->voice_count==1,"one-voice PC fixture");
         current.log->layout=scene::pc::LogLayout::MultiVoice;
         game.restore_pc_save(scene::pc::write_save(current));
@@ -1357,6 +1487,317 @@ int main(){
         require(exported.log && exported.log->layout==scene::pc::LogLayout::MultiVoice && exported.log->voice_count==1,
             "native snapshot forgot the imported single-voice layout");
     });
+    suite.test("classic Windows slots preserve the layer layout and both dialogue rows",[]{
+        Model model;model.message=true;model.message_text="Reader\r\n\"Second row\"";
+        model.code.number(effect,{14,54,0,100,150,200});
+        model.code.print(1);model.code.end();
+        TempGame temp(model);
+        temp.write("spt/var.fxf",{0x8e,0xf5});
+        scene::GameSession game(temp.root,test_options());
+        require(game.step_frame(0).wait==scene::Wait::Dialogue,"first dialogue");
+        const auto initial=game.state().dialogue.display_bytes;
+        auto compact=game.export_pc_save({0xff123456U},1,1);
+        const auto loaded=scene::pc::parse_save(compact);
+        require(loaded.layer_records==16 && loaded.message_width==256 && !loaded.log &&
+                loaded.info.extension_count==0,"classic project wrote the expanded save layout");
+        require(loaded.effects[14].flag==1 && loaded.effects[14].command==54 && !loaded.effects[16].flag,
+                "compact layer records did not map to the same renderer slots");
+        require(loaded.messages[0]=="Reader" && loaded.messages[1]=="\"Second row\"",
+                "compact message rows use the wrong stride");
+        const auto preview=scene::GameSession::inspect_pc_save(compact,512U*512U);
+        require(preview.summary=="Reader" && !preview.pixels.empty() && preview.pixels.front()==0xff123456U,
+                "compact PC slot could not be listed");
+        game.restore_pc_save(compact);
+        require(game.state().dialogue.display_bytes==initial &&
+                game.surface().rgb==Bytes{100,150,200},"compact PC slot lost a message or layer");
+
+        // The two layer blocks must have the same record count.
+        const std::size_t filenames_offset=32+64+7088+48+preview.pixels.size()*4+4128+16416;
+        compact.insert(compact.begin()+static_cast<std::ptrdiff_t>(filenames_offset+4128),4096,0);
+        le32(compact,filenames_offset,8224);
+        bool rejected=false;
+        try{(void)scene::pc::parse_save(compact);}catch(const std::runtime_error&){rejected=true;}
+        require(rejected,"mismatched layer blocks were accepted");
+    });
+    suite.test("PC executable selects first-save layer records for a classic game",[]{
+        Model model;model.message=true;model.code.print(1);model.code.end();
+        TempGame temp(model);
+        const auto cache=temp.root/"init/emberfall-system.cfg";
+        temp.write("spt/var.fxf",{0x8e,0xf5});
+        scene::GameSession first(temp.root,test_options());
+        require(first.step_frame(0).wait==scene::Wait::Dialogue,"first dialogue");
+        const auto fallback=first.export_pc_save();
+        require(scene::pc::parse_save(fallback).layer_records==16,"missing executable changed the fallback");
+
+        temp.write("translated.EXE",executable_save_fixture(32,32));
+        temp.write("setup.exe",Bytes(80,0));
+        scene::GameSession cached_fallback(temp.root,test_options());
+        require(cached_fallback.pc_save_layout().layer_records==16 && std::filesystem::remove(cache),
+            "the first launch without an EXE did not cache its result under init");
+        scene::GameSession translated(temp.root,test_options());
+        require(translated.step_frame(0).wait==scene::Wait::Dialogue,"translated game did not start");
+        const auto expanded=translated.export_pc_save();
+        const auto saved=scene::pc::parse_save(expanded);
+        require(saved.layer_records==32 && saved.message_width==256 && !saved.log,
+            "executable layer count changed other classic save fields");
+        using LayoutSource=scene::GameSession::PcSaveLayout::Source;
+        const auto layout=translated.pc_save_layout();
+        require(layout.source==LayoutSource::Executable && layout.render_layers==16 && layout.layer_limit==16 &&
+            layout.layer_records==saved.layer_records && layout.message_width==saved.message_width &&
+            !layout.loaded_message_width,"save layout diagnostics did not match the executable-selected slot");
+        auto with_active_layer=saved;
+        with_active_layer.effects[16].flag=1;
+        with_active_layer.effects[16].picture=-1;
+        with_active_layer.effects[16].command=54;
+        const auto active_layer_save=scene::pc::write_save(with_active_layer);
+        const auto before=translated.snapshot();
+        bool rejected=false;
+        try { translated.restore_pc_save(active_layer_save); }
+        catch (const std::runtime_error& e) { rejected=std::string_view(e.what()).find("layer 17")!=std::string_view::npos; }
+        require(rejected && translated.snapshot()==before,"restoring a classic slot discarded an active upper layer");
+        translated.restore_pc_save(fallback);
+        require(scene::pc::parse_save(translated.export_pc_save()).layer_records==32,
+            "loading an earlier slot overrode the executable layout");
+
+        temp.write("original.exe",executable_save_fixture(16,16));
+        require(!scene::pc::executable_save_layout(temp.root).layer_records,"conflicting executables chose a layout");
+        temp.write("translated.EXE",executable_save_fixture(32,16));
+        require(!scene::pc::executable_save_layout(temp.root).layer_records,"inconsistent block sizes chose a layout");
+        auto file_options=test_options();
+        file_options.analyze_executable=false;
+        scene::GameSession cached_exe(temp.root,file_options);
+        require(cached_exe.pc_save_layout().layer_records==32 && std::filesystem::remove(cache),
+            "a valid cached EXE result did not take priority over the current switch");
+        scene::GameSession file_only(temp.root,file_options);
+        require(file_only.step_frame(0).wait==scene::Wait::Dialogue &&
+            file_only.pc_save_layout().source==LayoutSource::GameFiles &&
+            scene::pc::parse_save(file_only.export_pc_save()).layer_records==16,
+            "disabled executable analysis did not use the game files for the first save");
+        file_only.restore_pc_save(expanded);
+        require(file_only.pc_save_layout().source==LayoutSource::GameFiles &&
+            file_only.pc_save_layout().loaded_message_width==saved.message_width &&
+            scene::pc::parse_save(file_only.export_pc_save()).layer_records==16,
+            "an imported 32-slot save overrode the configured 16-slot fallback");
+        file_only.restore_pc_save(fallback);
+        require(scene::pc::parse_save(file_only.export_pc_save()).layer_records==16,
+            "restoring a second save enabled the executable override");
+
+        std::filesystem::remove(cache);
+        scene::GameSession conflict(temp.root,test_options());
+        require(conflict.step_frame(0).wait==scene::Wait::Dialogue &&
+            scene::pc::parse_save(conflict.export_pc_save()).layer_records==16,"conflict did not use the fallback");
+        conflict.restore_pc_save(expanded);
+        require(scene::pc::parse_save(conflict.export_pc_save()).layer_records==16,
+            "an imported 32-slot save overrode the fallback after conflicting executables");
+
+        temp.text("init/game.xtx","layerExpand 32\n");
+        std::filesystem::remove(cache);
+        scene::GameSession full(temp.root,test_options());
+        full.restore_pc_save(active_layer_save);
+        require(scene::pc::parse_save(full.export_pc_save()).effects[16].flag,
+            "expanded game lost an active layer that fits its configuration");
+    });
+    suite.test("PC FACE and CUTIN retain the active message across both save formats",[]{
+        Model model;model.message=true;model.message_text="Alice\r\nFirst\r\nSecond";
+        model.code.number(0x33330064U,{2,2}); // FACE
+        model.code.number(0x33330065U,{2|(2U<<16U)}); // MUSTFACE on the right
+        model.code.print(1);
+        model.code.number(0x33330065U,{0});
+        model.code.number(0x3333005bU,{1});
+        model.code.add({6,command,0x22220001U,0,2,1});
+        model.code.number(0x3333005cU,{1});
+        model.code.add({6,command,0x22220003U,0,3,2});
+        model.code.number(0x3333005bU,{0});
+        model.code.print(4);
+        model.code.end();
+        TempGame temp(model);
+        temp.text("init/game.xtx","facePrintMode 2\nuseCutinFlag 1\n");
+        temp.write("spt/var.fxf",{0x8e,0xf5});
+        temp.text("init/face.xtx","facePrintNumber 2\nprintX2 220\nface2TypeNumber 2\nface2Type2animePattern 3\n");
+        temp.text("spt/facelist.xtx","dummy,Dummy\naa,Alice\nbb,Bob\n");
+        temp.text("spt/cutinChara.xtx","dummy none 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n"
+            "Alice none 100 200 2 30 1 8 7 25 50 75 80 3 0 0\n"
+            "Alice none 300 100 0 20 -2 3 4 0 0 0 0 0 0 0\n");
+        scene::GameSession game(temp.root,test_options());
+        require(game.step_frame(0).wait==scene::Wait::Dialogue,"FACE did not reach the first line");
+        auto visuals=game.dialogue_visuals();
+        require(visuals.portrait_depth==2 && visuals.portraits.size()==1 &&
+            visuals.portraits[0].image=="sys/ta_sys_face2__2" && visuals.portraits[0].x==220 &&
+            visuals.portraits[0].frames==3,"forced face, pinned side, or expression atlas differs");
+        const auto face_save=game.export_pc_save();
+        const auto face_blocks=scene::pc::parse_save(face_save);
+        require(face_blocks.extensions.size()==1 && face_blocks.extensions[0].size()==1024 &&
+            face_blocks.extensions[0][2*4]==2 && face_blocks.extensions[0][252*4]==2,
+            "FACE EXT did not write original word positions");
+        game.restore_pc_save(face_save);
+        require(game.dialogue_visuals().portraits.at(0).image=="sys/ta_sys_face2__2","FACE EXT did not restore the atlas");
+        scene::InputState advance;advance.advance=true;
+        game.step_frame(0,advance);
+        visuals=game.dialogue_visuals();
+        require(visuals.cutin && visuals.portraits.empty() && visuals.rows.size()==2 &&
+            visuals.rows[0].x==100 && visuals.rows[0].window_rows==2 && visuals.rows[0].window_color==0xcc19324bU &&
+            visuals.rows[1].x==102 && visuals.rows[1].y==230 && visuals.rows[1].font_delta==3 &&
+            game.state().dialogue.display_bytes=="First\r\nSecond","CUTIN did not apply the row style and suppress the speaker row");
+        const auto cutin_save=game.export_pc_save();
+        const auto cutin_blocks=scene::pc::parse_save(cutin_save);
+        require(cutin_blocks.cutin && (*cutin_blocks.cutin)[0]==1 && (*cutin_blocks.cutin)[1]==2 &&
+            cutin_blocks.cutin->back()==1 && cutin_blocks.messages[0]=="First","CUTIN mode or row words were not written");
+        const auto snapshot=game.snapshot();
+        nnn::snapshot::Reader inspected(snapshot);
+        scene::GameSession::inspect_snapshot(inspected);
+        require(inspected.remaining()==0,"snapshot inspection missed optional runtime data");
+        game.restore_pc_save(cutin_save);
+        require(game.dialogue_visuals().rows.at(0).window_rows==2,"PC CUTIN did not restore the group");
+        game.step_frame(0,advance);
+        visuals=game.dialogue_visuals();
+        require(visuals.rows.size()==4 && visuals.rows[2].window_image=="sys/ta_cutinwindow2" &&
+            game.append_prefix()=="First\r\nSecond","CUTIN APPEND lost the previous group or image window");
+        game.step_frame(0,advance);
+        visuals=game.dialogue_visuals();
+        require(!visuals.cutin && visuals.portraits.size()==2 &&
+            visuals.portraits[0].image=="sys/ta_sys_face1" && visuals.portraits[1].image=="sys/ta_sys_face2__2",
+            "ordinary PRINT did not restore the speaker and fixed side");
+        game.restore_snapshot(snapshot);
+        require(game.dialogue_visuals().rows.at(0).window_rows==2 &&
+            game.step_frame(0,advance).dialogue.display_bytes=="First\r\nSecond\r\nFirst\r\nSecond",
+            "native snapshot lost the CUTIN state needed for APPEND");
+    });
+    suite.test("PC OMAKECLASS restores available status layers in registration order",[]{
+        Model model;model.message=true;model.code.print(1);model.code.end();
+        TempGame temp(model);
+        temp.text("init/game.xtx","useExtClass 1\nprintStatusIsDefault 1\nprintPartyIsDefault 1\n");
+        const std::string names="place\nhp\nvisible\nmember\n";
+        Bytes encoded(names.begin(),names.end());
+        for (auto& byte:encoded) byte^=0xffU;
+        temp.write("spt/var.fxf",encoded);
+        temp.text("spt/varinitdata.xtx","1\n20\n1\n1\n");
+        const std::string controls="setNumber 1\ncontrolVarName1 place\n";
+        temp.text("init/printStatus.xtx",controls+"set1_1VarName hp\n");
+        temp.text("init/printParty.xtx",controls);
+        temp.text("init/faceStatusList.xtx","statusPrintVarName visible\nstatus1PlayerVarName member\n"
+            "suujiNumber 1\ndata1_1VarName hp\n");
+        scene::GameSession game(temp.root,test_options());
+        require(game.step_frame(0).wait==scene::Wait::Dialogue,"OMAKECLASS fixture did not reach a savable screen");
+        using Mode=nnn::RuntimeMode;
+        require(game.status_overlays(Mode::PrintMessage).empty(),"an empty attachment table added a layer");
+        auto saved=scene::pc::parse_save(game.export_pc_save());
+        require(saved.omake.has_value(),"useExtClass did not write OMAKECLASS");
+        const auto base=static_cast<std::size_t>(Mode::PrintMessage)*scene::pc::omake_slots;
+        (*saved.omake)[base]=static_cast<int>(Mode::PrintParty)*256+4;
+        (*saved.omake)[base+1]=98*256+6;
+        (*saved.omake)[base+2]=static_cast<int>(Mode::PrintStatus)*256+6;
+        const auto title=static_cast<std::size_t>(Mode::Title)*scene::pc::omake_slots;
+        (*saved.omake)[title]=static_cast<int>(Mode::PrintStatus)*256+2;
+        game.restore_pc_save(scene::pc::write_save(saved));
+        const auto overlays=game.status_overlays(Mode::PrintMessage);
+        require(overlays.size()==2 && overlays[0].mode==Mode::PrintParty && overlays[1].mode==Mode::PrintStatus &&
+            game.status_overlays(Mode::Title).empty() && !game.state().modal,
+            "attached class order or the calculate-only flag differs");
+        const auto snapshot=game.snapshot();
+        game.restore_snapshot(snapshot);
+        require(scene::pc::parse_save(game.export_pc_save()).omake==saved.omake,
+            "OMAKECLASS registrations were lost across a native snapshot");
+    });
+    suite.test("PC MESSAGE writes the executable stride or the renderer fallback",[]{
+        Model model;model.message=true;model.message_text="Reader\r\n\"Second row\"";
+        model.code.print(1);model.code.end();
+        TempGame temp(model);
+        temp.text("init/game.xtx","layerExpand 32\n");
+        const auto cache=temp.root/"init/emberfall-system.cfg";
+        constexpr std::array<std::pair<Word,std::size_t>,3> layouts{{{8224,128},{16416,256},{65568,1024}}};
+        Bytes compact;
+        for (const auto& [block_size,width]:layouts) {
+            std::filesystem::remove(cache);
+            temp.write("game.exe",executable_save_fixture(32,32,block_size));
+            scene::GameSession game(temp.root,test_options());
+            require(game.step_frame(0).wait==scene::Wait::Dialogue,"first dialogue");
+            const auto layout=game.pc_save_layout();
+            require(layout.render_layers==32 && layout.layer_records==32 && layout.message_width==width,
+                "the executable MESSAGE layout was inferred from the layer count");
+            const auto bytes=game.export_pc_save();
+            const auto written=scene::pc::parse_save(bytes);
+            require(written.layer_records==32 && written.message_width==width &&
+                written.messages[0]=="Reader" && written.messages[1]=="\"Second row\"",
+                "the save did not use the selected MESSAGE stride");
+            game.restore_pc_save(bytes);
+            require(game.state().dialogue.display_bytes==model.message_text,"restoring the slot lost its dialogue rows");
+            if (width==256) compact=bytes;
+        }
+
+        temp.write("game.exe",executable_save_fixture(32,32,16416));
+        std::filesystem::remove(cache);
+        auto file_options=test_options();
+        file_options.analyze_executable=false;
+        scene::GameSession file_only(temp.root,file_options);
+        require(file_only.step_frame(0).wait==scene::Wait::Dialogue,"first dialogue with the scanner disabled");
+        const auto expanded=file_only.export_pc_save();
+        require(scene::pc::parse_save(expanded).message_width==1024,"disabled analysis did not use the renderer fallback");
+        file_only.restore_pc_save(compact);
+        require(file_only.state().dialogue.display_bytes==model.message_text &&
+            file_only.pc_save_layout().loaded_message_width==256 &&
+            scene::pc::parse_save(file_only.export_pc_save()).message_width==1024,
+            "the original MESSAGE stride was not used for reading or overrode the write fallback");
+        std::filesystem::remove(cache);
+        scene::GameSession detected(temp.root,test_options());
+        detected.restore_pc_save(expanded);
+        require(detected.pc_save_layout().loaded_message_width==1024 &&
+            scene::pc::parse_save(detected.export_pc_save()).message_width==256,
+            "loading a wider slot overrode the executable MESSAGE width");
+
+        temp.write("translated.exe",executable_save_fixture(32,32,65568));
+        const auto conflict=scene::pc::executable_save_layout(temp.root);
+        require(conflict.layer_records==32 && !conflict.message_width,"conflicting MESSAGE sizes chose a row width");
+        std::filesystem::remove(cache);
+        scene::GameSession conflicting(temp.root,test_options());
+        conflicting.restore_pc_save(compact);
+        require(scene::pc::parse_save(conflicting.export_pc_save()).message_width==1024,
+            "an imported MESSAGE stride overrode the renderer when the executables disagreed");
+        temp.write("translated.exe",executable_save_fixture(32,32,16417));
+        require(!scene::pc::executable_save_layout(temp.root).message_width,"an unsupported MESSAGE length chose a row width");
+    });
+    suite.test("PC layout config handles both init directories and the analysis switch",[]{
+        Model model;model.message=true;model.code.print(1);model.code.end();
+        TempGame temp(model);
+        temp.text("init/game.xtx","layerExpand 16\n");
+        std::filesystem::create_directory(temp.root/"init2");
+        temp.write("spt/var.fxf",{0x8e,0xf5});
+        temp.write("game.exe",executable_save_fixture(32,32,8224,scene::pc::preview_status_bytes));
+        const auto plain=temp.root/"init/emberfall-system.cfg";
+        const auto preferred=temp.root/"init2/emberfall-system.cfg";
+        require(!scene::GameSession::pc_save_configuration(temp.root,false) && !std::filesystem::exists(preferred),
+            "inspecting the game created a layout config");
+        auto disabled=test_options();disabled.analyze_executable=false;
+        scene::GameSession files(temp.root,disabled);
+        require(files.pc_save_layout().layer_records==16 && std::filesystem::is_regular_file(preferred) &&
+            !std::filesystem::exists(plain),"file fallback did not write to the preferred directory");
+
+        std::filesystem::rename(preferred,plain);
+        scene::GameSession enabled(temp.root,test_options());
+        require(enabled.pc_save_layout().layer_records==16,
+            "enabling analysis unexpectedly replaced the config in init");
+        const auto refreshed=scene::GameSession::pc_save_configuration(temp.root,true);
+        require(refreshed && refreshed->file==plain && refreshed->executable_layout && refreshed->message_width==128 &&
+            refreshed->status_bytes==scene::pc::preview_status_bytes && !std::filesystem::exists(preferred),
+            "manual regeneration did not update the existing config");
+
+        temp.text("init2/emberfall-system.cfg","emberfall_system 1\nfile_layer_records 999\n");
+        std::filesystem::remove(temp.root/"game.exe");
+        scene::GameSession cached(temp.root,test_options());
+        require(cached.step_frame(0).wait==scene::Wait::Dialogue && cached.pc_save_layout().message_width==128 &&
+            scene::pc::parse_save(cached.export_pc_save()).status_bytes==scene::pc::preview_status_bytes,
+            "an invalid init2 config hid the valid config in init");
+        const auto inspected=scene::GameSession::pc_save_configuration(temp.root,false);
+        require(inspected && inspected->file==plain && inspected->layer_records==32,
+            "inspection did not report the same config used at launch");
+
+        std::filesystem::remove(plain);
+        scene::GameSession regenerated(temp.root,test_options());
+        require(regenerated.pc_save_layout().layer_records==16 && regenerated.pc_save_layout().message_width==256,
+            "an invalid config was accepted as a save layout");
+        const auto rewritten=read_file(preferred);
+        require(std::string(rewritten.begin(),rewritten.end()).find("exe_analyzed 1")!=std::string::npos,
+            "the completed fallback did not replace the invalid config");
+    });
     suite.test("PC slot restores dialogue when the saved BGM is missing",[]{
         Model model;model.message=true;model.code.print(1);model.code.print(2);model.code.end();
         TempGame temp(model);
@@ -1364,7 +1805,7 @@ int main(){
         temp.text("wgq/missing.mml","missing_intro [0: missing_loop]\n");
         scene::GameSession game(temp.root,test_options());
         require(game.step_frame(0).wait==scene::Wait::Dialogue,"first dialogue");
-        auto saved=scene::pc::parse_save(game.export_pc_save(),"SAVEDATA",scene::pc::first_extension_code);
+        auto saved=scene::pc::parse_save(game.export_pc_save());
         saved.status.bgm_number=0;
         saved.status.bgm_volume=70;
         scene::InputState advance;advance.advance=true;
@@ -1487,6 +1928,35 @@ int main(){
                     "DRAW did not finish on time or leaked its one-shot window mode");
         }
     });
+    suite.test("game setup selects the original final screen layer and script limit",[]{
+        for (const bool classic:{true,false}) {
+            Model model;
+            model.code.number(effect,{15,54,0,255,0,0});
+            model.code.number(effect,{31,54,0,0,255,0});
+            model.code.present(1);
+            model.code.end();
+            TempGame temp(model);
+            temp.write(classic ? "spt/var.fxf" : "spt/var2.fxf",{0x8e,0xf5});
+            if (!classic) temp.text("init/game.xtx","layerExpand 32\n");
+            scene::GameSession game(temp.root,test_options());
+            require(game.step_frame(0).wait==scene::Wait::Draw && game.screen_layer_active(),"wrong screen layer");
+            require(game.layers()[31].enabled==!classic,"classic script enabled a layer outside its layout");
+            game.capture_screen_layer(true);
+            auto frame=game.take_screen_layer();
+            require(static_cast<bool>(frame),"screen layer was omitted from the detached frame");
+            std::array<Byte,4> message{0,0,255,255};
+            frame->composite(message.data(),message.size());
+            require(message==(classic ? std::array<Byte,4>{255,0,0,255} : std::array<Byte,4>{0,255,0,255}),
+                "screen effect must cover the message plane");
+            if (!classic) {
+                temp.text("init/game.xtx","layerExpand 16\n");
+                scene::GameSession capped(temp.root,test_options());
+                require(capped.step_frame(0).wait==scene::Wait::Draw && capped.layers()[15].enabled &&
+                    !capped.layers()[31].enabled && !capped.screen_layer_active(),
+                    "expanded project with a 16-layer script limit must keep layer 15 before the message");
+            }
+        }
+    });
     suite.test("DRAW applies the long window before the last screen layer",[]{
         Model m;
         m.code.number(effect,{0,54,0,100,100,100});
@@ -1582,6 +2052,20 @@ int main(){
         require(stats.errors==0&&stats.log.size()==1&&stats.log[0].clips.size()==1,"PCM log");
         const auto& clip=stats.log[0].clips[0];require(clip.rate==44100&&clip.channels==(bits==8?1U:2U)&&clip.frames==(bits==8?5U:2U),"PCM format/partial frame");
         std::int16_t output[8]{};audio.pull(output,4);require(std::any_of(std::begin(output),std::end(output),[](auto s){return s!=0;}),"silent PCM output");
+    });
+    suite.test("24-bit PCM VAW preserves sign and stereo channel order",[]{
+        Model m;m.code.end();TempGame temp(m);temp.text("spt/selist.xtx","sample\n");
+        const Bytes samples{0xff,0xff,0x7f,0x00,0x00,0x80,0xab,0x34,0x12,0x11,0xcc,0xed};
+        temp.write("vaw/se/sample.vaw",pcm_vaw(2,44100,24,samples));
+        nnn::audio::Settings settings;settings.sound_volume=100;settings.record_events=true;
+        nnn::audio::GameAudio audio(temp.root,settings);
+        nnn::SystemEvent event;event.opcode=nnn::audio::sound;event.parameters={0,0};
+        require(audio.submit(event).empty(),"24-bit PCM submit failed");
+        std::array<std::int16_t,4> output{};audio.pull(output.data(),2);
+        require(output==std::array<std::int16_t,4>{32767,-32768,0x1234,-0x1234},"24-bit PCM conversion or interleave differs");
+        const auto stats=audio.stats();
+        const auto& clip=stats.log.at(0).clips.at(0);
+        require(clip.rate==44100&&clip.channels==2&&clip.frames==2&&stats.sound_frames==2,"24-bit PCM frame geometry differs");
     });
     for(int variant=0;variant<4;++variant)suite.test("PCM VAW rejects invalid variant "+std::to_string(variant),[variant]{
         Model m;m.code.end();TempGame temp(m);temp.text("spt/selist.xtx","sample\n");
@@ -1927,6 +2411,160 @@ int main(){
     suite.test("DRAW0 explicitly rejected with no partial frame",[]{Model m;m.code.image(4);m.code.present(0);m.code.end();Resources resources;failure(run(m,resources));});
     for(const auto& dimensions:std::vector<std::pair<Word,Word>>{{0,1},{1,0},{2049,1},{1,2049},{UINT32_MAX,UINT32_MAX}})suite.test("invalid output dimensions "+std::to_string(dimensions.first)+"x"+std::to_string(dimensions.second),[dimensions]{Resources resources;failure(run(single(),resources,dimensions.first,dimensions.second));require(resources.keys.empty(),"invalid canvas reached reader");});
     suite.test("maximum2048 canvas is bounded and accepted",[]{Model m;m.code.present();m.code.end();Resources resources;auto result=run(m,resources,2048,2048);success(result,2048,2048,Bytes(2048U*2048U*3U,0));});
+    suite.test("PC writer evidence determines system generation and independent okikae registration",[]{
+        Model model;model.message=true;model.code.print(1);model.code.end();
+        TempGame temp(model);
+        temp.text("init/game.xtx","layerExpand 32\n");
+        const auto cache=temp.root/"init/emberfall-system.cfg";
+        auto image=executable_save_fixture(32,32);
+        std::copy_n("dummy",5,image.begin()+0x440);
+        std::copy_n("face",4,image.begin()+0x460);
+        system_save_names(image,2);
+        temp.write("writer.exe",image);
+        require(scene::GameSession::detect_pc_system_save_version(temp.root)==2,
+            "the referenced Windows archive names identify the compiled generation");
+        std::copy_n("okikae",6,image.begin()+0x480);
+        temp.write("writer.exe",image);
+        scene::GameSession old(temp.root,test_options());
+        require(old.step_frame(0).wait==scene::Wait::Dialogue,"writer fixture did not reach the first line");
+        const auto slot_without_replacements=old.export_pc_save();
+        require(scene::pc::parse_save(slot_without_replacements).extensions.empty(),
+            "32 layer slots cannot imply a text-replacement extension when the PC table ends at face");
+        auto without_analysis=test_options();
+        without_analysis.analyze_executable=false;
+        std::filesystem::remove(cache);
+        scene::GameSession file_only(temp.root,without_analysis);
+        file_only.restore_pc_save(slot_without_replacements);
+        require(scene::pc::parse_save(file_only.export_pc_save()).extensions.size()==1,
+            "an imported slot changed the default registration of the replacement table");
+        std::filesystem::remove(cache);
+        scene::GameSession newer(temp.root,test_options());
+        require(newer.step_frame(0).wait==scene::Wait::Dialogue &&
+            scene::pc::parse_save(newer.export_pc_save()).extensions.size()==1,
+            "the registered replacement table is saved even when the game has never edited it");
+
+        temp.text("init/game.xtx","autoExtDataSub1 okikae\n");
+        temp.write("spt/var.fxf",{0x8e,0xf5});
+        std::filesystem::remove(cache);
+        scene::GameSession declared(temp.root,without_analysis);
+        require(declared.pc_save_layout().render_layers==16 && declared.step_frame(0).wait==scene::Wait::Dialogue,
+            "explicit declaration fixture did not enter the classic story");
+        const auto declared_slot=scene::pc::parse_save(declared.export_pc_save());
+        require(!declared_slot.extensions.empty() && declared_slot.extensions.front().size()==
+            scene::pc::okikae_count*scene::pc::okikae_width,
+            "the explicit declaration did not write okikae without executable analysis");
+    });
+    suite.test("EXE V1 requires positive evidence and takes priority over the template",[]{
+        TempGame temp(Model{});
+        temp.text("init/game.xtx","scriptseVolumeUseFlag 1\n");
+        temp.write("spt/var2.fxf",{0x8e,0xf5});
+        temp.write("sav/sysfile3.org",system_template_fixture(3));
+        auto image=executable_save_fixture(32,32);
+        system_save_names(image,1,false);
+        system_save_names(image,3,false);
+        temp.write("game.exe",image);
+        require(!scene::pc::executable_save_layout(temp.root).system_save_version,
+            "unreferenced names incorrectly identified a global save format");
+        system_save_names(image,1);
+        temp.write("game.exe",image);
+        require(scene::GameSession::pc_system_save_format(temp.root,true)==std::array<int,2>{1,0},
+            "V1 direct stores did not override the template and configuration");
+        const auto first=scene::GameSession::pc_save_configuration(temp.root,false);
+        require(first && first->system_save_source==static_cast<int>(scene::pc::SystemSaveSource::Executable),
+            "EXE source was not cached");
+
+        system_save_names(image,2);
+        temp.write("game.exe",image);
+        require(scene::GameSession::pc_system_save_format(temp.root,true)==std::array<int,2>{1,0},
+            "a later launch re-analyzed the EXE despite the valid configuration");
+        const auto refreshed=scene::GameSession::pc_save_configuration(temp.root,true);
+        require(refreshed && refreshed->system_save_version==3 &&
+            refreshed->system_save_source==static_cast<int>(scene::pc::SystemSaveSource::Template),
+            "conflicting EXE evidence did not fall back to the template on regeneration");
+    });
+    suite.test("PC global templates validate layout and match the game edition",[]{
+        Model model;model.code.end();
+        for (const int version:{1,2,3}) {
+            TempGame temp(model);
+            const bool trial=version==2;
+            temp.text("init/game.xtx",trial ? "taikenflag 1\n" : "");
+            const std::string base=trial ? "tsysfile" : "sysfile";
+            const std::string template_file="sav/"+base+(version==1 ? "" : std::to_string(version))+".org";
+            temp.write(template_file,system_template_fixture(version));
+            const std::string mislabeled=base+(version==3 ? "2" : "3");
+            temp.write("sav/"+mislabeled+".org",system_template_fixture(version));
+            if (trial) temp.write("sav/sysfile.org",system_template_fixture(1));
+            require(scene::GameSession::pc_system_save_format(temp.root,false)==std::array<int,2>{version,trial?1:0},
+                "the valid template did not determine version and edition");
+            const auto profile=scene::GameSession::pc_save_configuration(temp.root,false);
+            require(profile && profile->system_save_source==static_cast<int>(scene::pc::SystemSaveSource::Template),
+                "a valid template with a mislabeled neighbor did not get recorded as the source");
+            const std::string replacement="sav/"+base+(version==1 ? "2" : "")+".org";
+            temp.write(replacement,system_template_fixture(version==1 ? 2 : 1));
+            auto options=test_options();options.analyze_executable=false;
+            scene::GameSession reopened(temp.root,options);
+            require(reopened.runtime()->defaults_source()==temp.root/template_file,
+                "runtime defaults scanned other template versions instead of using the cached format");
+            require(scene::GameSession::pc_system_save_format(temp.root,true)==std::array<int,2>{version,trial?1:0},
+                "new templates changed the chosen version on a subsequent launch");
+        }
+    });
+    suite.test("Legacy layout upgrades only the global format and file fallback keeps its rules",[]{
+        TempGame temp(Model{});
+        temp.text("init/game.xtx","layerExpand 32\nscriptseVolumeUseFlag 0\n");
+        temp.write("spt/var2.fxf",{0x8e,0xf5});
+        temp.write("sav/sysfile2.org",system_template_fixture(2));
+        temp.text("init/emberfall-system.cfg","emberfall_system 1\nfile_layer_records 16\nfile_message_width 256\n"
+            "file_status_bytes 7088\nfile_okikae 0\nfile_system_save_version 1\nexe_analyzed 0\n");
+        const auto before=scene::GameSession::pc_save_configuration(temp.root,false);
+        require(before && before->system_save_version==0 && before->layer_records==16,
+            "inspecting the old config performed initialization or lost story fields");
+        require(scene::GameSession::pc_system_save_format(temp.root,false)==std::array<int,2>{2,0},
+            "upgrading the old config did not resolve the missing system version");
+        const auto upgraded=scene::GameSession::pc_save_configuration(temp.root,false);
+        require(upgraded && upgraded->layer_records==16 && upgraded->message_width==256 && !upgraded->okikae &&
+            upgraded->system_save_source==static_cast<int>(scene::pc::SystemSaveSource::Template),
+            "upgrading the global format replaced cached story fields");
+        std::filesystem::remove(temp.root/"sav/sysfile2.org");
+        temp.write("sav/sysfile.sav",system_template_fixture(1));
+        const auto files=scene::GameSession::pc_save_configuration(temp.root,true);
+        require(files && files->system_save_version==3 &&
+            files->system_save_source==static_cast<int>(scene::pc::SystemSaveSource::GameFiles),
+            "the presence of scriptseVolumeUseFlag 0 did not select V3 or a live save overrode initialization");
+        temp.text("init/game.xtx","layerExpand 32\n");
+        const auto extended=scene::GameSession::pc_save_configuration(temp.root,true);
+        require(extended && extended->system_save_version==2,"expanded game without the flag did not select V2");
+        temp.write("spt/var.fxf",{0x8e,0xf5});
+        temp.text("init/game.xtx","varType 0\nscriptseVolumeUseFlag 0\n");
+        const auto classic=scene::GameSession::pc_save_configuration(temp.root,true);
+        require(classic && classic->system_save_version==1,"explicit classic variables did not take priority");
+    });
+    suite.test("Player sessions keep the resolved save format when the configuration cannot be written",[]{
+        Model model;model.code.end();
+        TempGame temp(model);
+        temp.text("init/game.xtx","layerExpand 32\nscriptseVolumeUseFlag 0\n");
+        temp.write("spt/var2.fxf",{0x8e,0xf5});
+        std::filesystem::create_directory(temp.root/"init/emberfall-system.cfg");
+        auto options=test_options();options.analyze_executable=false;
+        scene::GameSession first(temp.root,options);
+        require(first.pc_system_save_format()==std::array<int,2>{3,0} && first.pc_save_layout().layer_records==32 &&
+            !scene::GameSession::pc_save_configuration(temp.root,false),"failed write did not leave the format usable");
+
+        temp.text("init/game.xtx","layerExpand 16\n");
+        std::filesystem::remove(temp.root/"spt/var2.fxf");
+        temp.write("spt/var.fxf",{0x8e,0xf5});
+        const auto context=first.runtime_ref();
+        auto resumed=options;
+        resumed.runtime=context.runtime->fork();
+        resumed.save_layout=context.save_layout;
+        scene::GameSession same_run(temp.root,resumed);
+        require(same_run.pc_system_save_format()==std::array<int,2>{3,0} && same_run.pc_save_layout().layer_records==32 &&
+            same_run.runtime_ref().save_layout==context.save_layout,"an active player re-evaluated its save format");
+
+        scene::GameSession next_run(temp.root,options);
+        require(next_run.pc_system_save_format()==std::array<int,2>{1,0} && next_run.pc_save_layout().layer_records==16,
+            "the missing configuration was not reconsidered on a new player run");
+    });
     suite.test("script byte maximum exact accepted without executing tail",[]{Model m;m.strings={"s"};m.code.present();for(int i=0;i<21818;++i)m.code.add({3,control,0x55560001U});m.code.end();auto bytes=script(m);require(bytes.size()==scene::max_script_bytes,"script boundary construction");Resources resources;success(scene::first_frame(bytes,resources.reader(),1,1),1,1,{0,0,0});});
     suite.test("script byte maximum plus1 rejected",[]{Resources resources;Bytes bytes(scene::max_script_bytes+1U,0);failure(scene::first_frame(bytes,resources.reader(),1,1));require(resources.keys.empty(),"oversized script read resources");});
     for(const Word layer:{0U,3U,6U,UINT32_MAX,0x7fffffffU})suite.test("excluded LOAD layer "+std::to_string(layer),[layer]{Model m;m.code.image(layer);m.code.present();m.code.end();Resources resources;failure(run(m,resources));require(resources.keys.empty(),"excluded layer read bytes");});

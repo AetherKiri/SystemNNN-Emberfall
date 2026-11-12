@@ -11,6 +11,7 @@ namespace emberfall::scene {
 namespace {
 
 constexpr nnn::Word filmtypetime = 0x33330052U;
+constexpr nnn::Word script_debug = 0x33330042U;
 constexpr nnn::Word music_command = 0x33330007U;
 constexpr nnn::Word voice_volume_command = 0x33330069U;
 constexpr nnn::Word storyname = 0x33330051U;
@@ -82,6 +83,7 @@ public:
     void ReceiveScriptCommand(nnn::Word command, nnn::Value primary, const std::string& text,
                               nnn::Value trailing) override {
         if (!callback()) throw HostStop{};
+        if (command == script_debug) return;
         if (owner_ && (command == 0x5556000aU || command == 0x55560016U)) {
             if (primary != 0 || trailing != 0 || text.empty()) stop("Invalid child script request");
             return; // The scheduler owns child loading, switching and resumption.

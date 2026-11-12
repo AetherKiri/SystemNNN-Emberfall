@@ -72,6 +72,7 @@ private:
     Surface scene_,decorated_scene_,saved_,output_;
     std::array<Layer,32> slots_;
     std::vector<std::pair<std::string,std::shared_ptr<const Texture>>> animation_;
+    unsigned screen_slot_=31;
     bool animation_off_=false,speaking_=false,draw_last_=true;
 };
 
@@ -79,7 +80,7 @@ class Layers {
 public:
     using TextureReader=std::function<std::shared_ptr<const Texture>(const std::string&)>;
     using OverlapDecoration=std::function<void(Surface&)>;
-    Layers(int width, int height);
+    Layers(int width,int height,unsigned layer_count=32);
     void clear_all();
     void clear(unsigned slot);
     void bind(unsigned slot, std::shared_ptr<const Texture> texture, bool preload);
@@ -98,6 +99,7 @@ public:
     int overlap_type() const noexcept { return overlap_type_; }
     unsigned width() const noexcept { return output_.width; }
     unsigned height() const noexcept { return output_.height; }
+    unsigned layer_count() const noexcept { return screen_slot_+1; }
     const Surface& surface();
     bool screen_layer_active() const noexcept;
     void capture_screen_layer(bool enable,OverlapDecoration backdrop={});
@@ -139,6 +141,7 @@ private:
     Surface output_, previous_, target_, saved_, overlap_display_;
     std::uint32_t overlap_time_ = 0, overlap_count_ = 0;
     int overlap_type_=0;
+    unsigned screen_slot_=31;
     std::uint32_t hidden_ = 0;
     std::uint64_t revision_=0;
     bool dirty_ = true;

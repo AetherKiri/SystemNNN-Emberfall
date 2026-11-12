@@ -115,7 +115,7 @@ struct SkipFlags {
     bool skip_to_film_end = false;
 };
 
-enum class SystemPayload { Numeric, Named, Dialogue, Scalar, Selection };
+enum class SystemPayload { Numeric, Named, Dialogue, Scalar, Selection, Debug };
 
 struct SystemEvent {
     Word identify = 0, opcode = 0;
@@ -175,6 +175,7 @@ struct SavedDialogue {
     WordIndex word=0;
     Word command=0,id=0,table_index=0;
     std::string text;
+    Value cutin=0;
 };
 struct SavedUserCommand {
     Word command=0,argument_count=0;

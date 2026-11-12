@@ -128,8 +128,6 @@ public:
     // playing loop of the same program keeps its current sample position.
     void load_snapshot(snapshot::Reader& in,bool keep_music_position=false,
                        std::optional<unsigned> jump_voice_mask={},bool finish_script_fades=false,bool restart_music=false);
-    // After replaying a legacy save on an inaudible candidate session.
-    void restart_replayed_music();
     static void inspect_snapshot(snapshot::Reader& in);
 private:
     void read_snapshot(snapshot::Reader& in,bool keep_music_position,

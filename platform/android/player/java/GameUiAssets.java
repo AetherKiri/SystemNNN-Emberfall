@@ -64,7 +64,7 @@ final class GameUiAssets {
 
     final Config system,config,save,load,backlog,messageWindow,game,printMessage,dataFile,notice,messageCursor,selection;
     final Config gameMouse,selectPlace,selectPlace2;
-    final boolean freeStatus;
+    final boolean statusOverlays;
     final Bitmap longPrintImage;
     final boolean longPrintImageOffWithWindow;
     final long systemExtensionModes;
@@ -87,7 +87,7 @@ final class GameUiAssets {
         this.longPrintImage=images.get(longPrintImageKey(printMessage));
         this.longPrintImageOffWithWindow=printMessage.number("addLPrintImageOffWithWindow",0)!=0;
         this.textRates=textRates;
-        this.freeStatus=freeStatus;
+        statusOverlays=freeStatus||game.number("useExtClass",0)!=0;
         this.legacyVolumeDefaults=legacyVolumeDefaults;
         long extensions=0;
         for(int item=10;item<=GameSystemMenuPanel.optionCount(system);item++){

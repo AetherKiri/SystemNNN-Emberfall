@@ -39,4 +39,6 @@ Add `core/` with CMake `add_subdirectory` and link the targets you use. Public h
 
 The loader checks record and table bounds, executable targets and command payloads. The interpreter dispatches validated records by format. The host can log unsupported minor commands through `UnhandledInstruction` as execution advances. Text is passed as source bytes for the frontend to decode.
 
+SPT files with 20- and 32-word headers use the same interpreter. The 20-word format omits the four save adjustment tables and keeps raw word offsets for nested script calls and returns. Emberfall restores those offsets against the matching script version. The 32-word format also provides adjustment IDs for restoring save positions. The script header does not select the global save format or the layer layout of a story save.
+
 For a game directory, `emberfall::scene::GameSession` combines the scheduler, layer renderer and audio. `nnn::RuntimeContext` owns shared system parameters and read state. [Game session API](../platform/scene/include/emberfall/game_session.hpp) · [Runtime context API](include/nnn/runtime_context.hpp)
