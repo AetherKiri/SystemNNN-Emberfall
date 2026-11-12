@@ -862,10 +862,10 @@ public final class PlayerActivity extends Activity implements GameRunner.Listene
         if(runner==null || titleModel==null)return;
         TitleMenu.Action action=item.action;
         switch(action) {
-        case START:case CONTINUE:case LAST_LOAD:
+        case START:case CONTINUE:case LAST_LOAD:case SCENARIO:
             TitlePanel source=titlePanel;
             GameRunner owner=runner;
-            owner.enter(action,()->runOnUiThread(()->{
+            owner.enter(action,titleModel.scenarioVariable,item.scenario,()->runOnUiThread(()->{
                 if(source!=null&&source==titlePanel&&owner==runner&&!isDestroyed())source.entryFailed();
             }));
             break;

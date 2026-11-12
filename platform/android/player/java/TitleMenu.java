@@ -13,28 +13,30 @@ import java.util.Map;
 final class TitleMenu {
     enum Action {
         START("新游戏"), LOAD("读取存档"), SETTINGS("设置"), EXTRAS("鉴赏"), EXIT("退出"),
-        CONTINUE("继续游戏"), LAST_LOAD("读取上次存档"), WEBSITE("官方网站"), MODE("扩展");
+        CONTINUE("继续游戏"), LAST_LOAD("读取上次存档"), WEBSITE("官方网站"), MODE("扩展"), SCENARIO("剧情");
         final String label;
         Action(String label) { this.label=label; }
     }
     static final class Item {
         final Action action;
-        final int x,y,width,height,mode;
+        final int x,y,width,height,mode,scenario;
         final boolean enabled;
         final String label;
         Bitmap image;
         GameButton.Spec spec;
         Item(Action action,int x,int y,int width,int height,boolean enabled) {
-            this(action,x,y,width,height,enabled,0,action.label);
+            this(action,x,y,width,height,enabled,0,0,action.label);
         }
-        Item(Action action,int x,int y,int width,int height,boolean enabled,int mode,String label){
+        Item(Action action,int x,int y,int width,int height,boolean enabled,int mode,int scenario,String label){
             this.action=action;this.x=x;this.y=y;this.width=width;this.height=height;this.enabled=enabled;
-            this.mode=mode;this.label=label;
+            this.mode=mode;this.scenario=scenario;this.label=label;
         }
     }
     final ArrayList<Item> items=new ArrayList<>();
     final boolean skinned;
     final String website;
+    // Raw game bytes. Empty when the title has no extension modes, as on PC.
+    final String scenarioVariable;
     final GameUiAssets.Config config;
     final int frameMs,autoRestartTime;
     final boolean restartOnBackgroundEnd;
@@ -50,6 +52,7 @@ final class TitleMenu {
         try{restoreMusic(handle);}
         catch(RuntimeException e){Log.w("SystemNNN","Title music unavailable",e);}
         website=value("HTMLaddr","");
+        scenarioVariable=number("extModeNumber",0)>0?value("extModeReturnVarName",""):"";
         boolean extras=GameResourcePaths.file(root,"init","omake.xtx")!=null||GameResourcePaths.file(root,"init2","omake.fxf")!=null;
         Action[] basic={Action.START,Action.LOAD,Action.SETTINGS,Action.EXTRAS,Action.EXIT};
         int count=DialogueLayout.clamp(number("basicButtonNumber",basic.length),0,64);
@@ -58,12 +61,12 @@ final class TitleMenu {
             config.has("menu1Button1PrintY")||buttons.stream().anyMatch(button->!button.setup.art.image.isEmpty());
         Map<String,Bitmap> artwork=new HashMap<>();
         for(MenuModeButton button:buttons){
-            Action action=button.index<basic.length?basic[button.index]:Action.MODE;
+            Action action=button.index<basic.length?basic[button.index]:button.scenario!=0?Action.SCENARIO:Action.MODE;
             if(!skinned&&(action==Action.MODE||action==Action.EXTRAS&&!extras))continue;
             ButtonArt.Setup setup=button.setup;
             boolean enabled=button.enabled&&(action!=Action.EXTRAS||extras);
             Item item=new Item(action,button.x,button.y,setup.width,setup.height,enabled,
-                button.mode,button.label==null||button.label.isEmpty()?action.label:button.label);
+                button.mode,button.scenario,button.label==null||button.label.isEmpty()?action.label:button.label);
             if(skinned){
                 item.spec=new GameButton.Spec(setup);
                 loadArtwork(handle,item,artwork);

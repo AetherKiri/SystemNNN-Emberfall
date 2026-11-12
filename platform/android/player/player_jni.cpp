@@ -1578,6 +1578,10 @@ API jint JNICALL FN(openingVariable)(JNIEnv* env,jclass,jlong handle,jbyteArray 
     try {return player(handle).game->named_variable(resource_name(env,name),false,-1);}
     catch (const std::exception& e) {fail(env,e.what());return -1;}
 }
+API jboolean JNICALL FN(setStoryVariable)(JNIEnv* env,jclass,jlong handle,jbyteArray name,jint value) {
+    try {return player(handle).game->set_story_variable(resource_name(env,name),value) ? JNI_TRUE : JNI_FALSE;}
+    catch (const std::exception& e) {fail(env,e.what());return JNI_FALSE;}
+}
 API void JNICALL FN(menuMusic)(JNIEnv* env,jclass,jlong handle,jint number,jint plays,jint volume,jint fade,jboolean restart) {
     try {
         const auto error=player(handle).game->audio().play_menu_music(number,plays,volume,fade,restart==JNI_TRUE);

@@ -185,6 +185,8 @@ public:
     void set_ui_variable(const std::string& name,nnn::Value value);
     void set_ui_place_preview(unsigned place);
     nnn::Value named_variable(const std::string& name,bool prefer_story=false,nnn::Value fallback=0) const;
+    // The title's InitNewGame(setVar,setData): call on a new story before its first frame.
+    bool set_story_variable(const std::string& name,nnn::Value value);
     const std::vector<std::string>& warnings() const;
     std::vector<AudioEvent> take_audio_events();
     bool take_system_save_request();

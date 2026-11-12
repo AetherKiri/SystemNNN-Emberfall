@@ -4933,6 +4933,12 @@ nnn::Value GameSession::named_variable(const std::string& name,bool prefer_story
     const auto story=prefer_story ? data_->shared_runtime->preview_story() : nullptr;
     return data_->calculated_variable(i->second,false,story.get());
 }
+bool GameSession::set_story_variable(const std::string& name,nnn::Value value) {
+    const auto i=data_->ids.find(fold_cp932(name));
+    if (data_->ui_mode || i==data_->ids.end()) return false;
+    data_->SetVarData(i->second,value);
+    return true;
+}
 void GameSession::reset_ui_background(const std::string& name,int mode,std::shared_ptr<nnn::RuntimeContext> runtime) {
     auto& d=*data_;
     if (!d.decorative_preview) throw std::logic_error("Reset requires a decorative preview");

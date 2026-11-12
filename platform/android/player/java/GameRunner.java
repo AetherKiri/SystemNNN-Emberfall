@@ -692,7 +692,8 @@ final class GameRunner {
             openTitle();
         }catch(Exception e){broken(e);}
     });}
-    void enter(TitleMenu.Action action,Runnable onFailure){
+    // A scenario entry is CCommonTitle's InitNewGame(setVar,setData): a new story with one variable preset.
+    void enter(TitleMenu.Action action,String scenarioVariable,int scenario,Runnable onFailure){
         if(!tasks.post(()->{
             if(!onTitle||failed||closing){onFailure.run();return;}
             try{
@@ -701,7 +702,9 @@ final class GameRunner {
                     slot=slots.lastSelectedSlot();
                     if(slot==null)throw new FileNotFoundException("上次的存档无法读取");
                 }
-                if(slot==null)open(null,false);else openSlot(slot,false);
+                if(slot!=null)openSlot(slot,false);
+                else if(action==TitleMenu.Action.SCENARIO&&!scenarioVariable.isEmpty())open(null,false,scenarioVariable,scenario);
+                else open(null,false);
             }
             catch(Exception|LinkageError e){
                 schedule();
@@ -710,12 +713,15 @@ final class GameRunner {
             }
         }))onFailure.run();
     }
-    private void open(File save,boolean holdStory) throws IOException {
+    private void open(File save,boolean holdStory) throws IOException {open(save,holdStory,"",0);}
+    private void open(File save,boolean holdStory,String scenarioVariable,int scenario) throws IOException {
         long started=SystemClock.uptimeMillis();
         tasks.removeCallbacks(ticker);
         byte[] pcSave=save==null?null:saveResult(SAVE_FILES.submit(()->PcStorySave.read(save)));
         int[] state=new int[NativeGame.META_SIZE];
-        GameSave next=pcSave==null?new GameSave():GameSave.nativeBaseline();
+        // An input journal cannot reproduce the preset variable, so a scenario start keeps a native baseline.
+        boolean preset=pcSave==null&&!scenarioVariable.isEmpty();
+        GameSave next=pcSave==null&&!preset?new GameSave():GameSave.nativeBaseline();
         writeGallery();
         boolean unsaved=handle!=0&&galleryWritten!=NativeGame.galleryRevision(handle);
         long candidate=openNative();
@@ -728,6 +734,9 @@ final class GameRunner {
                     NativeGame.setScriptRandomState(candidate,NativeGame.scriptRandomState(handle));
                 NativeGame.restorePcSave(candidate,pcSave,state);
             }else{
+                // The PC starts an ordinary new game when the configured name is not a variable.
+                if(preset&&!NativeGame.setStoryVariable(candidate,resourceName(scenarioVariable),scenario))
+                    Log.w("SystemNNN","Title scenario variable is not defined; starting a plain new game");
                 recordReplayBaseline(next,candidate,NativeGame.scriptRandomState(candidate));
                 NativeGame.tick(candidate,0,0,0,false,0,false,state);
                 next.appendWithClock(0,0,0,false,0,false,state[NativeGame.CLOCK_DATE],state[NativeGame.CLOCK_MILLISECONDS]);
