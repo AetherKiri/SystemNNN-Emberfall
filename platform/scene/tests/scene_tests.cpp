@@ -3918,6 +3918,40 @@ int main(){
         require(!ui_token->attached() && !ui_token->snapshot().has_plane,
             "detached PlaneMailbox retained pixels or attached state after close");
     });
+    suite.test("Scene-only PC thumbnails keep the presented GET buffer intact",[]{
+        Model model;
+        model.extra_messages={"First line","Second line"};
+        model.code.image(0,1);
+        model.code.number(effect,{0,0});
+        model.code.number(effect,{15,73});
+        model.code.print(1,0);
+        model.code.print(2,1);
+        model.code.end();
+        TempGame temp(model);
+        temp.text("init/game.xtx","layerExpand 16\nmessageMiniCGNoMessageFlag 1\n");
+        temp.write("dwq/red.dwq",asset("tiny_red"));
+        scene::GameSession game(temp.root,test_options());
+        require(game.step_frame(0).wait==scene::Wait::Dialogue,"GET fixture did not reach dialogue");
+        scene::StoryCompositor compositor;
+        const auto& mailbox=compositor.mailbox();
+        mailbox->set_attached(true);
+        const std::array<Byte,4> dialogue{10,220,10,255};
+        mailbox->push(dialogue.data(),4,1,1,game.expected_plane_key(),true);
+        using Outcome=scene::StoryCompositor::PresentOutcome;
+        require(compositor.present(game,true,true,[](const auto& frame){return frame.rgb==Bytes({10,220,10});})==
+            Outcome::Presented,"GET fixture did not submit its dialogue frame");
+        const auto before_save=game.snapshot();
+        const auto save=scene::GameSession::inspect_pc_save(game.export_presented_pc_save(),64*1024);
+        require(!save.pixels.empty() && save.pixels[0]==0xffff0000U,
+            "messageMiniCGNoMessageFlag did not use the scene-only thumbnail");
+        require(game.snapshot()==before_save,"exporting a PC thumbnail changed the GET buffer or render state");
+        scene::InputState tap;tap.advance=true;
+        require(game.step_frame(16,tap).wait==scene::Wait::Dialogue,"GET fixture did not advance");
+        const auto before_pending_save=game.snapshot();
+        const auto pending=scene::GameSession::inspect_pc_save(game.export_presented_pc_save(),64*1024);
+        require(!pending.pixels.empty() && pending.pixels[0]==0xff000000U && game.snapshot()==before_pending_save,
+            "export used a stale scene-only thumbnail or changed the pending GET buffer");
+    });
     suite.test("Single-pass StoryCompositor + PlaneMailbox acceptance on local DeadEndAegis [zh] and [zht]",[]{
         const std::filesystem::path dea_root="/mnt/c/Users/a7188/Desktop/\xe9\xad\x94\xe6\xb3\x95\xe5\xb0\x91\xe5\xa5\xb3\xe6\xb6\x88\xe8\x80\x97\xe6\x88\x98\xe7\xba\xbf \xe6\xad\xbb\xe7\xbb\x88\xce\xa9\xe7\xa5\x9e\xe7\x9b\xbe";
         for (const char* edition:{"DeadEndAegis [zh]","DeadEndAegis [zht]"}) {

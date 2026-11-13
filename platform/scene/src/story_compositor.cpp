@@ -63,14 +63,18 @@ void PlaneMailbox::push(const render::Byte* rgba,std::size_t stride,unsigned wid
         buffer->stride=0;
         buffer->rgba.clear();
     }
-    buffer->floating_rgba.clear();
     if (floating) {
         const std::size_t row_bytes=std::size_t{width}*4;
-        buffer->floating_rgba.resize(row_bytes*height);
-        for (unsigned y=0;y<height;++y)
-            std::memcpy(buffer->floating_rgba.data()+std::size_t{y}*row_bytes,
-                        floating+std::size_t{y}*floating_stride,row_bytes);
-    }
+        const std::size_t total_bytes=row_bytes*height;
+        if (floating_stride==row_bytes) {
+            buffer->floating_rgba.assign(floating,floating+total_bytes);
+        } else {
+            buffer->floating_rgba.resize(total_bytes);
+            for (unsigned y=0;y<height;++y)
+                std::memcpy(buffer->floating_rgba.data()+std::size_t{y}*row_bytes,
+                            floating+std::size_t{y}*floating_stride,row_bytes);
+        }
+    } else buffer->floating_rgba.clear();
     std::shared_ptr<render::MessagePlane> discarded;
     {
         std::lock_guard<std::mutex> lock(mutex_);
