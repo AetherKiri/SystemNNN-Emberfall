@@ -38,7 +38,8 @@ public:
     bool attached() const;
 
     void push(const render::Byte* rgba,std::size_t stride,unsigned width,unsigned height,
-              const PlaneKey& key,bool show_backdrop=true);
+              const PlaneKey& key,bool show_backdrop=true,
+              const render::Byte* floating=nullptr,std::size_t floating_stride=0);
 
     Snapshot snapshot() const;
 
@@ -95,6 +96,7 @@ private:
     bool has_expected_key_=false;
     bool fallback_logged_=false;
     bool pending_retry_=false;
+    render::Surface display_;
 };
 
 } // namespace emberfall::scene

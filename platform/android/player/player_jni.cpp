@@ -1487,7 +1487,7 @@ API jlong JNICALL FN(messagePlaneToken)(JNIEnv* env,jclass,jlong handle) {
         return reinterpret_cast<jlong>(new PlaneMailboxRef(std::move(mailbox)));
     } catch (const std::exception& e) { fail(env,e.what()); return 0; }
 }
-API void JNICALL FN(pushMessagePlane)(JNIEnv* env,jclass,jlong token,jobject bitmap,jintArray key,jboolean show_backdrop) {
+API void JNICALL FN(pushStoryPlanes)(JNIEnv* env,jclass,jlong token,jobject bitmap,jobject floating,jintArray key,jboolean show_backdrop) {
     try {
         if (!token) return;
         const auto& mailbox=*reinterpret_cast<const PlaneMailboxRef*>(token);
@@ -1503,12 +1503,24 @@ API void JNICALL FN(pushMessagePlane)(JNIEnv* env,jclass,jlong token,jobject bit
             plane_key[i]=static_cast<std::int32_t>(raw_key[i]);
         if (bitmap) {
             emberfall::android::LockedBitmap image(env,bitmap);
-            mailbox->push(image.row(0),static_cast<std::size_t>(image.info.stride),
-                image.info.width,image.info.height,plane_key,show_backdrop==JNI_TRUE);
+            if (floating) {
+                emberfall::android::LockedBitmap decorations(env,floating);
+                if (decorations.info.width!=image.info.width || decorations.info.height!=image.info.height)
+                    throw std::invalid_argument("Floating plane dimensions differ from message plane");
+                mailbox->push(image.row(0),static_cast<std::size_t>(image.info.stride),
+                    image.info.width,image.info.height,plane_key,show_backdrop==JNI_TRUE,
+                    decorations.row(0),static_cast<std::size_t>(decorations.info.stride));
+            } else {
+                mailbox->push(image.row(0),static_cast<std::size_t>(image.info.stride),
+                    image.info.width,image.info.height,plane_key,show_backdrop==JNI_TRUE);
+            }
         } else {
             mailbox->push(nullptr,0,0,0,plane_key,show_backdrop==JNI_TRUE);
         }
     } catch (const std::exception& e) { fail(env,e.what()); }
+}
+API void JNICALL FN(pushMessagePlane)(JNIEnv* env,jclass type,jlong token,jobject bitmap,jintArray key,jboolean show_backdrop) {
+    FN(pushStoryPlanes)(env,type,token,bitmap,nullptr,key,show_backdrop);
 }
 API void JNICALL FN(releaseMessagePlane)(JNIEnv*,jclass,jlong token) {
     std::unique_ptr<PlaneMailboxRef> mailbox(reinterpret_cast<PlaneMailboxRef*>(token));

@@ -1,4 +1,5 @@
 #include "emberfall/story_compositor.hpp"
+#include <algorithm>
 #include <cstring>
 #include <stdexcept>
 #include <utility>
@@ -27,12 +28,14 @@ bool PlaneMailbox::attached() const {
 }
 
 void PlaneMailbox::push(const render::Byte* rgba,std::size_t stride,unsigned width,unsigned height,
-                        const PlaneKey& key,bool show_backdrop) {
+                        const PlaneKey& key,bool show_backdrop,const render::Byte* floating,std::size_t floating_stride) {
     if (rgba) {
         if (width==0 || height==0 || width>render::max_dimension || height>render::max_dimension ||
             static_cast<std::uint64_t>(width)*height>render::max_pixels || stride<std::size_t{width}*4)
             throw std::invalid_argument("Invalid message plane buffer");
     }
+    if (floating && (!rgba || floating_stride<std::size_t{width}*4))
+        throw std::invalid_argument("Invalid floating plane buffer");
     std::shared_ptr<render::MessagePlane> buffer;
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -59,6 +62,14 @@ void PlaneMailbox::push(const render::Byte* rgba,std::size_t stride,unsigned wid
         buffer->height=0;
         buffer->stride=0;
         buffer->rgba.clear();
+    }
+    buffer->floating_rgba.clear();
+    if (floating) {
+        const std::size_t row_bytes=std::size_t{width}*4;
+        buffer->floating_rgba.resize(row_bytes*height);
+        for (unsigned y=0;y<height;++y)
+            std::memcpy(buffer->floating_rgba.data()+std::size_t{y}*row_bytes,
+                        floating+std::size_t{y}*floating_stride,row_bytes);
     }
     std::shared_ptr<render::MessagePlane> discarded;
     {
@@ -148,7 +159,23 @@ StoryCompositor::PresentOutcome StoryCompositor::present(GameSession& game,bool 
         fallback_logged_=false;
         game.set_message_plane(snap.plane);
         const auto& frame=game.surface();
-        if (!submit(frame)) {
+        // Pass D is display-only. Pass C remains the authoritative clean frame
+        // inside GameSession, including when ANativeWindow submission fails.
+        const auto* visible=&frame;
+        if (snap.plane && !snap.plane->floating_rgba.empty()) {
+            display_=frame;
+            const auto& floating=snap.plane->floating_rgba;
+            if (floating.size()!=std::size_t{frame.width}*frame.height*4)
+                throw std::invalid_argument("Invalid floating plane dimensions");
+            for (std::size_t px=0,rgb=0;px<floating.size();px+=4,rgb+=3) {
+                const unsigned inverse=255U-floating[px+3];
+                for (std::size_t c=0;c<3;++c)
+                    display_.rgb[rgb+c]=static_cast<render::Byte>(std::min(255U,
+                        unsigned(floating[px+c])+(unsigned(display_.rgb[rgb+c])*inverse+127U)/255U));
+            }
+            visible=&display_;
+        }
+        if (!submit(*visible)) {
             pending_retry_=true;
             return PresentOutcome::SubmitFailed;
         }
