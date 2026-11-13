@@ -104,6 +104,11 @@ public final class PcSystemSaveTest {
                 check(audioReloaded.audioTheme()==4&&pair(audioReloaded.audioParameters(),109)==83&&
                     pair(audioReloaded.audioParameters(),209)==1,"version 3 theme and script SE survive reload");
             }
+            PcSystemSave restarted=PcSystemSave.open(root,directory.toFile(),game,null,
+                new int[]{version,archiveName.startsWith("t")?1:0});
+            check(pair(restarted.load().audioParameters(),200)==0,"BGM mute survives a new session");
+            check(restarted.writeAudioSettings(new int[]{200,1},new int[0]),"write the unmuted BGM setting");
+            check(pair(save.load().audioParameters(),200)==1,"BGM unmute survives another load");
             Files.write(live,Arrays.copyOf(written,17));
             check(!PcSystemSave.valid(live.toFile()),"truncated archive rejected");
             check(!save.load().live,"truncated archive left out of startup progress");
