@@ -2510,22 +2510,125 @@ int main(){
         r=game.script_restrictions();require(r.cannot_click==0&&r.cannot_skip==0&&game.request_advance(),"restrictions not cleared");
         require(game.skip_effective()==!kill,"raw skip not restored");
     });
-    suite.test("skip reveals a read line before the next script step",[]{
-        Model m;m.message=true;m.code.print(1);m.code.print(2);m.code.end();TempGame temp(m);
+    suite.test("frame sequence keeps dialogue across a wipe, a window change and read-only skip",[]{
+        constexpr Word long_print=0x22220002U, start_message=0x3333001bU, cannot_skip=0x33330059U;
+        Model model;model.message=true;model.message_text="Dialogue";
+        model.code.number(effect,{0,54,0,100,100,100});
+        model.code.print(1);
+        model.code.number(effect,{0,54,0,200,200,200});
+        model.code.number(0x33330011U,{});
+        model.code.number(0x22220005U,{0,15});
+        model.code.number(0x3333001cU,{2,3});
+        model.code.image(29);
+        model.code.number(effect,{29,0});
+        model.code.present(2);
+        model.code.number(clear_layer,{29});
+        model.code.add({6,command,long_print,0,2,0});
+        for (Word serial=3;serial<=8;++serial) {
+            if (serial==8) model.code.number(cannot_skip,{1});
+            model.code.number(start_message,{serial});
+            model.code.print(serial);
+        }
+        model.code.end();
+        TempGame temp(model);
+        temp.text("init/game.xtx","layerExpand 32\n");
+        temp.text("init/printmessage.xtx","LPrintBGMode 2\nlprintBGMultiR 50\n");
+        temp.write("spt/var2.fxf",{0x8e,0xf5});
+        temp.write("dwq/red.dwq",asset("tiny_red"));
         scene::GameSession game(temp.root,test_options());
+        const auto period=game.frame_ms();
+        require(game.step_frame(0).wait==scene::Wait::Dialogue,"opening PRINT");
+        game.set_text_length(8);
+        game.text_characters(10000);
+        require(game.text_complete() && game.surface().rgb==Bytes{100,100,100},"opening frame");
+        const auto capture=[](emberfall::render::Surface& source) {
+            require(source.rgb==Bytes{100,100,100},"capture contains pending layers");
+            source.rgb={40,60,80}; // Previous window and text, with the cursor omitted.
+            return true;
+        };
+        scene::InputState click;click.advance=true;
+        require(game.step_frame({period,period},click,capture).wait==scene::Wait::Overlap,"opening wipe");
+        for (unsigned frame=0;frame<=15;++frame) {
+            const unsigned alpha=frame*256U/15U;
+            const auto mixed=[alpha](unsigned old) { return static_cast<Byte>((old*(256U-alpha)+200U*alpha+128U)/256U); };
+            require(game.surface().rgb==Bytes{mixed(40),mixed(60),mixed(80)},"wipe pixels at frame "+std::to_string(frame));
+            if (frame<15) require(game.step_frame(period).wait==(frame==14 ? scene::Wait::Running : scene::Wait::Overlap),
+                "wipe endpoint must be observable before the next instruction");
+        }
+        for (int frame=0;frame<2;++frame) {
+            require(game.step_frame(period).wait==scene::Wait::Draw,"artwork frame");
+            require(game.layers()[29].enabled,"DRAW must retain layer 29");
+            require(game.draw_message()==scene::DrawMessage::None,"DRAW must leave the window to layer 29");
+            require(game.surface().rgb==Bytes{255,0,0},"DRAW did not show the window artwork");
+        }
+        const auto& long_line=game.step_frame(period);
+        require(long_line.wait==scene::Wait::Dialogue && long_line.dialogue.layout_command==long_print &&
+            !long_line.dialogue.window_visible && !game.layers()[29].enabled &&
+            game.surface().rgb==Bytes{200,200,200},"LPRINT must replace the artwork in the same step");
+
         game.set_system_parameter(nnn::NNNPARAM_SKIPMODE,nnn::NNNSKIPMODE_NORMAL);
-        const auto& first=game.step_frame(0);
-        require(first.wait==scene::Wait::Dialogue,"first dialogue");
-        const auto word=first.word;
-        game.runtime()->mark_read(first.dialogue.message_id);
-        game.set_text_length(8);
+        const auto group=long_line.dialogue.message_id&0xffff0000U;
+        for (Word serial:{2U,3U,4U,5U,6U,8U}) game.runtime()->mark_read(group|serial);
         game.set_skip_active(true);
-        require(game.skip_effective()&&game.text_characters(0)==8&&game.text_complete(),"skip left partial text");
-        require(game.state().word==word,"revealing skipped text advanced the script");
-        scene::InputState input;input.advance=true;
-        require(game.step_frame(0,input).wait==scene::Wait::Dialogue&&game.state().word!=word,"next dialogue");
-        game.set_text_length(8);
-        require(!game.skip_effective()&&game.text_characters(0)==0&&!game.text_complete(),"read-only skip passed an unread line");
+        for (Word serial=2;serial<=6;++serial) {
+            const auto word=game.state().word;
+            require(game.state().dialogue.sequence==serial && game.skip_effective(),"expected a read line");
+            game.set_text_length(8);
+            require(game.text_characters(0)==8 && game.visible_text()==8 && game.text_complete(),"skip left partial text");
+            require(game.step_frame(period).word==word,"revealing skipped text advanced the script");
+            game.surface(); // Observe the completed line before acknowledging it.
+            require(game.step_frame(period,click).wait==scene::Wait::Dialogue && game.state().word!=word,"next dialogue");
+        }
+        for (Word serial:{7U,8U}) {
+            if (serial==8) {
+                game.set_skip_active(true);
+                require(game.step_frame(period,click).wait==scene::Wait::Dialogue,"enter CANNOTSKIP region");
+            }
+            const auto word=game.state().word;
+            game.set_text_length(8);
+            require(game.state().dialogue.sequence==serial && !game.skip_effective() &&
+                game.text_characters(0)==0 && !game.text_complete(),"skip bypassed unread or CANNOTSKIP text");
+            require(game.step_frame(period).word==word,"blocked line advanced without input");
+        }
+    });
+    suite.test("a PC save made during mute resumes the latest script BGM when unmuted",[]{
+        Model model;model.message=true;
+        model.code.number(nnn::audio::music,{1,0,0,0,0});
+        model.code.print(1);
+        model.code.number(nnn::audio::music,{2,0,0,0,0});
+        model.code.print(2);
+        model.code.end();
+        TempGame temp(model);
+        temp.text("spt/bgmlist.xtx","first,First\nsecond,Second\n");
+        temp.write("wgq/first.wgq",read_file(fixtures/"assets/tone_first.wgq"));
+        temp.write("wgq/second.wgq",read_file(fixtures/"assets/tone_second.wgq"));
+        auto options=test_options();
+        options.audio.default_music_fade_out=0;
+        scene::GameSession game(temp.root,options);
+        require(game.step_frame(0).wait==scene::Wait::Dialogue && game.audio().pc_state().music_number==0,
+            "initial MUSIC did not play");
+        require(game.audio().state().bgm.active,"first cue is silent");
+
+        require(game.set_system_parameter(nnn::NNNPARAM_MUSICSWITCH,0),"mute music setting");
+        scene::InputState click;click.advance=true;
+        require(game.step_frame(game.frame_ms(),click).wait==scene::Wait::Dialogue,"second MUSIC not reached");
+        const auto save=game.export_pc_save();
+        require(scene::pc::parse_save(save).status.bgm_number==1,"PC save lost the muted cue");
+
+        scene::GameSession restored(temp.root,options);
+        require(restored.set_system_parameter(nnn::NNNPARAM_MUSICSWITCH,0),"apply reloaded global music setting");
+        restored.restore_pc_save(save);
+        std::array<std::int16_t,2048> pcm{};
+        restored.audio().pull(pcm.data(),pcm.size()/2);
+        require(std::all_of(pcm.begin(),pcm.end(),[](auto sample){return sample==0;}) &&
+            restored.audio().pc_state().music_number==1,"loading a muted game must retain the cue without playing it");
+
+        require(restored.set_system_parameter(nnn::NNNPARAM_MUSICSWITCH,1),"unmute restored music");
+        require(restored.step_frame(restored.frame_ms()).wait==scene::Wait::Dialogue,"unmute advanced the script");
+        require(restored.audio().state().bgm.active && restored.audio().state().bgm.name=="second",
+            "unmute must play the cue saved by the script");
+        restored.audio().pull(pcm.data(),pcm.size()/2);
+        require(std::any_of(pcm.begin(),pcm.end(),[](auto sample){return sample!=0;}),"the restored BGM is silent");
     });
     suite.test("Ctrl gates speech during CANNOTSKIP without advancing the text",[]{
         Model m;m.message=true;m.code.number(0x33330059U,{1});m.code.voice();
