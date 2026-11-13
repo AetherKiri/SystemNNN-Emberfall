@@ -277,8 +277,63 @@ public:
         int artwork=0, width=0, height=0;
         std::string summary;
         std::vector<std::uint32_t> pixels;
+        std::vector<nnn::Value> vars;
     };
     static PcSavePreview inspect_pc_save(const std::vector<nnn::Byte>& bytes, std::size_t picture_budget);
+    struct PcSaveGameDate {
+        bool valid=false;
+        int year=2000, date=0, month=0, day=0, weekday=0;
+    };
+    static int game_weekday(int year,int month,int day) noexcept;
+    static std::array<int,2> pc_save_date_variables(const std::filesystem::path& root);
+    static PcSaveGameDate resolve_game_date(const std::vector<nnn::Value>& vars,int year_var,int date_var) noexcept;
+    static PcSaveGameDate inspect_pc_save_game_date(const std::vector<nnn::Byte>& bytes,int year_var,int date_var);
+    struct SharedConfigSnapshot {
+        static constexpr std::size_t size=28;
+        int screen_width=1280;
+        int screen_height=720;
+        int default_frame_ms=20;
+        int code_byte=2;
+        int trial_flag=0;
+        int system_save_version=2;
+        int layer_limit=16;
+        int render_layer_count=32;
+        int save_layer_records=32;
+        int registers_okikae=1;
+        int window_message_number=4;
+        int full_message_number=4;
+        int message_font_size=24;
+        int print_x=100;
+        int print_y=100;
+        int next_x=0;
+        int next_y=30;
+        int lprint_x=100;
+        int lprint_y=100;
+        int lnext_x=0;
+        int lnext_y=30;
+        int append_skip_name=1;
+        // NNNPARAM_WINDOWPERCENT (106): raw transparency percent (0=opaque default, 100=transparent).
+        int window_percent_raw=0;
+        // Effective window opacity percent (100 - clamp(window_percent_raw, 0, 100)).
+        int window_opacity_percent=100;
+        int chara_voice_count=0;
+        int title_bgm_number=1;
+        int year_var_index=-1;
+        int date_var_index=-1;
+        std::array<int,size> to_array() const noexcept {
+            return {{screen_width,screen_height,default_frame_ms,code_byte,trial_flag,system_save_version,
+                layer_limit,render_layer_count,save_layer_records,registers_okikae,
+                window_message_number,full_message_number,message_font_size,
+                print_x,print_y,next_x,next_y,lprint_x,lprint_y,lnext_x,lnext_y,append_skip_name,
+                window_percent_raw,window_opacity_percent,chara_voice_count,title_bgm_number,
+                year_var_index,date_var_index}};
+        }
+    };
+    SharedConfigSnapshot shared_config_snapshot() const;
+    std::size_t full_message_number() const noexcept;
+    int window_opacity_percent() const noexcept;
+    int year_variable_index() const noexcept;
+    int date_variable_index() const noexcept;
     std::vector<nnn::Byte> export_pc_save(const std::vector<std::uint32_t>& pixels={}, int width=0, int height=0);
     nnn::Value save_slot_art() const;
     void restore_snapshot(const nnn::snapshot::Bytes& bytes,const std::function<bool(const FrameState&)>& verify={},

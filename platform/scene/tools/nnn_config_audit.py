@@ -75,7 +75,7 @@ REVIEWED = {
     ("game", "vistacheck"): ("PC_WINDOW_ONLY", "Windows version check"),
     ("game", "f9keyexitoffflag"): ("PC_WINDOW_ONLY", "Windows F9 exit shortcut"),
     ("printmessage", "fullmessagenumber"): (
-        "UNSUPPORTED_BEHAVIOR", "PC uses this limit to scroll long-print rows in CommonPrintMessage"
+        "SUPPORTED", "Long-print row scroll limit in GameSession and PC save roundtrip"
     ),
     ("selectcg", "filenamedifferencefont"): (
         "SUPPORTED", "CG difference digit atlas in GalleryCatalog and GameGalleryPanel"
@@ -124,6 +124,46 @@ REVIEWED = {
     ),
     ("datafile", "overwriteanimetype"): ("SUPPORTED", "Overwrite slot cursor animation type in GameSlotsPanel"),
     ("datafile", "overwriteanimetype2"): ("SUPPORTED", "Overwrite slot selected cursor animation type in GameSlotsPanel"),
+    ("datafile", "gameyearprintflag"): ("SUPPORTED", "Save slot in-game year display flag in GameSession and GameSlotsPanel"),
+    ("datafile", "gamedateprintflag"): ("SUPPORTED", "Save slot in-game date display flag in GameSession and GameSlotsPanel"),
+    ("datafile", "gamemonthprintflag"): ("SUPPORTED", "Save slot in-game month display flag in GameSlotsPanel"),
+    ("datafile", "gamedayprintflag"): ("SUPPORTED", "Save slot in-game day display flag in GameSlotsPanel"),
+    ("datafile", "gameweekprintflag"): ("SUPPORTED", "Save slot in-game weekday display flag in GameSession and GameSlotsPanel"),
+    ("datafile", "gameweekyouprintflag"): ("SUPPORTED", "Save slot weekday suffix sprite flag in GameSlotsPanel"),
+    ("datafile", "gameweekbiprintflag"): ("SUPPORTED", "Save slot weekday suffix sprite flag in GameSlotsPanel"),
+    ("datafile", "filenamegametimefont"): ("SUPPORTED", "Save slot in-game date digit atlas in GameSlotsPanel"),
+    ("datafile", "filenamegameweekfont"): ("SUPPORTED", "Save slot in-game weekday atlas in GameSlotsPanel"),
+    ("datafile", "gametimeprintx"): ("SUPPORTED", "Save slot in-game date origin X in GameSlotsPanel"),
+    ("datafile", "gametimeprinty"): ("SUPPORTED", "Save slot in-game date origin Y in GameSlotsPanel"),
+    ("datafile", "gametimefontsizex"): ("SUPPORTED", "Save slot in-game date digit width in GameSlotsPanel"),
+    ("datafile", "gametimefontsizey"): ("SUPPORTED", "Save slot in-game date digit height in GameSlotsPanel"),
+    ("datafile", "gametimefontnextx"): ("SUPPORTED", "Save slot in-game date digit advance in GameSlotsPanel"),
+    ("datafile", "gamedateprintx"): (
+        "UPSTREAM_UNUSED",
+        "Parsed into CPrintGameDate::m_printX (printGameDate.cpp:239-245) but bypassed by CCommonDataFile::Print(pt, ...)",
+    ),
+    ("datafile", "gamedateprinty"): (
+        "UPSTREAM_UNUSED",
+        "Parsed into CPrintGameDate::m_printY (printGameDate.cpp:239-245) but bypassed by CCommonDataFile::Print(pt, ...)",
+    ),
+    ("datafile", "gamedateslashprintflag"): ("SUPPORTED", "Save slot in-game date slash visibility in GameSlotsPanel"),
+    ("datafile", "gameyearslashprintflag"): ("SUPPORTED", "Save slot in-game year slash visibility in GameSlotsPanel"),
+    ("datafile", "gamemonthslashprintflag"): ("SUPPORTED", "Save slot in-game month slash visibility in GameSlotsPanel"),
+    ("datafile", "gamedayslashprintflag"): ("SUPPORTED", "Save slot in-game day slash visibility in GameSlotsPanel"),
+    ("datafile", "gameyearupzeroprintflag"): ("SUPPORTED", "Save slot in-game year zero-padding flag in GameSlotsPanel"),
+    ("datafile", "gamemonthupzeroprintflag"): ("SUPPORTED", "Save slot in-game month zero-padding flag in GameSlotsPanel"),
+    ("datafile", "gamedayupzeroprintflag"): ("SUPPORTED", "Save slot in-game day zero-padding flag in GameSlotsPanel"),
+    ("datafile", "gameyearprintx"): ("SUPPORTED", "Save slot in-game year X offset in GameSlotsPanel"),
+    ("datafile", "gameyearprinty"): ("SUPPORTED", "Save slot in-game year Y offset in GameSlotsPanel"),
+    ("datafile", "gamemonthprintx"): ("SUPPORTED", "Save slot in-game month X offset in GameSlotsPanel"),
+    ("datafile", "gamemonthprinty"): ("SUPPORTED", "Save slot in-game month Y offset in GameSlotsPanel"),
+    ("datafile", "gamedayprintx"): ("SUPPORTED", "Save slot in-game day X offset in GameSlotsPanel"),
+    ("datafile", "gamedayprinty"): ("SUPPORTED", "Save slot in-game day Y offset in GameSlotsPanel"),
+    ("datafile", "gameweekprintx"): ("SUPPORTED", "Save slot in-game weekday X offset in GameSlotsPanel"),
+    ("datafile", "gameweekprinty"): ("SUPPORTED", "Save slot in-game weekday Y offset in GameSlotsPanel"),
+    ("datafile", "gameweekfontsizex"): ("SUPPORTED", "Save slot in-game weekday glyph width in GameSlotsPanel"),
+    ("datafile", "gameweekfontsizey"): ("SUPPORTED", "Save slot in-game weekday glyph height in GameSlotsPanel"),
+    ("datafile", "gameweekfontnextx"): ("SUPPORTED", "Save slot in-game weekday glyph advance in GameSlotsPanel"),
 }
 
 KAZARI_GATED_STEMS = frozenset(("printmessage", "datafile", "selectscenechara"))

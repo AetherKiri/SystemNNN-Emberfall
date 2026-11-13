@@ -232,6 +232,8 @@ public final class GameConfigTest {
             check(preserved.value("last","").equals("\u0081\u0002"),"tunnel byte at EOF without newline");
             Files.write(new File(root,"init2/printmessage.fxf").toPath(),new byte[1024*1024+1]);
             try{GameUiAssets.readConfig(root,"printmessage");throw new AssertionError("Oversize config accepted");}catch(IOException expected){checks++;}
+            verifyGameDateLayout(root);
+            verifySharedConfigSnapshot(new File(root,"shared-cfg"));
         }finally{remove(root);}
         if(args.length>0){
             root=new File(args[0]);GameUiAssets.Config title=GameUiAssets.readConfig(root,"title");
@@ -315,5 +317,123 @@ public final class GameConfigTest {
             }
         }
         System.out.println("PASS "+checks+" configuration checks");
+    }
+
+    private static void verifyGameDateLayout(File root) throws Exception {
+        // Master gate: template gameWeekPrintFlag=1 alone stays disabled when gameYearPrintFlag=0 & gameDatePrintFlag=0
+        write(new File(root,"init/dataDisabled.xtx"),
+            "gameWeekPrintFlag 1\nfilenameGameWeekFont ta_mgm_slot_week_act2\ngameWeekPrintX 116\ngameWeekPrintY 15\n",false);
+        GameSlotsPanel.GameDateLayout disabled=GameSlotsPanel.GameDateLayout.read(GameUiAssets.readConfig(root,"dataDisabled"));
+        check(!disabled.enabled&&!disabled.outside(160,130)&&
+            disabled.glyphs(new PcStorySave.GameDate(2026,415)).isEmpty(),
+            "gameWeekPrintFlag alone stays gated off when gameYearPrintFlag and gameDatePrintFlag are 0");
+
+        // Full CPrintGameDate(setup, "game") defaults and cascading baseX/baseY when gameYearPrintFlag=1
+        write(new File(root,"init/dataCascade.xtx"),"gameYearPrintFlag 1\ngameTimePrintX 20\ngameTimePrintY 30\n",false);
+        GameSlotsPanel.GameDateLayout cascade=GameSlotsPanel.GameDateLayout.read(GameUiAssets.readConfig(root,"dataCascade"));
+        check(cascade.enabled&&cascade.yearPrint&&cascade.monthPrint&&cascade.dayPrint&&cascade.weekPrint,
+            "CPrintGameDate defaults enable month, day, and week when year is enabled");
+        check(cascade.timeFont.equals("ta_font")&&cascade.weekFont.equals("ta_font")&&
+            cascade.timeSizeX==16&&cascade.timeSizeY==16&&cascade.timeNextX==16,
+            "default game date font names and 16x16 cell metrics");
+        check(cascade.yearX==20&&cascade.yearY==30&&cascade.monthX==100&&cascade.monthY==30&&
+            cascade.dayX==148&&cascade.dayY==30&&cascade.weekX==180&&cascade.weekY==30,
+            "cascading baseX/baseY across year (+5*nextX), month (+3*nextX), day (+2*nextX) and week");
+        java.util.List<GameSlotsPanel.GameDateLayout.Glyph> full=cascade.glyphs(new PcStorySave.GameDate(2026,405));
+        // 4 year digits + year slash (11) + 2 month digits + month slash (11) + 2 day digits + 1 week + you(10) + bi(11) = 13 glyphs
+        check(full.size()==13,"full date+week with slashes and you/bi emits 13 glyphs");
+        check(full.get(4).cell==11&&full.get(4).x==84&&full.get(7).cell==11&&full.get(7).x==132,
+            "year and month slashes use glyph cell 11 at +4*nextX and +2*nextX");
+        check(full.get(10).weekSheet&&full.get(10).cell==0&&full.get(10).x==180&&
+            full.get(11).weekSheet&&full.get(11).cell==10&&full.get(11).x==196&&
+            full.get(12).weekSheet&&full.get(12).cell==11&&full.get(12).x==212,
+            "2026-04-05 Sunday (0) week digit and you(10)/bi(11) suffix cells");
+
+        // Ku Little Little / Moerin S profile: upZero=0 right-alignment + unclipped week badge extending past 160px card
+        write(new File(root,"init/dataKuLittle.xtx"),
+            "filenameGameTimeFont ta_mgm_slot_font_act2\nfilenameGameWeekFont ta_mgm_slot_week_act2\n"+
+            "gameDatePrintFlag 1\ngameDateSlashPrintFlag 0\ngameMonthUpZeroPrintFlag 0\ngameDayUpZeroPrintFlag 0\n"+
+            "gameTimeFontSizeX 15\ngameTimeFontSizeY 25\ngameTimeFontNextX 13\n"+
+            "gameMonthPrintX 10\ngameMonthPrintY 95\ngameDayPrintX 60\ngameDayPrintY 95\n"+
+            "gameWeekPrintFlag 1\ngameWeekPrintX 116\ngameWeekPrintY 15\n"+
+            "gameWeekFontSizeX 60\ngameWeekFontSizeY 100\ngameWeekYouPrintFlag 0\ngameWeekBiPrintFlag 0\n",false);
+        GameSlotsPanel.GameDateLayout ku=GameSlotsPanel.GameDateLayout.read(GameUiAssets.readConfig(root,"dataKuLittle"));
+        check(ku.enabled&&!ku.yearPrint&&ku.monthPrint&&ku.dayPrint&&ku.weekPrint&&
+            ku.monthSlashFlag==0&&ku.daySlashFlag==0&&ku.weekYouFlag==0&&ku.weekBiFlag==0,
+            "Ku Little profile disables year, slashes and week suffixes");
+        check(ku.outside(160,130)&&!ku.outside(190,120),
+            "week badge 116+60=176 overflows 160px card but fits 190x120 Moerin card");
+        java.util.List<GameSlotsPanel.GameDateLayout.Glyph> singleDigits=ku.glyphs(new PcStorySave.GameDate(2000,405));
+        check(singleDigits.size()==3&&
+            !singleDigits.get(0).weekSheet&&singleDigits.get(0).cell==4&&singleDigits.get(0).x==23&&singleDigits.get(0).y==95&&
+            !singleDigits.get(1).weekSheet&&singleDigits.get(1).cell==5&&singleDigits.get(1).x==73&&singleDigits.get(1).y==95&&
+            singleDigits.get(2).weekSheet&&singleDigits.get(2).cell==3&&singleDigits.get(2).x==116&&singleDigits.get(2).width==60,
+            "CSuuji upZero=0 right-aligns single-digit month/day to +nextX and computes 2000-04-05 Wednesday (3)");
+        java.util.List<GameSlotsPanel.GameDateLayout.Glyph> twoDigits=ku.glyphs(new PcStorySave.GameDate(2000,1225));
+        check(twoDigits.size()==5&&twoDigits.get(0).cell==2&&twoDigits.get(0).x==23&&
+            twoDigits.get(1).cell==1&&twoDigits.get(1).x==10&&
+            twoDigits.get(2).cell==5&&twoDigits.get(2).x==73&&
+            twoDigits.get(3).cell==2&&twoDigits.get(3).x==60&&
+            twoDigits.get(4).weekSheet&&twoDigits.get(4).cell==1,
+            "two-digit month/day fills tens at printX and ones at printX+nextX, 2000-12-25 Monday (1)");
+        check(ku.timeFont.equals("ta_mgm_slot_font_act2")&&ku.weekFont.equals("ta_mgm_slot_week_act2"),
+            "explicit fileNameGameTimeFont and fileNameGameWeekFont preserved without guessing other sheets");
+
+        // MinDeaDBlooD profile: gameDatePrintFlag=1, gameWeekPrintFlag=0, default ta_font when unset
+        write(new File(root,"init/dataMdb.xtx"),
+            "gameDatePrintFlag 1\ngameDateSlashPrintFlag 0\ngameWeekPrintFlag 0\n"+
+            "gameMonthPrintX 10\ngameMonthPrintY 95\ngameDayPrintX 60\ngameDayPrintY 95\n",false);
+        GameSlotsPanel.GameDateLayout mdb=GameSlotsPanel.GameDateLayout.read(GameUiAssets.readConfig(root,"dataMdb"));
+        check(mdb.enabled&&!mdb.weekPrint&&mdb.timeFont.equals("ta_font")&&mdb.weekFont.isEmpty()&&
+            mdb.glyphs(new PcStorySave.GameDate(2000,101)).stream().noneMatch(g->g.weekSheet),
+            "MinDeaDBlooD gameWeekPrintFlag=0 suppresses week sprite glyphs and defaults timeFont to ta_font");
+    }
+
+    private static void verifySharedConfigSnapshot(File root) throws Exception {
+        int[] raw={
+            1024,768,16,1,1,3,32,32,24,0,
+            3,14,22,120,540,2,28,80,60,-4,32,0,
+            35,65,12,3,10,1
+        };
+        GameUiAssets.SharedConfig snap=GameUiAssets.SharedConfig.from(raw,null,null,null);
+        check(snap.fromNative&&snap.screenWidth==1024&&snap.screenHeight==768&&snap.defaultFrameMs==16&&
+            snap.codeByte==1&&snap.singleByteText()&&snap.trial()&&snap.systemSaveVersion==3&&
+            snap.layerLimit==32&&snap.renderLayerCount==32&&snap.saveLayerRecords==24&&snap.registersOkikae==0&&
+            snap.windowMessageNumber==3&&snap.fullMessageNumber==14&&snap.messageFontSize==22&&
+            snap.printX==120&&snap.printY==540&&snap.nextX==2&&snap.nextY==28&&
+            snap.lprintX==80&&snap.lprintY==60&&snap.lnextX==-4&&snap.lnextY==32&&snap.appendSkipName==0&&
+            snap.windowPercentRaw==35&&snap.windowOpacityPercent==65&&snap.charaVoiceCount==12&&
+            snap.titleBgmNumber==3&&snap.yearVarIndex==10&&snap.dateVarIndex==1,
+            "28-int sharedConfigSnapshot contract maps every field in index order");
+        check(snap.gameDateVars().enabled()&&snap.gameDateVars().yearIndex==10&&snap.gameDateVars().dateIndex==1,
+            "SharedConfig exposes year/date variable indices for SaveSlots");
+        check(GameUiAssets.SharedConfig.opacityFromWindowPercent(0)==100&&
+            GameUiAssets.SharedConfig.opacityFromWindowPercent(35)==65&&
+            GameUiAssets.SharedConfig.opacityFromWindowPercent(100)==0&&
+            GameUiAssets.SharedConfig.opacityFromWindowPercent(-10)==100&&
+            GameUiAssets.SharedConfig.opacityFromWindowPercent(150)==0,
+            "NNNPARAM_WINDOWPERCENT (106) raw transparency maps to clamped opacity percent");
+
+        DialogueLayout.Text[] baseLayouts=DialogueLayout.layouts(java.util.Collections.emptyMap(),snap);
+        DialogueLayout.Text[] longLayouts=DialogueLayout.longLayouts(java.util.Collections.emptyMap(),baseLayouts,snap);
+        check(baseLayouts[0].font==22&&baseLayouts[0].x==120&&baseLayouts[0].y==540&&
+            baseLayouts[0].nextX==2&&baseLayouts[0].nextY==28&&
+            longLayouts[0].x==80&&longLayouts[0].y==60&&longLayouts[0].nextX==-4&&longLayouts[0].nextY==32,
+            "DialogueLayout base and LPRINT geometry consume SharedConfig snapshot");
+
+        write(new File(root,"spt/exesetup.xtx"),"mainScreenWindowSizeX1 800\nmainScreenWindowSizeY1 600\n",false);
+        write(new File(root,"init/game.xtx"),"frameTime 25\ncodeByte 1\ntaikenflag 1\nlayerExpand 1\nokikaeNothing 1\n",false);
+        write(new File(root,"init/printmessage.xtx"),"windowMessageNumber 3\nfontSize 20\nLPrintX 40\nLPrintY 120\nLNextY 40\nappendSkipName 0\n",false);
+        write(new File(root,"init/title.xtx"),"bgmNumber 4\n",false);
+        write(new File(root,"spt/var2.fxf"),"v0,date,v2,year\r\n",true);
+        GameUiAssets.SharedConfig fb=GameUiAssets.SharedConfig.from(new int[5],root,null,null);
+        // Default fullMessageNumber = ((600 - 120) / 40) - 1 = 11
+        check(!fb.fromNative&&fb.screenWidth==800&&fb.screenHeight==600&&fb.defaultFrameMs==25&&
+            fb.singleByteText()&&fb.trial()&&fb.layerLimit==32&&fb.registersOkikae==0&&
+            fb.windowMessageNumber==3&&fb.fullMessageNumber==11&&fb.messageFontSize==20&&
+            fb.lprintX==40&&fb.lprintY==120&&fb.lnextY==40&&fb.appendSkipName==0&&
+            fb.windowPercentRaw==0&&fb.windowOpacityPercent==100&&fb.titleBgmNumber==4&&
+            fb.yearVarIndex==3&&fb.dateVarIndex==1,
+            "SharedConfig pure-Java fallback computes exesetup/game/printmessage/title/var2 defaults when native handle is absent");
     }
 }
