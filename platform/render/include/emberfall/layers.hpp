@@ -117,6 +117,8 @@ public:
     unsigned layer_count() const noexcept { return screen_slot_+1; }
     const Surface& surface();
     const Surface& scene_surface();
+    // The scene-only counterpart of the just-composed story frame.
+    const Surface& composed_scene() const noexcept { return output_; }
     void set_message_plane(std::shared_ptr<const MessagePlane> plane,OverlapDecoration backdrop={},
                            bool draw_screen_slot=true);
     void clear_message_plane() noexcept;

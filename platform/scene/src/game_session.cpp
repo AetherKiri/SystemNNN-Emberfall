@@ -581,6 +581,22 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
     int pc_log_voices=1;
     pc::LogLayout pc_log_layout=pc::LogLayout::Legacy;
     int pc_thumbnail_width=182,pc_thumbnail_height=102;
+    bool pc_dialogue_thumbnail_without_message=false,pc_choice_thumbnail_without_message=false;
+    std::vector<std::uint32_t> presented_pc_thumbnail;
+    struct ThumbnailPosition {
+        PlaneKey plane;
+        std::uint32_t word;
+        std::string script;
+        bool matches(const PlaneKey& expected,const FrameState& frame) const noexcept {
+            return plane==expected && word==frame.word && script==frame.script;
+        }
+    };
+    ThumbnailPosition presented_pc_thumbnail_position{};
+    bool has_presented_pc_thumbnail=false;
+    bool pc_thumbnail_without_message() const noexcept {
+        return (frame.wait==Wait::Dialogue && pc_dialogue_thumbnail_without_message) ||
+               (frame.wait==Wait::Choice && pc_choice_thumbnail_without_message);
+    }
     unsigned game_version=0,layer_limit=16,render_layer_count=32;
     const std::shared_ptr<const pc::DirectorySaveLayout> save_layout;
     std::size_t loaded_save_message_width=0;
@@ -775,6 +791,8 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         const auto data_file=nnn::game_config::read(root,"init","dataFile.xtx");
         pc_thumbnail_width=std::clamp(config_int(data_file,"picSizeX",config_int(data_file,"areaSizeX",132)),1,512);
         pc_thumbnail_height=std::clamp(config_int(data_file,"picSizeY",config_int(data_file,"areaSizeY",100)),1,512);
+        pc_dialogue_thumbnail_without_message=config_int(init,"messageMiniCGNoMessageFlag",0)!=0;
+        pc_choice_thumbnail_without_message=config_int(init,"selectMiniCGNoMessageFlag",0)!=0;
         one_byte_text=config_int(init,"codeByte",2)==1;
         sync_runtime_names();
         standalone_script=options.standalone_script;
@@ -4319,7 +4337,8 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         return layout;
     }
 
-    pc::Save make_pc_save(const std::vector<std::uint32_t>& pixels, int picture_width, int picture_height) {
+    pc::Save make_pc_save(const std::vector<std::uint32_t>& pixels, int picture_width, int picture_height,
+                          const render::Surface* presented_source=nullptr,bool render_preview=true) {
         const bool place=frame.wait==Wait::Place;
         const bool chart=modal_savable() && frame.modal && frame.modal->mode==nnn::RuntimeMode::SelectChart;
         if (ui_mode || !replay_films.empty() ||
@@ -4437,14 +4456,14 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
                     static_cast<std::size_t>(x)*source_width/width;
                 thumb.pixels.push_back(pixels[offset]&0x00ffffffU);
             }
-        } else {
-            const auto& image=renderer->surface();
+        } else if (presented_source || render_preview) {
+            const auto& image=presented_source ? *presented_source : renderer->surface();
             for (unsigned y=0;y<height;++y) for (unsigned x=0;x<width;++x) {
                 const auto offset=(static_cast<std::size_t>(y)*image.height/height*image.width+
                     static_cast<std::size_t>(x)*image.width/width)*3;
                 thumb.pixels.push_back((std::uint32_t{image.rgb[offset]}<<16U)|(std::uint32_t{image.rgb[offset+1]}<<8U)|image.rgb[offset+2]);
             }
-        }
+        } else thumb.pixels.resize(static_cast<std::size_t>(width)*height);
         if (pc_save_log) {
             auto& log=saved.log.emplace();
             log.layout=pc_log_layout;
@@ -5274,10 +5293,15 @@ void GameSession::restore_pc_save(const std::vector<nnn::Byte>& bytes) {
     options.local_clock=data_->clock_source;
     options.script_debug_output=data_->script_debug_output;
     options.filename_encoder=data_->filename_encoder;
-    auto candidate=std::make_unique<Impl>(options.runtime->root(),options);
+    auto candidate=std::make_unique<Impl>(options.runtime->root(),options,false,data_->shared_assets);
     candidate->chart_private_root=data_->chart_private_root;
     candidate->load_pc_save(bytes);
     data_.swap(candidate);
+}
+void GameSession::load_pc_save_candidate(const std::vector<nnn::Byte>& bytes) {
+    if (data_->ui_mode || !data_->replay_films.empty() || data_->frame.wait!=Wait::Running || data_->frame.word!=0)
+        nnn::snapshot::invalid("PC save candidate must be a fresh story session");
+    data_->load_pc_save(bytes);
 }
 GameSession::PcSavePreview GameSession::inspect_pc_save(const std::vector<nnn::Byte>& bytes, std::size_t picture_budget) {
     if (bytes.size()<32) throw std::runtime_error("Incomplete PC save header");
@@ -5392,6 +5416,15 @@ int GameSession::date_variable_index() const noexcept {
 std::vector<nnn::Byte> GameSession::export_pc_save(const std::vector<std::uint32_t>& pixels, int width, int height) {
     return pc::write_save(data_->make_pc_save(pixels,width,height));
 }
+std::vector<nnn::Byte> GameSession::export_presented_pc_save() {
+    auto& d=*data_;
+    if (d.has_presented_pc_thumbnail && d.presented_pc_thumbnail_position.matches(expected_plane_key(),d.frame)) {
+        if (d.pc_thumbnail_without_message())
+            return export_pc_save(d.presented_pc_thumbnail,d.pc_thumbnail_width,d.pc_thumbnail_height);
+        return pc::write_save(d.make_pc_save({},0,0,&d.renderer->presented_surface(),false));
+    }
+    return pc::write_save(d.make_pc_save({},0,0,nullptr,false));
+}
 GameSession::PcSaveLayout GameSession::pc_save_layout() const { return data_->pc_save_layout(); }
 int GameSession::detect_pc_system_save_version(const fs::path& root) {
     return pc_system_save_versions(root,true)[1];
@@ -5477,7 +5510,31 @@ GameSession::PlaneKey GameSession::expected_plane_key() const noexcept {
         0
     }};
 }
-void GameSession::after_present() { data_->renderer->after_present(); }
+void GameSession::after_present() {
+    auto& d=*data_;
+    d.renderer->after_present();
+    const auto wait=d.frame.wait;
+    const bool chart=wait==Wait::Modal && d.frame.modal && d.frame.modal->mode==nnn::RuntimeMode::SelectChart;
+    if (d.ui_mode || (wait!=Wait::Dialogue && wait!=Wait::Choice && wait!=Wait::Place && !chart)) {
+        d.has_presented_pc_thumbnail=false;
+        return;
+    }
+    d.presented_pc_thumbnail_position.plane=expected_plane_key();
+    d.presented_pc_thumbnail_position.word=d.frame.word;
+    d.presented_pc_thumbnail_position.script=d.frame.script;
+    d.has_presented_pc_thumbnail=true;
+    if (!d.pc_thumbnail_without_message()) return;
+    const auto& image=d.renderer->composed_scene();
+    const auto width=static_cast<unsigned>(d.pc_thumbnail_width),height=static_cast<unsigned>(d.pc_thumbnail_height);
+    auto& pixels=d.presented_pc_thumbnail;
+    pixels.resize(static_cast<std::size_t>(width)*height);
+    for (unsigned y=0;y<height;++y) for (unsigned x=0;x<width;++x) {
+        const auto offset=(static_cast<std::size_t>(y)*image.height/height*image.width+
+                           static_cast<std::size_t>(x)*image.width/width)*3;
+        pixels[static_cast<std::size_t>(y)*width+x]=(std::uint32_t{image.rgb[offset]}<<16U)|
+            (std::uint32_t{image.rgb[offset+1]}<<8U)|image.rgb[offset+2];
+    }
+}
 const render::Surface& GameSession::presented_surface() const noexcept { return data_->renderer->presented_surface(); }
 bool GameSession::screen_layer_active() const { return data_->renderer->screen_layer_active(); }
 bool GameSession::story_draws_screen_layer() const {

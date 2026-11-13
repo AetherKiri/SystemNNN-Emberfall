@@ -941,7 +941,8 @@ API void JNICALL FN(restorePcSave)(JNIEnv* env,jclass,jlong handle,jbyteArray ra
         env->GetByteArrayRegion(raw,0,size,reinterpret_cast<jbyte*>(data.data()));
         if (env->ExceptionCheck()) return;
         auto& p=player(handle);
-        p.game->restore_pc_save(data);
+        // The Java runner commits this player only after the slot loads.
+        p.game->load_pc_save_candidate(data);
         p.published_screen_layer.reset();
         p.compositor.reset_present_state();
         frame_meta(env,p,meta);
@@ -1004,11 +1005,6 @@ API jobjectArray JNICALL FN(saveLayoutConfig)(JNIEnv* env,jclass,jbyteArray path
 API jbyteArray JNICALL FN(exportPcSave)(JNIEnv* env,jclass,jlong handle,jintArray picture,jint width,jint height) {
     try {
         auto& p=player(handle);
-        if (p.compositor.mailbox()->attached()) {
-            if (!picture) sync_story_plane(p);
-        } else {
-            flush_screen_capture(p);
-        }
         std::vector<std::uint32_t> pixels;
         if (picture) {
             if (width<=0 || width>512 || height<=0 || height>512 || env->GetArrayLength(picture)!=width*height)
@@ -1017,7 +1013,7 @@ API jbyteArray JNICALL FN(exportPcSave)(JNIEnv* env,jclass,jlong handle,jintArra
             env->GetIntArrayRegion(picture,0,width*height,reinterpret_cast<jint*>(pixels.data()));
             if (env->ExceptionCheck()) return nullptr;
         }
-        const auto data=p.game->export_pc_save(pixels,width,height);
+        const auto data=picture ? p.game->export_pc_save(pixels,width,height) : p.game->export_presented_pc_save();
         const auto size=static_cast<jsize>(data.size());
         auto result=env->NewByteArray(size);
         if (result) env->SetByteArrayRegion(result,0,size,reinterpret_cast<const jbyte*>(data.data()));
