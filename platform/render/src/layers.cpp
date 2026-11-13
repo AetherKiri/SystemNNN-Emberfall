@@ -350,8 +350,7 @@ void Layers::clear_all() {
     for (unsigned i=0;i<slots_.size();++i) clear(i);
     scene_base_={};
     story_output_={};
-    presented_={};
-    last_decorated_endpoint_={};
+    // Script mutations do not erase the frame that is still on screen.
 }
 void Layers::bind(unsigned slot,std::shared_ptr<const Texture> texture,bool preload) {
     auto& l=slots_.at(slot);
@@ -802,8 +801,6 @@ void Layers::saved_screen(Surface frame,bool background) {
     saved_background_=background;
     scene_base_={};
     story_output_={};
-    presented_={};
-    last_decorated_endpoint_={};
     invalidate();
 }
 void Layers::commit_screen_capture(Surface frame) {
@@ -871,7 +868,11 @@ void Layers::prepare_overlap(const OverlapCapture& capture) {
         return;
     }
     previous_=scene;
-    if (!capture(previous_) && !endpoint.rgb.empty()) previous_=endpoint;
+    if (!capture(previous_)) {
+        if (!presented_.rgb.empty()) previous_=presented_;
+        else if (!endpoint.rgb.empty()) previous_=endpoint;
+        else previous_=scene;
+    }
 }
 bool Layers::start_overlap(std::uint32_t frames,int type,const OverlapDecoration& decorate,
                            const OverlapCapture& capture) {
@@ -886,7 +887,7 @@ bool Layers::start_overlap(std::uint32_t frames,int type,const OverlapDecoration
 }
 void Layers::finish_overlap() {
     if (!target_.rgb.empty()) { output_=std::move(target_); output_changed_=true; }
-    scene_base_={}; story_output_={}; presented_={};
+    scene_base_={}; story_output_={};
     previous_={}; target_={}; overlap_time_=overlap_count_=0; overlap_type_=0; dirty_=false; ++revision_;
 }
 void Layers::resume_overlap_scene() {
