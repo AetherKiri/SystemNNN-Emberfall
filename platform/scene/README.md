@@ -42,3 +42,15 @@ build/scene-host-debug/nnn-core/nnn-audio-check "$game"
 ```
 
 `--wait-voice` lets foreground speech finish before the simulated reader clicks. For the real debug menu, use `--entry dea_debug.spt --limit 12 --click-draw --choice 1` or `--choice 2`. The separate audio check exercises all four voices, role gain, SE and system routing, fade endpoints at 48 kHz, and sample-exact transitions of bgm01, bgm10, bgm17 and the MML-free short.wgq at their native rate.
+
+## Audit game setup fields
+
+Run the read-only audit with Python 3. It uses the local upstream reference checkout, or a directory supplied with `--upstream`.
+
+```sh
+python platform/scene/tools/nnn_config_audit.py "/path/to/DeadEndAegis [zh]"
+python platform/scene/tools/nnn_config_audit.py --discover "/path/to/game installations" --json > build/config-audit.json
+python -m unittest discover -s platform/scene/tools
+```
+
+The report lists fields and line numbers from `init/*.xtx` and the matching `init2/*.fxf` overrides. The JSON includes literal query sites and candidate formatted keys found in the upstream C++ sources. `SUPPORTED`, `PARTIAL`, `UNSUPPORTED_BEHAVIOR` and `PC_WINDOW_ONLY` reflect individually checked contracts. `REVIEW` records upstream evidence pending a behavior check. `UNKNOWN` marks keys without a query the scanner could match. A listed field may depend on another setting or the current mode.
