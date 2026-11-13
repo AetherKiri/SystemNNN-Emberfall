@@ -1220,7 +1220,7 @@ void blur_effects() {
         cached.rectangle(1,moved,moved);reference.rectangle(4,moved,moved);
         require(cached.surface().rgb==reference.surface().rgb);
     }
-    // Compare the packed sums with a direct convolution, including a full
+    // Compare the rolling sums with a direct convolution, including a full
     // 256-sample window, clipped source/destination edges and opaque RGB.
     auto opaque=pattern(23,19);
     opaque->canvas_width=27;opaque->canvas_height=22;opaque->content={2,1,23,19};
