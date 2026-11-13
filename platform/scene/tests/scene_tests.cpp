@@ -125,6 +125,43 @@ void extension_writer(Bytes& bytes,unsigned base) {
         0x8b,0x4d,0xf8,0x8b,0x55,12,0x89,0x11,0x8b,0x45,0xf8,0x8b,0x4d,16,0x89,0x48,4};
     std::copy(header.begin(),header.end(),bytes.begin()+callee);
 }
+void extension_size_writer(Bytes& bytes) {
+    constexpr Word vtable=0x4020b0,save_slot=16;
+    const auto address=[](std::size_t offset) {return static_cast<Word>(0x403000+offset-0x600);};
+    const auto put=[&](std::size_t offset,const Bytes& code) {
+        std::copy(code.begin(),code.end(),bytes.begin()+static_cast<std::ptrdiff_t>(offset));
+    };
+    const auto call=[&](std::size_t at,std::size_t target) {le32(bytes,at+1,address(target)-address(at+5));};
+
+    put(0x63a,{0x8b,0x45,0xd0,0x8b,0x88,0x60,0x1c,0,0,0x89,0x4d,0xfc,
+        0x8b,0x55,0xfc,0x83,0xc2,32,0x89,0x55,0xfc,0x8b,0x45,8,0x50,0x8b,0x4d,0xfc,0x51,
+        0x8b,0x55,0xd0,0x8b,0x42,4,0x8b,0x4d,0xd0,0x8b,0x49,4,0x8b,0x10,0x8b,0x82,0,0,0,0,0xff,0xd0});
+    le32(bytes,0x63a+45,save_slot);
+    le32(bytes,0x4b0+save_slot,address(0x680));
+    le32(bytes,0x4b0+save_slot-4,address(0x6b0));
+    le32(bytes,0x4b0+save_slot+8,address(0x6e0));
+    put(0x850,{0xc7,0,0,0,0,0});le32(bytes,0x852,vtable);
+
+    // Save dispatch and callback wrappers refer to the same private object.
+    put(0x680,{0x55,0x8b,0xec,0x83,0xec,16,0x89,0x4d,0xf0,0x8b,0x4d,12,0x51,0x8b,0x55,8,0x52,
+        0x8b,0x45,0xf0,0x8b,0x10,0x8b,0x4d,0xf0,0x8b,0x82,0,0,0,0,0xff,0xd0,0x8b,0xe5,0x5d,0xc2,8,0});
+    le32(bytes,0x680+27,save_slot+8);
+    const Bytes wrapper{0x55,0x8b,0xec,0x83,0xec,8,0x89,0x4d,0xf8,0x8b,0x45,0xf8,0x8b,0x88,0xd4,0,0,0,0x89,0x4d,0xfc};
+    put(0x6b0,wrapper);put(0x6e0,wrapper);
+    put(0x6b0+21,{0x8b,0x55,8,0x52,0x8b,0x4d,0xfc,0xe8,0,0,0,0,0x8b,0xe5,0x5d,0xc2,4,0});
+    put(0x6e0+21,{0x8b,0x55,12,0x52,0x8b,0x45,8,0x50,0x8b,0x4d,0xfc,0xe8,0,0,0,0,0x8b,0xe5,0x5d,0xc2,8,0});
+    call(0x6b0+28,0x720);call(0x6e0+32,0x780);
+    put(0x780,{0x55,0x8b,0xec,0x83,0xec,12,0x89,0x4d,0xf8,0x8b,0x55,12,0x52,0x8b,0x4d,0xf8,0xe8,0,0,0,0,
+        0x50,0x8b,0x45,0xfc,0x50,0x8b,0x4d,8,0x51,0xe8,0,0,0,0,0x83,0xc4,12,0x8b,0xe5,0x5d,0xc2,8,0});
+    call(0x780+16,0x720);
+
+    put(0x720,{0x55,0x8b,0xec,0x83,0xec,12,0x89,0x4d,0xf8,0xc7,0x45,0xfc,0,0,0,0,
+        0x8b,0x45,8,0x89,0x45,0xf4,0x83,0x7d,0xf4,2,0x77,35,0x8b,0x4d,0xf4,0xff,0x24,0x8d,0,0,0,0,
+        0xc7,0x45,0xfc,17,0,0,0,0xeb,16,0xc7,0x45,0xfc,0,0,0,0,0xeb,7,0xc7,0x45,0xfc,52,0,0,0,
+        0x8b,0x45,0xfc,0x8b,0xe5,0x5d,0xc2,4,0});
+    le32(bytes,0x720+34,address(0x840));
+    for (std::size_t i=0;i<3;++i) le32(bytes,0x840+i*4,address(0x720+38+i*9));
+}
 Bytes executable_save_fixture(Word effect_layers,Word filename_layers,Word message_size=0,Word status_size=0) {
     constexpr std::size_t pe=0x80, optional=pe+24, table=optional+0xe0;
     constexpr std::size_t code=0x200, names=0x400;
@@ -3450,6 +3487,40 @@ int main(){
         scene::GameSession no_ext(temp.root,options);
         require(no_ext.step_frame(0).wait==scene::Wait::Dialogue && scene::pc::parse_save(no_ext.export_pc_save()).extensions.empty(),
             "a game without EXT was unnecessarily blocked");
+    });
+    suite.test("EXT lengths follow the validated writer and survive cached reads without saves",[]{
+        TempGame temp(Model{});
+        temp.write("spt/var.fxf",{0x8e,0xf5});
+        temp.text("init/game.xtx","extSaveDataNumber 3\nextSaveDataSize1 123\nextSaveDataSize2 0\n");
+        auto image=executable_save_fixture(16,16);
+        extension_size_writer(image);
+        temp.write("game.exe",image);
+        const auto cfg=scene::GameSession::pc_save_configuration(temp.root,true);
+        require(cfg && cfg->extension_enabled==1 && cfg->extension_start_code==100 &&
+            cfg->extension_sizes==std::vector<int>({17,0,52}),"writer-linked EXE lengths were not resolved in index order");
+        const auto original=read_file(cfg->file);
+        std::string layout(original.begin(),original.end());
+        require(layout.find("ext_block_size 17 exe")!=std::string::npos,"EXE provenance was not recorded");
+
+        // A corrupt jump-table pointer invalidates lengths but leaves the proven start code.
+        le32(image,0x844,0xffffffffU);
+        temp.write("game.exe",image);
+        const auto cached=scene::GameSession::pc_save_configuration(temp.root,false);
+        require(cached && cached->extension_sizes==cfg->extension_sizes,"cached inspection reparsed the EXE");
+        const auto fallback=scene::GameSession::pc_save_configuration(temp.root,true);
+        require(fallback && fallback->extension_start_code==100 &&
+            fallback->extension_sizes==std::vector<int>({123,0,-1}),"invalid EXE lengths hid config values or fabricated sizes");
+        const auto bytes=read_file(fallback->file);
+        const std::string persisted(bytes.begin(),bytes.end());
+        require(persisted.find("ext_block_size 123 game_files")!=std::string::npos &&
+            persisted.find("ext_block_size -1 unknown")!=std::string::npos,"fallback size provenance was lost");
+
+        layout.erase(layout.find("ext_block_count"));
+        layout.replace(0,std::string("emberfall_system 4").size(),"emberfall_system 3");
+        temp.text("init/emberfall-system.cfg",layout);
+        const auto old=scene::GameSession::pc_save_configuration(temp.root,false);
+        require(old && old->extension_enabled==1 && old->extension_start_code==100 && old->extension_sizes.empty(),
+            "V3 configuration lost its authoritative EXT code");
     });
     suite.test("PC legacy 5024-byte GAMESTATUS, code-9 EXT1, scheduled EXE layout, and game-extension rejection",[]{
         Model model;model.message=true;model.message_text="LegacyRow1\r\nLegacyRow2";

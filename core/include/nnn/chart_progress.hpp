@@ -6,6 +6,9 @@
 namespace nnn::chart {
 
 inline constexpr std::size_t max_progress_slots=256U*1024U;
+inline constexpr std::size_t move_road_bytes(std::size_t slots) noexcept {
+    return (slots+15U)&~std::size_t{15};
+}
 inline constexpr std::size_t selection_words(std::size_t slots) noexcept {
     return (((slots+31U)/32U)+3U)&~std::size_t{3};
 }

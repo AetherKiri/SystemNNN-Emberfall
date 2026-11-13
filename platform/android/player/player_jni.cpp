@@ -285,12 +285,9 @@ void apply_runtime(emberfall::scene::SessionOptions& options,jlong token) {
     options.save_layout=ref.save_layout;
 }
 jlong open_game(JNIEnv* env,jbyteArray path,jint rate,emberfall::scene::SessionOptions options={},bool debug_mode=false) {
-        if (!path) throw std::invalid_argument("Missing game directory");
-        const auto size=env->GetArrayLength(path);
-        if (size<=0 || size>32768) throw std::runtime_error("Invalid game directory");
-        std::string root(static_cast<std::size_t>(size),'\0');
-        env->GetByteArrayRegion(path,0,size,reinterpret_cast<jbyte*>(root.data()));
+        const auto root=directory_path(env,path);
         if (env->ExceptionCheck()) return 0;
+        if (root.empty() || root.find('\0')!=std::string::npos) throw std::invalid_argument("Invalid game directory");
         options.audio.sample_rate=static_cast<unsigned>(rate);
         options.queue_audio_events=false;
         options.filename_encoder=emberfall::android::filename_encoder(env);
@@ -832,11 +829,11 @@ API jobjectArray JNICALL FN(chartText)(JNIEnv* env,jclass,jlong handle) {
 }
 API void JNICALL FN(setChartStorage)(JNIEnv* env,jclass,jlong handle,jbyteArray path) {
     try {
-        const auto directory=resource_name(env,path);
+        const auto directory=directory_path(env,path);
         if (env->ExceptionCheck()) return;
         if (directory.empty() || directory.find('\0')!=std::string::npos)
             throw std::invalid_argument("Invalid chart directory");
-        player(handle).game->set_chart_storage(directory);
+        player(handle).game->set_chart_storage(std::filesystem::u8path(directory));
     } catch (const std::exception& e) { fail(env,e.what()); }
 }
 API jobjectArray JNICALL FN(statusOverlays)(JNIEnv* env,jclass,jlong handle,jint mode) {
@@ -954,14 +951,14 @@ API void JNICALL FN(restorePcSave)(JNIEnv* env,jclass,jlong handle,jbyteArray ra
 }
 API jint JNICALL FN(detectPcSystemSaveVersion)(JNIEnv* env,jclass,jbyteArray path) {
     try {
-        const auto root=resource_name(env,path);
+        const auto root=directory_path(env,path);
         if (env->ExceptionCheck() || root.empty() || root.find('\0')!=std::string::npos) return 0;
         return GameSession::detect_pc_system_save_version(std::filesystem::u8path(root));
     } catch (const std::exception&) { return 0; }
 }
 API jintArray JNICALL FN(pcSystemSaveVersions)(JNIEnv* env,jclass,jbyteArray path,jboolean analyze_executable) {
     try {
-        const auto root=resource_name(env,path);
+        const auto root=directory_path(env,path);
         if (env->ExceptionCheck() || root.empty() || root.find('\0')!=std::string::npos) return nullptr;
         const auto versions=GameSession::pc_system_save_versions(std::filesystem::u8path(root),analyze_executable==JNI_TRUE);
         return int_array(env,{versions[0],versions[1]});
@@ -969,7 +966,7 @@ API jintArray JNICALL FN(pcSystemSaveVersions)(JNIEnv* env,jclass,jbyteArray pat
 }
 API jintArray JNICALL FN(pcSystemSaveFormat)(JNIEnv* env,jclass,jbyteArray path,jboolean analyze_executable) {
     try {
-        const auto root=resource_name(env,path);
+        const auto root=directory_path(env,path);
         if (env->ExceptionCheck() || root.empty() || root.find('\0')!=std::string::npos) return nullptr;
         const auto format=GameSession::pc_system_save_format(std::filesystem::u8path(root),analyze_executable==JNI_TRUE);
         return int_array(env,{format[0],format[1]});
@@ -984,7 +981,7 @@ API jintArray JNICALL FN(currentPcSystemSaveFormat)(JNIEnv* env,jclass,jlong han
 }
 API jobjectArray JNICALL FN(saveLayoutConfig)(JNIEnv* env,jclass,jbyteArray path,jboolean regenerate) {
     try {
-        const auto root=resource_name(env,path);
+        const auto root=directory_path(env,path);
         if (env->ExceptionCheck() || root.empty() || root.find('\0')!=std::string::npos) return nullptr;
         const auto config=GameSession::pc_save_configuration(std::filesystem::u8path(root),regenerate==JNI_TRUE);
         if (!config) return nullptr;
@@ -994,10 +991,12 @@ API jobjectArray JNICALL FN(saveLayoutConfig)(JNIEnv* env,jclass,jbyteArray path
         if (!result) return nullptr;
         array_text(env,result,0,config->file.u8string());
         if (env->ExceptionCheck()) return nullptr;
-        auto fields=int_array(env,{static_cast<int>(config->layer_records),static_cast<int>(config->message_width),
+        std::vector<int> values{static_cast<int>(config->layer_records),static_cast<int>(config->message_width),
             static_cast<int>(config->status_bytes),config->system_save_version,config->executable_layout,config->okikae,
             config->system_save_source,config->executable_message_width,config->executable_status_bytes,
-            config->executable_okikae,config->extension_start_code});
+            config->executable_okikae,config->extension_start_code,config->extension_enabled};
+        values.insert(values.end(),config->extension_sizes.begin(),config->extension_sizes.end());
+        auto fields=int_array(env,values);
         if (fields) env->SetObjectArrayElement(result,1,fields);
         return result;
     } catch (const std::exception& e) { fail(env,e.what());return nullptr; }

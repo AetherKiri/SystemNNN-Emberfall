@@ -279,6 +279,8 @@ public:
         bool executable_layout=false, okikae=false;
         bool executable_message_width=false, executable_status_bytes=false, executable_okikae=false;
         int extension_start_code=-1; // -1 unresolved, 0 none, otherwise the actual EXE operand.
+        int extension_enabled=-1; // -1 older configuration without enough information.
+        std::vector<int> extension_sizes; // Payload bytes in saved order. -1 means unknown.
     };
     // Inspection is read-only. Regeneration always analyzes the EXE before applying fallbacks.
     static std::optional<PcSaveConfiguration> pc_save_configuration(const std::filesystem::path& root,bool regenerate);
