@@ -2231,6 +2231,41 @@ int main(){
         require(game.step_frame(period).wait==scene::Wait::Running && game.surface().rgb==Bytes{0,64,0},
             "overlap must end on the new layers");
     });
+    suite.test("successive overlaps try host capture after a decorated endpoint",[]{
+        for (const bool captured:{true,false}) {
+            Model model;model.message=true;
+            model.code.number(effect,{0,54,0,100,100,100});
+            model.code.number(0x3333001cU,{2,1,2}); // STARTKOMA with a long window
+            model.code.number(0x22220005U,{0,2});
+            model.code.print(1);
+            model.code.number(effect,{0,54,0,0,80,0});
+            model.code.number(0x33330011U,{});
+            model.code.number(0x22220005U,{0,2});
+            model.code.end();
+            TempGame temp(model);
+            temp.text("init/printmessage.xtx","LPrintBGMode 2\nlprintBGMultiR 50\n");
+            scene::GameSession game(temp.root,test_options());
+            require(game.step_frame(0).wait==scene::Wait::Overlap,"first overlap not reached");
+            const auto period=game.frame_ms();
+            require(game.step_frame(2*period).wait==scene::Wait::Running,"first overlap endpoint not reached");
+            const auto endpoint=game.surface().rgb;
+            require(endpoint==Bytes{50,50,50},"first endpoint must contain the long window");
+            require(game.step_frame(0).wait==scene::Wait::Dialogue,"intervening PRINT not reached");
+            // Only the host message plane changed. No new native surface was requested.
+            unsigned attempts=0;
+            const auto capture=[&](emberfall::render::Surface& source){
+                ++attempts;
+                require(source.rgb==Bytes{100,100,100},"the new message must be drawn on the undecorated scene");
+                if (captured) source.rgb={12,24,200};
+                return captured;
+            };
+            scene::InputState click;click.advance=true;
+            require(game.step_frame({0,0},click,capture).wait==scene::Wait::Overlap,"second overlap not reached");
+            require(attempts==1,"the decorated endpoint bypassed host capture");
+            require(game.surface().rgb==(captured ? Bytes{12,24,200} : endpoint),
+                "frame zero did not use the current capture or its displayed fallback");
+        }
+    });
     for (const Word transition:{draw,0x22220005U}) suite.test(transition==draw?"DRAW then APPEND":"OVERRAP then APPEND",[transition]{
         Model m;m.message=true;m.message_text="Old";
         m.code.add({6,command,0x22220002U,0,1,0});
