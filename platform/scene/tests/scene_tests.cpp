@@ -3369,6 +3369,39 @@ int main(){
         require(opaque_game.step_frame(2*opaque_game.frame_ms()).wait==scene::Wait::Running,"opaque game did not reach OVERLAP endpoint");
         require(opaque_game.surface().rgb!=Bytes{0,0,0},"WINDOWPERCENT=0 did not paint an opaque message window");
     });
+    suite.test("EXE header size follows a delayed stack-local argument and rejects clobbers or branches",[]{
+        TempGame temp(Model{});
+        auto exe=executable_save_fixture(16,16);
+        exe.resize(0xe00);le32(exe,0x178+80+16,0x800);
+        std::copy_n("GAMESTATUS",11,exe.begin()+0x430);
+        constexpr std::size_t function=0xa00;
+        Bytes writer{0x55,0x8b,0xec,0x83,0xec,0x18,0x89,0x4d,0xe8,
+            0xc7,0x45,0xec,0xb0,0x1b,0,0};
+        writer.resize(203,0x90);
+        writer.insert(writer.end(),{0x68,0x30,0x20,0x40,0,0x6a,2,0x8b,0x45,0xec,0x50,
+            0x8b,0x4d,0xe8,0x83,0xc1,0x68,0x51,0x8b,0x4d,0xe8,0xe8,0,0,0,0});
+        le32(writer,225,static_cast<Word>(0x800-(function+229)));
+        const auto write=[&]{std::copy(writer.begin(),writer.end(),exe.begin()+function);temp.write("game.exe",exe);};
+        write();
+        require(scene::pc::executable_save_layout(temp.root).status_bytes==7088,
+            "delayed stack-local GAMESTATUS size was missed");
+        le32(writer,12,8112);write();
+        require(scene::pc::executable_save_layout(temp.root).status_bytes==8112,
+            "parser assumed a fixed GAMESTATUS size instead of following the local");
+        writer[190]=0x89;writer[191]=0x45;writer[192]=0xec;write();
+        require(!scene::pc::executable_save_layout(temp.root).status_bytes,
+            "overwritten stack local was treated as a constant");
+        writer[190]=0x89;writer[191]=0x85;le32(writer,192,0xffffffec);write();
+        require(!scene::pc::executable_save_layout(temp.root).status_bytes,
+            "wide-displacement overwrite was ignored");
+        std::fill(writer.begin()+190,writer.begin()+196,0x90);
+        writer[190]=0x8b;writer[191]=0xe8;write();
+        require(!scene::pc::executable_save_layout(temp.root).status_bytes,
+            "modified frame pointer was treated as the original stack frame");
+        writer[190]=0x75;writer[191]=2;writer[192]=0x90;write();
+        require(!scene::pc::executable_save_layout(temp.root).status_bytes,
+            "branch-dependent stack local was treated as a single constant");
+    });
     suite.test("EXT uses writer operands, persists none or failure distinctly, and never guesses from status size",[]{
         Model model;model.message=true;model.code.print(1);model.code.end();
         TempGame temp(model);
