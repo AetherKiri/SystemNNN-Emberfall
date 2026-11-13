@@ -145,6 +145,23 @@ public final class GameConfigTest {
             write(conditional,"voiceVoiceChangeFlag 0\n"+voiceChanges,false);
             OriginalSettingsModel.CharacterControl unchanged=new OriginalSettingsModel(GameUiAssets.readConfig(root,"conditional")).characters.get(0);
             check(unchanged.soundChange==null&&unchanged.sound(true,click,true)==10,"games must opt into variable-based cues");
+            write(new File(root,"init/voiceArt.xtx"),
+                "voiceCutButtonNumber 2\nvoiceCutButtonCustomFlag 1\nvoiceCutButtonCheckAppearFlag 1\n"+
+                "voiceNameChangeFlag 1\nvoiceNameChangeVar1 portraitMode\n"+
+                "voiceOffNumberByButton1 2\nvoiceOffButton1chara1 8\nvoiceOffButton1chara2 9\n"+
+                "voice1Button1FileName PortraitOff.DWQ\nvoice1Button2FileName PortraitOn\n",false);
+            OriginalSettingsModel voiceArt=new OriginalSettingsModel(GameUiAssets.readConfig(root,"voiceArt"));
+            OriginalSettingsModel.CharacterControl portrait=voiceArt.characters.get(0);
+            check(!portrait.visible(id->id==1)&&portrait.visible(id->id==8)&&portrait.visible(id->id==9),
+                "character appearance uses any heard role in the configured group");
+            check(voiceArt.characters.get(1).visible(id->id==10)&&!voiceArt.characters.get(1).visible(id->id==9),
+                "character appearance uses inherited role IDs");
+            check(portrait.imageVariable.equals("portraitMode")&&portrait.soundChange==null&&
+                portrait.variantImage(false,2).equals("sys/portraitoff_2")&&
+                portrait.variantImage(true,2).equals("sys/portraiton_2")&&portrait.variantImage(true,0).isEmpty(),
+                "character art switches each state independently of the sound setting");
+            check(first.visible(id->false)&&first.imageVariable.equals("nameFlag"),
+                "the art variable stays independent of the explicitly overridden sound variable");
             write(new File(root,"init2/config.fxf"),"musicVolumePrintX 100\nmusicBarFileName bar\nvolumeNumber 4\nvolumeSizeX1 320\nvolumeSizeY1 13\nfilenameBG first_bg\nfilenameBG3 third_bg\nmodePageMax 3\npageMode 1\nvoiceCutButtonNumber 2\nvoiceCutButtonCustomFlag 1\nvoiceOffNumberByButton1 2\nvoiceOffButton1chara1 7\nvoiceOffNumberByButton2 1\n",true);
             OriginalSettingsModel inherited=new OriginalSettingsModel(GameUiAssets.readConfig(root,"config"));
             check(inherited.pageMode==1&&inherited.sliders.get(3).width==320&&inherited.sliders.get(3).height==13,"source slider size inheritance and page mode");
