@@ -83,6 +83,65 @@ std::size_t modrm_length(const Bytes& bytes,const Section& code,std::size_t at) 
     return code.includes(at,1+sib+disp) ? 1+sib+disp : 0;
 }
 
+// A bounded, straight-line subset used only to follow a stack-local size.
+// Unsupported instructions and control-flow joins leave the result unknown.
+std::size_t size_instruction_length(const Bytes& bytes,const Section& code,std::size_t at) {
+    if (!code.includes(at,1)) return 0;
+    const auto op=bytes[at];
+    if ((op>=0x40 && op<=0x5f) || op==0x90) return 1;
+    if (op==0x6a) return code.includes(at,2) ? 2U : 0U;
+    if (op==0x68 || op==0xe8 || (op>=0xb8 && op<=0xbf)) return code.includes(at,5) ? 5U : 0U;
+    const bool wide=op==0x0f;
+    if (wide && (!code.includes(at,2) || (bytes[at+1]!=0xb6 && bytes[at+1]!=0xb7 && bytes[at+1]!=0xbe && bytes[at+1]!=0xbf))) return 0;
+    if (!wide && op!=0x8b && op!=0x89 && op!=0x8d && op!=0x31 && op!=0x33 &&
+        op!=0x81 && op!=0x83 && op!=0xc7 && op!=0xff) return 0;
+    const std::size_t prefix=wide ? 2U : 1U;
+    const auto modrm=modrm_length(bytes,code,at+prefix);
+    if (!modrm) return 0;
+    if (op==0xff) {
+        const auto group=(bytes[at+1]>>3U)&7U;
+        if (group!=2 && group!=6) return 0; // CALL and PUSH only; no JMP.
+    }
+    if (op==0xc7 && (bytes[at+1]&0x38U)!=0) return 0;
+    const std::size_t immediate=(op==0x81 || op==0xc7) ? 4U : op==0x83 ? 1U : 0U;
+    const auto length=prefix+modrm+immediate;
+    return code.includes(at,length) ? length : 0U;
+}
+
+std::optional<std::uint32_t> stack_size_constant(const Bytes& bytes,const Section& code,
+                                               std::size_t end,nnn::Byte local) {
+    const auto begin=end-code.offset>1024 ? end-1024 : code.offset;
+    std::optional<std::size_t> prologue;
+    for (auto at=begin;at+3<=end;++at)
+        if (bytes[at]==0x55 && bytes[at+1]==0x8b && bytes[at+2]==0xec) prologue=at;
+    if (!prologue) return {};
+    std::optional<std::uint32_t> value;
+    for (auto at=*prologue+3;at<end;) {
+        const auto length=size_instruction_length(bytes,code,at);
+        if (!length || length>end-at) return {};
+        const auto op=bytes[at];
+        // A changed EBP would make later stack displacements refer to another address.
+        if (op==0x45 || op==0x4d || op==0x5d || op==0xbd) return {};
+        const auto mr=length>1 ? bytes[at+(op==0x0f ? 2U : 1U)] : 0U;
+        if (((op==0x8b || op==0x8d || op==0x33 || op==0x0f) && ((mr>>3U)&7U)==5) ||
+            ((op==0x89 || op==0x31 || op==0x81 || op==0x83 || op==0xc7) && (mr&0xc7U)==0xc5U)) return {};
+        if (length>=3 && op!=0x0f && ((mr&0xc7U)==0x45U || (mr&0xc7U)==0x85U)) {
+            const auto offset=(mr&0xc0U)==0x40U ? static_cast<std::int32_t>(static_cast<std::int8_t>(bytes[at+2]))
+                : static_cast<std::int32_t>(word(bytes,at+2));
+            const auto target=static_cast<std::int32_t>(static_cast<std::int8_t>(local));
+            if (op==0x8d && offset==target) return {}; // Address escapes; a call could overwrite the local.
+            if (std::int64_t(offset)<target+4 && std::int64_t(target)<std::int64_t(offset)+4) {
+                if (op==0xc7 && offset==target) value=word(bytes,at+length-4);
+                else if (op==0xc7 || op==0x89 || op==0x31 || op==0x81 || op==0x83) value.reset();
+            }
+        }
+        at+=length;
+    }
+    return value;
+}
+
+bool calls_make_header(const Bytes& bytes,const std::vector<Section>& image,const Section& code,std::size_t call);
+
 // Early MSVC builds (e.g. MSVC 6/7.1) schedule basic-block ALU/MOV instructions
 // between the four MakeHeader stack pushes (name, type, size, header) and CALL.
 std::optional<std::uint32_t> scheduled_header_size(const Bytes& bytes,const Section& code,
@@ -144,7 +203,7 @@ std::optional<std::uint32_t> scheduled_header_size(const Bytes& bytes,const Sect
 }
 
 // Older MSVC builds pass name, type and sizeof(block) to MakeHeader.
-std::optional<std::uint32_t> called_header_size(const Bytes& bytes,const Section& code,
+std::optional<std::uint32_t> called_header_size(const Bytes& bytes,const std::vector<Section>& image,const Section& code,
                                                std::size_t reference,unsigned type) {
     if (reference<=code.offset || !code.includes(reference,10) || bytes[reference-1]!=0x68) return {};
     if (bytes[reference+4]!=0x6a || bytes[reference+5]!=type)
@@ -152,17 +211,27 @@ std::optional<std::uint32_t> called_header_size(const Bytes& bytes,const Section
     const auto argument=reference+6;
     if (code.includes(argument,13) && bytes[argument]==0x68 &&
         bytes[argument+5]>=0x50 && bytes[argument+5]<=0x57 && bytes[argument+8]==0xe8) return word(bytes,argument+1);
-    if (bytes[argument]!=0x8b || (bytes[argument+1]&0xc7U)!=0x45U ||
-        bytes[argument+3]!=0x50U+((bytes[argument+1]>>3U)&7U) ||
-        !code.includes(argument,22) || bytes[argument+17]!=0xe8)
+    if (!code.includes(argument,4) || bytes[argument]!=0x8b || (bytes[argument+1]&0xc7U)!=0x45U ||
+        bytes[argument+3]!=0x50U+((bytes[argument+1]>>3U)&7U))
         return scheduled_header_size(bytes,code,reference,type);
     const auto local=bytes[argument+2];
-    const auto begin=reference-code.offset>64 ? reference-64 : code.offset;
-    std::optional<std::uint32_t> size;
-    for (auto at=begin;at+7<=reference;++at) {
-        if (bytes[at]==0xc7 && bytes[at+1]==0x45 && bytes[at+2]==local) size=word(bytes,at+3);
+    // The pointer argument can be a member load or an address calculation;
+    // don't assume that CALL is at one fixed offset after PUSH size.
+    unsigned destinations=0;
+    for (auto at=argument+4;at-argument<48;) {
+        if (!code.includes(at,1)) break;
+        if (bytes[at]==0xe8) {
+            if (destinations==1 && calls_make_header(bytes,image,code,at))
+                if (const auto size=stack_size_constant(bytes,code,reference-1,local)) return size;
+            break;
+        }
+        if (bytes[at]>=0x50 && bytes[at]<=0x57) ++destinations;
+        else if (bytes[at]!=0x8b && bytes[at]!=0x8d && bytes[at]!=0x83) break;
+        const auto length=size_instruction_length(bytes,code,at);
+        if (!length || destinations>1) break;
+        at+=length;
     }
-    return size;
+    return {};
 }
 
 bool stores_name(const Bytes& bytes,const Section& code,std::size_t reference,unsigned base) {
@@ -218,7 +287,7 @@ BlockSize written_block_size(const Bytes& bytes,const std::vector<Section>& imag
                 const std::string_view code_bytes(reinterpret_cast<const char*>(bytes.data()+code.offset),code.size);
                 for (auto ref=code_bytes.find(reference);ref!=code_bytes.npos;ref=code_bytes.find(reference,ref+1)) {
                     const auto at=code.offset+ref;
-                    auto size=called_header_size(bytes,code,at,type);
+                    auto size=called_header_size(bytes,image,code,at,type);
                     if (!size) size=inline_header_size(bytes,code,at,type);
                     if (!size) continue;
                     if (result.size && result.size!=size) return {std::nullopt,true};
