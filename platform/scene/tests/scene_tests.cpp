@@ -59,6 +59,7 @@ struct Model{
     std::vector<Word> command_adjust;
     bool message=false;
     std::string message_text="M";
+    std::vector<std::string> extra_messages;
 };
 Bytes script(const Model& model){
     std::vector<Word> words(32,0);words[0]=32;words[1]=0x66660001U;words[2]=0x55550001U;
@@ -66,12 +67,20 @@ Bytes script(const Model& model){
     words.insert(words.end(),model.code.words.begin(),model.code.words.end());
     const auto table=[&](Word kind,Word field,const std::vector<Word>& payload,bool record=false){words[field]=static_cast<Word>(words.size())+(record?0U:4U);words.insert(words.end(),{4U+static_cast<Word>(payload.size()),0x66660001U,0x55550002U,kind});words.insert(words.end(),payload.begin(),payload.end());};
     table(0x44440003U,9,{});table(0x44440003U,16,{},true);table(0x44440003U,17,{},true);
-    if(model.message){
-        words[4]=1;
-        std::vector<Word> message(1+(model.message_text.size()+4)/4,0);
-        message[0]=static_cast<Word>(words.size())+5U;
-        for (std::size_t i=0;i<model.message_text.size();++i)
-            message[1+i/4]|=static_cast<Word>(static_cast<unsigned char>(model.message_text[i]))<<(8U*(i%4));
+    std::vector<std::string> message_list=model.extra_messages;
+    if(message_list.empty() && model.message) message_list.push_back(model.message_text);
+    if(!message_list.empty()){
+        words[4]=static_cast<Word>(message_list.size());
+        std::vector<Word> message(message_list.size(),0);
+        const Word base=static_cast<Word>(words.size())+4U;
+        for (std::size_t m=0;m<message_list.size();++m) {
+            message[m]=base+static_cast<Word>(message.size());
+            const auto& item=message_list[m];
+            const std::size_t start=message.size();
+            message.resize(start+(item.size()+4U)/4U,0);
+            for (std::size_t i=0;i<item.size();++i)
+                message[start+i/4U]|=static_cast<Word>(static_cast<unsigned char>(item[i]))<<(8U*(i%4U));
+        }
         table(0x44440002U,5,message);
     }
     else table(0x44440002U,5,{});
@@ -3100,6 +3109,209 @@ int main(){
         require(legacy.variable(101)==0 && legacy.variable(102)==0 && legacy.variable(107)==310 &&
             legacy.variable(108)==2025 && clock_calls==previous_calls,
             "old journal used new calculated variables");
+    });
+    suite.test("LPRINT and APPEND scroll rows at fullMessageNumber and roundtrip PC MESSAGE",[]{
+        {
+            Model def_model;def_model.code.end();
+            TempGame def_game(def_model);
+            def_game.text("spt/exesetup.xtx","mainScreenWindowSizeX1 640\nmainScreenWindowSizeY1 480\n");
+            def_game.text("init/printmessage.xtx","fontSize 24\nLPrintY 100\n");
+            scene::GameSession def_session(def_game.root,test_options());
+            require(def_session.full_message_number()==11U,
+                "default fullMessageNumber did not follow ((screenSizeY - LPrintY) / LNextY) - 1");
+        }
+        Model model;
+        model.extra_messages={
+            "Alice\r\nRow1\r\nRow2\r\nRow3",
+            "Alice\r\n#-Tail\r\nRow4",
+            "Row5\r\nRow6\r\nRow7",
+            "Row8",
+        };
+        model.code.add({6,command,0x22220002U,0U,1,0});
+        model.code.add({6,command,0x22220003U,1U,2,0});
+        model.code.add({6,command,0x22220003U,2U,3,0});
+        model.code.number(0x33330055U,{2}); // SCRIPTMOUSE exercises highest snapshot_version (16).
+        model.code.add({6,command,0x22220003U,3U,4,0});
+        model.code.end();
+        TempGame temp(model);
+        temp.text("init/game.xtx","codeByte 1\n");
+        temp.text("init/printmessage.xtx","fullMessageNumber 3\nappendSkipName 1\n");
+        temp.text("spt/namecol.xtx","Alice 255 255 255\n");
+        scene::GameSession game(temp.root,test_options());
+        require(game.full_message_number()==3U,"explicit fullMessageNumber was not applied");
+        const auto& first=game.step_frame(0);
+        require(first.wait==scene::Wait::Dialogue && first.dialogue.layout_command==0x22220002U &&
+            first.dialogue.display_bytes=="Row1\r\nRow2\r\nRow3" && game.append_prefix().empty(),
+            "initial overflow LPRINT did not scroll to the last fullMessageNumber rows");
+        require(game.backlog().size()==1 &&
+            game.backlog().front().text=="Alice\r\nRow1\r\nRow2\r\nRow3",
+            "backlog lost scrolled-off top rows from LPRINT");
+        const auto pc1=game.export_pc_save();
+        const auto parsed1=scene::pc::parse_save(pc1);
+        require(parsed1.status.message_count==3 && parsed1.messages[0]=="Row1" &&
+            parsed1.messages[1]=="Row2" && parsed1.messages[2]=="Row3",
+            "PC save MESSAGE block did not serialize the 3-row scrolled window");
+        const auto snap1=game.snapshot();
+        nnn::snapshot::Reader snap_reader(snap1);
+        std::uint32_t magic=0,version=0;
+        snap_reader(magic,version);
+        require(version>=9U && version<=16U,"unexpected snapshot version");
+        game.restore_pc_save(pc1);
+        require(game.state().dialogue.display_bytes=="Row1\r\nRow2\r\nRow3" &&
+            game.state().dialogue.layout_command==0x22220002U,
+            "restore_pc_save did not preserve scrolled LPRINT window");
+        scene::InputState click;click.advance=true;
+        const auto& second=game.step_frame(0,click);
+        require(second.wait==scene::Wait::Dialogue &&
+            second.dialogue.display_bytes=="Row2\r\nRow3Tail\r\nRow4" &&
+            game.append_prefix()=="Row2\r\nRow3",
+            "APPEND did not skip speaker, connect #-, scroll Row1, and adjust append_prefix");
+        const auto pc2=game.export_pc_save();
+        const auto parsed2=scene::pc::parse_save(pc2);
+        require(parsed2.status.message_count==3 && parsed2.messages[0]=="Row2" &&
+            parsed2.messages[1]=="Row3Tail" && parsed2.messages[2]=="Row4",
+            "PC save after APPEND scroll did not write updated MESSAGE rows");
+        game.restore_pc_save(pc2);
+        require(game.state().dialogue.display_bytes=="Row2\r\nRow3Tail\r\nRow4",
+            "restore_pc_save failed on scrolled APPEND state");
+        const auto& third=game.step_frame(0,click);
+        require(third.wait==scene::Wait::Dialogue &&
+            third.dialogue.display_bytes=="Row5\r\nRow6\r\nRow7" && game.append_prefix().empty(),
+            "APPEND that scrolls off all prior rows kept stale text or prefix");
+        game.set_text_length(12,5);
+        require(game.visible_text()==0,"full scroll-off APPEND did not reset initial visible_text to 0");
+        const auto& fourth=game.step_frame(0,click);
+        require(fourth.dialogue.display_bytes=="Row6\r\nRow7\r\nRow8" &&
+            game.append_prefix()=="Row6\r\nRow7",
+            "subsequent APPEND did not scroll by one row");
+        const auto snap16=game.snapshot();
+        nnn::snapshot::Reader snap16_reader(snap16);
+        std::uint32_t magic16=0,version16=0;
+        snap16_reader(magic16,version16);
+        require(version16==16U,"highest snapshot_version must remain 16");
+        scene::GameSession from_snap(temp.root,test_options());
+        from_snap.restore_snapshot(snap1);
+        require(from_snap.step_frame(0,click).dialogue.display_bytes=="Row2\r\nRow3Tail\r\nRow4" &&
+            from_snap.backlog().front().text=="Alice\r\nRow1\r\nRow2\r\nRow3Tail\r\nRow4",
+            "snapshot roundtrip broke LPRINT APPEND continuation or full backlog");
+    });
+    suite.test("PC save inspection exposes GAMEVAR and resolves in-game date and weekday",[]{
+        require(scene::GameSession::game_weekday(2000,2,29)==2 &&
+            scene::GameSession::game_weekday(1900,3,1)==4 &&
+            scene::GameSession::game_weekday(2026,11,13)==5 &&
+            scene::GameSession::game_weekday(2026,11,14)==6 &&
+            scene::GameSession::game_weekday(2026,11,15)==0,
+            "game_weekday differed from upstream CCalcuWeek::CalcuWeek");
+        for (const bool extended:{false,true}) {
+            Model model;model.message=true;
+            // Assign var[2] = 2026 (year), var[3] = 1113 (date).
+            model.code.add({8,0x66660005U,0,0xa0000000U,3,0x80000002U,0x900007eaU,0xa000003dU});
+            model.code.add({8,0x66660005U,0,0xa0000000U,3,0x80000003U,0x90000459U,0xa000003dU});
+            model.code.print(1);model.code.end();
+            TempGame temp(model);
+            const std::string var_names="dummy0\ndummy1\nyear\ndate\n";
+            Bytes encrypted(var_names.begin(),var_names.end());
+            for (auto& byte:encrypted) byte^=0xffU;
+            temp.write(extended ? "spt/var2.fxf" : "spt/var.fxf",encrypted);
+            temp.text("init/game.xtx",extended ? "varType 1\n" : "varType 0\n");
+            scene::GameSession game(temp.root,test_options());
+            const auto vars_meta=scene::GameSession::pc_save_date_variables(temp.root);
+            require(vars_meta[0]==2 && vars_meta[1]==3 &&
+                game.year_variable_index()==2 && game.date_variable_index()==3,
+                "year/date variable index lookup failed");
+            require(game.step_frame(0).wait==scene::Wait::Dialogue,"fixture did not reach dialogue");
+            const auto raw=game.export_pc_save();
+            const auto preview=scene::GameSession::inspect_pc_save(raw,0);
+            require(preview.vars.size()==(extended ? 2224U : 1024U) &&
+                preview.vars[2]==2026 && preview.vars[3]==1113,
+                "inspect_pc_save did not return expected GAMEVAR array");
+            const auto info=scene::GameSession::inspect_pc_save_game_date(raw,vars_meta[0],vars_meta[1]);
+            require(info.valid && info.year==2026 && info.date==1113 &&
+                info.month==11 && info.day==13 && info.weekday==5,
+                "inspect_pc_save_game_date returned wrong year/month/day/weekday");
+            temp.text("init/game.xtx",std::string(extended ? "varType 1\n" : "varType 0\n")+"notUseYearVar 1\n");
+            const auto no_year_meta=scene::GameSession::pc_save_date_variables(temp.root);
+            require(no_year_meta[0]==-1 && no_year_meta[1]==3,"notUseYearVar did not suppress year variable");
+            const auto fallback_year=scene::GameSession::inspect_pc_save_game_date(raw,no_year_meta[0],no_year_meta[1]);
+            require(fallback_year.valid && fallback_year.year==2000 && fallback_year.month==11 &&
+                fallback_year.day==13 && fallback_year.weekday==1,
+                "missing year variable did not default to year 2000 (2000/11/13 Monday)");
+            const auto year_only=scene::GameSession::inspect_pc_save_game_date(raw,vars_meta[0],-1);
+            require(year_only.valid && year_only.year==2026 && year_only.date==0 &&
+                year_only.month==0 && year_only.day==0 &&
+                year_only.weekday==scene::GameSession::game_weekday(2026,0,0),
+                "year-only save date resolution failed when date variable is absent");
+            require(!scene::GameSession::inspect_pc_save_game_date(raw,-1,-1).valid &&
+                !scene::GameSession::inspect_pc_save_game_date(raw,9999,-1).valid &&
+                !scene::GameSession::inspect_pc_save_game_date(raw,-1,9999).valid,
+                "invalid or out-of-range year/date variable indices must return !valid");
+        }
+    });
+    suite.test("shared_config_snapshot locks cross-layer fields and WINDOWPERCENT transparency contract",[]{
+        Model model;model.message=true;
+        model.code.number(effect,{0,54,0,0,0,0});
+        model.code.number(0x3333001cU,{1,0,2}); // STARTKOMA window visible
+        model.code.present(1);
+        model.code.number(0x33330011U,{});      // PREPAREOVERLAP
+        model.code.number(0x22220005U,{0,2});   // OVERLAP
+        model.code.end();
+        TempGame temp(model);
+        temp.text("spt/exesetup.xtx","mainScreenWindowSizeX1 1024\nmainScreenWindowSizeY1 768\n");
+        temp.text("init/game.xtx","frameTime 16\ncodeByte 2\ntaikenFlag 1\nlayerExpand 32\nvarType 1\n");
+        temp.text("init/printmessage.xtx",
+            "windowMessageNumber 3\nfullMessageNumber 14\nfontSize 26\n"
+            "printX 40\nprintY 520\nnextX 2\nnextY 34\n"
+            "LPrintX 60\nLPrintY 80\nLNextX 4\nLNextY 36\nappendSkipName 0\n");
+        temp.text("init/title.xtx","bgmNumber 5\n");
+        temp.text("init/messageWindow.xtx","filenameWindow1 ta_meswin\nprintX 0\nprintY 0\nsizeX 1\nsizeY 1\n");
+        const std::string var_names="v0\nyear\ndate\n";
+        Bytes encrypted(var_names.begin(),var_names.end());
+        for (auto& byte:encrypted) byte^=0xffU;
+        temp.write("spt/var2.fxf",encrypted);
+        const auto meswin=asset("tiny_green");
+        temp.write("dwq/sys/ta_meswin.dwq",meswin);
+        auto options=test_options();
+        options.runtime=std::make_shared<nnn::RuntimeContext>(temp.root);
+        scene::GameSession game(temp.root,options);
+        const auto snap0=game.shared_config_snapshot();
+        const auto arr0=snap0.to_array();
+        require(arr0.size()==scene::GameSession::SharedConfigSnapshot::size && arr0.size()==28U,
+            "unexpected shared_config_snapshot size");
+        require(arr0[0]==1024 && arr0[1]==768 && arr0[2]==16 && arr0[3]==2 &&
+            arr0[4]==1 && arr0[5]==2 && arr0[6]==32 && arr0[7]==32 &&
+            arr0[8]==32 && arr0[9]==1 && arr0[10]==3 && arr0[11]==14 &&
+            arr0[12]==26 && arr0[13]==40 && arr0[14]==520 && arr0[15]==2 &&
+            arr0[16]==34 && arr0[17]==60 && arr0[18]==80 && arr0[19]==4 &&
+            arr0[20]==36 && arr0[21]==0 && arr0[22]==0 && arr0[23]==100 &&
+            arr0[25]==5 && arr0[26]==1 && arr0[27]==2,
+            "shared_config_snapshot array contract mismatch");
+        require(game.window_opacity_percent()==100,"default WINDOWPERCENT=0 must yield 100% window opacity");
+        require(game.set_system_parameter(nnn::NNNPARAM_WINDOWPERCENT,35),"failed to set NNNPARAM_WINDOWPERCENT=35");
+        const auto arr35=game.shared_config_snapshot().to_array();
+        require(arr35[22]==35 && arr35[23]==65 && game.window_opacity_percent()==65,
+            "WINDOWPERCENT=35 must represent 35% transparency / 65% opacity");
+        require(game.set_system_parameter(nnn::NNNPARAM_WINDOWPERCENT,100),"failed to set NNNPARAM_WINDOWPERCENT=100");
+        const auto arr100=game.shared_config_snapshot().to_array();
+        require(arr100[22]==100 && arr100[23]==0 && game.window_opacity_percent()==0,
+            "WINDOWPERCENT=100 must represent 100% transparency / 0% opacity");
+        require(game.step_frame(0).wait==scene::Wait::Draw,"did not reach initial DRAW");
+        scene::InputState click;click.advance=true;
+        require(game.step_frame(0,click).wait==scene::Wait::Overlap,"did not reach OVERLAP");
+        require(game.step_frame(2*game.frame_ms()).wait==scene::Wait::Running,"did not reach OVERLAP endpoint");
+        require(game.surface().rgb==Bytes{0,0,0},"WINDOWPERCENT=100 painted a non-transparent message window");
+        Model model2=model;
+        TempGame temp2(model2);
+        temp2.text("init/game.xtx","noMessageWindowFlag 0\n");
+        temp2.text("init/messageWindow.xtx","filenameWindow1 ta_meswin\nprintX 0\nprintY 0\nsizeX 1\nsizeY 1\n");
+        temp2.write("dwq/sys/ta_meswin.dwq",meswin);
+        auto options2=test_options();
+        options2.runtime=std::make_shared<nnn::RuntimeContext>(temp2.root);
+        scene::GameSession opaque_game(temp2.root,options2);
+        opaque_game.set_system_parameter(nnn::NNNPARAM_WINDOWPERCENT,0);
+        require(opaque_game.step_frame(0).wait==scene::Wait::Draw,"opaque game did not reach DRAW");
+        require(opaque_game.step_frame(0,click).wait==scene::Wait::Overlap,"opaque game did not reach OVERLAP");
+        require(opaque_game.step_frame(2*opaque_game.frame_ms()).wait==scene::Wait::Running,"opaque game did not reach OVERLAP endpoint");
+        require(opaque_game.surface().rgb!=Bytes{0,0,0},"WINDOWPERCENT=0 did not paint an opaque message window");
     });
     std::cout<<"SCENE RESULT "<<suite.passed<<" passed, "<<suite.failed<<" failed\n";return suite.failed==0?0:1;
 }

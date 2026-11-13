@@ -174,10 +174,14 @@ std::string stem(std::string name) {
     return name;
 }
 
-int weekday(std::int64_t year,int month_day) {
-    int month=month_day/100;
+int weekday_ymd(std::int64_t year,std::int64_t month,std::int64_t day) noexcept {
     if (month<=2) { --year; month+=12; }
-    return static_cast<int>((year+year/4-year/100+year/400+(13LL*month+8)/5+month_day%100)%7);
+    const auto raw=(year+year/4-year/100+year/400+(13LL*month+8)/5+day)%7;
+    return static_cast<int>(raw<0 ? raw+7 : raw);
+}
+
+int weekday(std::int64_t year,int month_day) {
+    return weekday_ymd(year,month_day/100,month_day%100);
 }
 
 nnn::Value pc_random(std::uint32_t& state) {
@@ -454,6 +458,12 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
     bool one_byte_text=false;
     bool standalone_script=false;
     bool append_skip_name=true;
+    int layout_width=1280,layout_height=720;
+    std::size_t window_message_max=4,full_message_max=4;
+    int message_font_size=24;
+    int print_x=100,print_y=100,next_x=0,next_y=30;
+    int lprint_x=100,lprint_y=100,lnext_x=0,lnext_y=30;
+    int title_bgm_number=1;
     Faces faces;
     Cutins cutins;
     std::optional<pc::OmakeWords> omake;
@@ -614,15 +624,26 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         });
         apply_parameters();
         auto init=nnn::game_config::read(root,"init","game.xtx");
+        auto print_config=nnn::game_config::read(root,"init","printmessage.xtx");
+        append_skip_name=config_int(print_config,"appendSkipName",1)!=0;
+        message_font_size=std::clamp(config_int(print_config,"fontSize",24),1,72);
+        print_x=config_int(print_config,"printX",100);
+        print_y=config_int(print_config,"printY",100);
+        next_x=config_int(print_config,"nextX",0);
+        next_y=config_int(print_config,"nextY",message_font_size+6);
+        lprint_x=config_int(print_config,"LPrintX",100);
+        lprint_y=config_int(print_config,"LPrintY",100);
+        lnext_x=config_int(print_config,"LNextX",next_x);
+        lnext_y=config_int(print_config,"LNextY",next_y);
+        window_message_max=static_cast<std::size_t>(
+            std::clamp(config_int(print_config,"windowMessageNumber",4),1,static_cast<int>(pc::message_limit)));
+        title_bgm_number=config_int(nnn::game_config::read(root,"init","title.xtx"),"bgmNumber",1);
         if (!decorative_preview) {
-            auto print_config=nnn::game_config::read(root,"init","printmessage.xtx");
-            append_skip_name=config_int(print_config,"appendSkipName",1)!=0;
             draw_window_with_message=config_int(print_config,"drawWindowWithMessageFlag",0)!=0;
             overlap_message_window=config_int(init,"noMessageWindowFlag",0)==0;
             if (overlap_message_window)
                 overlap_window_config=nnn::game_config::read(root,"init","messageWindow.xtx");
             long_background_mode=std::max(0,config_int(print_config,"LPrintBGMode",0));
-            if (long_background_mode) long_background_config=std::move(print_config);
         }
         const int seed=config_int(nnn::game_config::read(root,"init","mainControl.xtx"),"initRandomSeed",-1);
         legacy_random_state=options.random_seed.value_or(seed>0 ? static_cast<std::uint32_t>(seed) : 1U);
@@ -701,8 +722,16 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         skip_voice_roles=config_int(init,"mustSetVoiceFlag",1)!=0;
         ignore_hidden_cg=config_int(init,"offLayerDontSetCG",0)!=0;
         auto setup=file_text(assets.config("exesetup.xtx"));
-        const int width=options.width ? options.width : config_int(setup,"mainScreenWindowSizeX1",1280);
-        const int height=options.height ? options.height : config_int(setup,"mainScreenWindowSizeY1",720);
+        const int configured_width=config_int(setup,"mainScreenWindowSizeX1",1280);
+        const int configured_height=config_int(setup,"mainScreenWindowSizeY1",720);
+        const int width=options.width ? options.width : configured_width;
+        const int height=options.height ? options.height : configured_height;
+        layout_width=options.width>=200 ? options.width : configured_width;
+        layout_height=options.height>=200 ? options.height : configured_height;
+        const int default_full_rows=lnext_y>0 ? ((layout_height-lprint_y)/lnext_y)-1 : 4;
+        full_message_max=static_cast<std::size_t>(
+            std::clamp(config_int(print_config,"fullMessageNumber",default_full_rows),1,static_cast<int>(pc::message_limit)));
+        if (!decorative_preview && long_background_mode) long_background_config=std::move(print_config);
         period=options.frame_ms ? options.frame_ms : static_cast<unsigned>(std::clamp(config_int(init,"frameTime",20),1,1000));
         default_period=period;
         pacing.configure(static_cast<int>(period),std::clamp(config_int(init,"maxSkipFrame",2),1,64),
@@ -2983,11 +3012,18 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
     void update_cutin_dialogue(DialogueState& line,const std::string& text,int type,bool appending) {
         auto added=cutin_message_rows(text,type,line.command);
         auto rows=appending ? message_rows(line.display_bytes) : std::vector<std::string>{};
-        auto first=rows.size();
+        auto old_rows=rows.size();
+        auto first=old_rows;
+        bool connected_to_old=false;
+        std::size_t old_tail_bytes=0;
         for (auto& row:added) {
             if (const auto marker=dialogue_connect(row,line.command)) {
                 row.erase(0,marker);
                 if (!rows.empty()) {
+                    if (rows.size()==old_rows && !connected_to_old) {
+                        connected_to_old=true;
+                        old_tail_bytes=rows.back().size();
+                    }
                     first=std::min(first,rows.size()-1);
                     rows.back()+=row;
                     continue;
@@ -2995,15 +3031,98 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
             }
             rows.push_back(std::move(row));
         }
-        if (rows.size()>pc::message_limit) {
-            const auto drop=rows.size()-pc::message_limit;
+        const auto limit=line.layout_command==lprint ? full_message_max : pc::message_limit;
+        if (rows.size()>limit) {
+            const auto drop=rows.size()-limit;
             for (std::size_t i=0;i<std::min(drop,pc::message_limit);++i) cutins.discard_first_row();
             rows.erase(rows.begin(),rows.begin()+static_cast<std::ptrdiff_t>(drop));
             first-=std::min(first,drop);
-            append_prefix_bytes=0;
+            if (drop>=old_rows) {
+                old_rows=0;
+                connected_to_old=false;
+            } else {
+                old_rows-=drop;
+            }
         }
         cutins.tag(first,rows.size()-first,type);
         line.display_bytes=join_message_rows(rows);
+        if (!appending || old_rows==0) {
+            append_prefix_bytes=0;
+        } else {
+            std::size_t prefix=0;
+            for (std::size_t i=0;i+1<old_rows;++i) prefix+=rows[i].size()+2;
+            prefix+=connected_to_old ? old_tail_bytes : rows[old_rows-1].size();
+            append_prefix_bytes=prefix;
+        }
+    }
+
+    struct LongDialogueAdded {
+        bool connect_first=false;
+        std::string text;
+    };
+
+    LongDialogueAdded update_long_dialogue(DialogueState& line,const std::string& text,bool appending) {
+        auto added=message_rows(text);
+        if (line.command==append && append_skip_name && !added.empty() && speaker_names.count(added.front()))
+            added.erase(added.begin());
+        if (!appending) {
+            append_prefix_bytes=0;
+            if (added.size()<=full_message_max) {
+                line.display_bytes=text;
+                return {false,text};
+            }
+            const auto drop=added.size()-full_message_max;
+            added.erase(added.begin(),added.begin()+static_cast<std::ptrdiff_t>(drop));
+            line.display_bytes=join_message_rows(added);
+            return {false,text};
+        }
+        auto rows=message_rows(line.display_bytes);
+        auto old_rows=rows.size();
+        bool connected_to_old=false;
+        std::size_t old_tail_bytes=0;
+        LongDialogueAdded log_added;
+        bool first_added=true;
+        for (auto& row:added) {
+            if (const auto marker=dialogue_connect(row,line.command)) {
+                row.erase(0,marker);
+                if (first_added) log_added.connect_first=true;
+                log_added.text+=row;
+                first_added=false;
+                if (!rows.empty()) {
+                    if (rows.size()==old_rows && !connected_to_old) {
+                        connected_to_old=true;
+                        old_tail_bytes=rows.back().size();
+                    }
+                    rows.back()+=row;
+                    continue;
+                }
+            } else {
+                if (!first_added) log_added.text+="\r\n";
+                log_added.text+=row;
+                first_added=false;
+            }
+            rows.push_back(std::move(row));
+        }
+        if (rows.size()>full_message_max) {
+            const auto drop=rows.size()-full_message_max;
+            rows.erase(rows.begin(),rows.begin()+static_cast<std::ptrdiff_t>(drop));
+            if (drop>=old_rows) {
+                old_rows=0;
+                connected_to_old=false;
+            } else {
+                old_rows-=drop;
+            }
+        }
+        line.display_bytes=join_message_rows(rows);
+        if (old_rows==0) {
+            append_prefix_bytes=0;
+        } else {
+            std::size_t prefix=0;
+            for (std::size_t i=0;i+1<old_rows;++i) prefix+=rows[i].size()+2;
+            prefix+=connected_to_old ? old_tail_bytes : rows[old_rows-1].size();
+            append_prefix_bytes=prefix;
+        }
+        return log_added;
     }
 
     void select_dialogue_face() {
@@ -3053,7 +3172,10 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
             }
             append_prefix_bytes=appending && d.layout_command==print ? d.display_bytes.size() : 0;
             cutins.begin_message(appending);
+            LongDialogueAdded long_added;
+            const bool long_mode=!cutins.active() && d.layout_command==lprint;
             if (cutins.active()) update_cutin_dialogue(d,text,e.trailing.value_or(0),appending);
+            else if (long_mode) long_added=update_long_dialogue(d,text,appending);
             else if (e.opcode==append) d.display_bytes+=text;
             else d.display_bytes=text;
             d.speaker=cutins.active() ? std::string{} : speaker(d.display_bytes);
@@ -3065,17 +3187,37 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
             if (!ui_mode && !d.display_bytes.empty() && d.display_bytes.size()<=16384U) {
                 const bool joined=(e.opcode==append || appending) && !backlog.empty() && backlog.back().color<0;
                 if (joined) {
-                    backlog.back().speaker=d.speaker;
-                    backlog.back().text=d.display_bytes;
+                    if (long_mode) {
+                        auto& full_log=backlog.back().text;
+                        if (long_added.connect_first) {
+                            while (!full_log.empty() && (full_log.back()=='\r' || full_log.back()=='\n'))
+                                full_log.pop_back();
+                            if (full_log.size()+long_added.text.size()<=16384U) full_log+=long_added.text;
+                        } else if (!long_added.text.empty()) {
+                            const bool needs_break=!full_log.empty() && full_log.back()!='\r' && full_log.back()!='\n';
+                            const std::size_t extra=(needs_break ? 2U : 0U)+long_added.text.size();
+                            if (full_log.size()+extra<=16384U) {
+                                if (needs_break) full_log+="\r\n";
+                                full_log+=long_added.text;
+                            }
+                        }
+                        backlog.back().speaker=speaker(full_log);
+                    } else {
+                        backlog.back().speaker=d.speaker;
+                        backlog.back().text=d.display_bytes;
+                    }
                     for (std::size_t i=0;i<backlog_voices.size();++i)
                         if (!backlog_voices[i].empty()) backlog.back().voices[i]=std::move(backlog_voices[i]);
                 } else {
-                    remember({d.speaker,d.display_bytes,std::move(backlog_voices)});
+                    const auto& log_text=(long_mode && !long_added.text.empty() && long_added.text.size()<=16384U)
+                        ? long_added.text : d.display_bytes;
+                    remember({cutins.active() ? std::string{} : speaker(log_text),log_text,std::move(backlog_voices)});
                 }
                 jump_pending=jump_enabled && replay_films.empty() && (e.opcode!=append || append_jump);
             }
             backlog_voices={};
-            begin_line(message_has_voice,message_voice_ms,next_message_speed,appending);
+            const bool retain_visible=appending && (d.layout_command==print || append_prefix_bytes!=0);
+            begin_line(message_has_voice,message_voice_ms,next_message_speed,retain_visible);
             next_message_speed=0;
             return true;
         }
@@ -3971,14 +4113,28 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
                 line.display_bytes+=replace_dialogue(saved.messages[static_cast<std::size_t>(i)]);
             }
             auto expected_text=replace_dialogue(message->text);
+            const bool had_raw_content=!compact_message(expected_text).empty();
             if (cutins.active()) {
                 auto rows=cutin_message_rows(expected_text,message->cutin,message->command);
                 for (auto& row:rows) row.erase(0,dialogue_connect(row,message->command));
+                const auto limit=line.layout_command==lprint ? full_message_max : pc::message_limit;
+                if (rows.size()>limit)
+                    rows.erase(rows.begin(),rows.begin()+static_cast<std::ptrdiff_t>(rows.size()-limit));
+                expected_text=join_message_rows(rows);
+            } else if (line.layout_command==lprint) {
+                auto rows=message_rows(expected_text);
+                if (message->command==append && append_skip_name && !rows.empty() && speaker_names.count(rows.front()))
+                    rows.erase(rows.begin());
+                for (auto& row:rows) row.erase(0,dialogue_connect(row,message->command));
+                if (rows.size()>full_message_max)
+                    rows.erase(rows.begin(),rows.begin()+static_cast<std::ptrdiff_t>(rows.size()-full_message_max));
                 expected_text=join_message_rows(rows);
             }
             const auto expected=compact_message(expected_text);
             const auto actual=compact_message(line.display_bytes);
-            if (expected.empty() || actual.find(expected)==std::string::npos)
+            const bool stripped_speaker=!cutins.active() && line.layout_command==lprint && message->command==append &&
+                append_skip_name && had_raw_content && expected.empty() && !actual.empty();
+            if (!stripped_speaker && (expected.empty() || actual.find(expected)==std::string::npos))
                 throw std::runtime_error("PC save dialogue does not match this installation");
             line.speaker=cutins.active() ? std::string{} : speaker(line.display_bytes);
             select_dialogue_face();
@@ -4980,7 +5136,7 @@ GameSession::PcSavePreview GameSession::inspect_pc_save(const std::vector<nnn::B
     if (bytes.size()<32) throw std::runtime_error("Incomplete PC save header");
     const auto start=bytes.begin()+16;
     const auto end=std::find(start,bytes.begin()+32,0);
-    const auto saved=pc::parse_save(bytes,std::string(start,end));
+    auto saved=pc::parse_save(bytes,std::string(start,end));
     const auto& status=saved.status;
     const auto& time=status.saved_at;
     PcSavePreview result;
@@ -4997,7 +5153,94 @@ GameSession::PcSavePreview GameSession::inspect_pc_save(const std::vector<nnn::B
         result.pixels.reserve(thumbnail.pixels.size());
         for (const auto pixel:thumbnail.pixels) result.pixels.push_back(pixel|0xff000000U);
     }
+    result.vars=std::move(saved.vars);
     return result;
+}
+int GameSession::game_weekday(int year,int month,int day) noexcept {
+    return weekday_ymd(year,month,day);
+}
+std::array<int,2> GameSession::pc_save_date_variables(const fs::path& root) {
+    const auto init=nnn::game_config::read(root,"init","game.xtx");
+    const auto find_var=[&](const char* name) {
+        auto path=nnn::game_config::find(root,"spt",name);
+        if (path.empty()) path=nnn::game_config::find(root,"init",name);
+        return path;
+    };
+    auto varfile=find_var("var2.fxf");
+    const auto classic_varfile=find_var("var.fxf");
+    const bool extended=!varfile.empty() && (config_int(init,"varType",1)!=0 || classic_varfile.empty());
+    if (!extended) varfile=classic_varfile;
+    const auto names=fields(file_text(varfile));
+    const bool use_year=config_int(init,"notUseYearVar",0)==0;
+    int year_var=-1,date_var=-1;
+    for (std::size_t i=0;i<names.size() && i<variable_count;++i) {
+        if (names[i].empty()) continue;
+        const auto folded=fold_cp932(names[i]);
+        if (use_year && year_var<0 && folded=="year") year_var=static_cast<int>(i);
+        else if (date_var<0 && folded=="date") date_var=static_cast<int>(i);
+    }
+    return {year_var,date_var};
+}
+GameSession::PcSaveGameDate GameSession::resolve_game_date(
+        const std::vector<nnn::Value>& vars,int year_var,int date_var) noexcept {
+    PcSaveGameDate out;
+    if (year_var<0 && date_var<0) return out;
+    if ((year_var>=0 && static_cast<std::size_t>(year_var)>=vars.size()) ||
+        (date_var>=0 && static_cast<std::size_t>(date_var)>=vars.size())) return out;
+    out.valid=true;
+    out.year=year_var>=0 ? vars[static_cast<std::size_t>(year_var)] : 2000;
+    out.date=date_var>=0 ? vars[static_cast<std::size_t>(date_var)] : 0;
+    out.month=out.date/100;
+    out.day=out.date%100;
+    out.weekday=game_weekday(out.year,out.month,out.day);
+    return out;
+}
+GameSession::PcSaveGameDate GameSession::inspect_pc_save_game_date(
+        const std::vector<nnn::Byte>& bytes,int year_var,int date_var) {
+    return resolve_game_date(inspect_pc_save(bytes,0).vars,year_var,date_var);
+}
+GameSession::SharedConfigSnapshot GameSession::shared_config_snapshot() const {
+    const auto& d=*data_;
+    SharedConfigSnapshot out;
+    out.screen_width=d.layout_width;
+    out.screen_height=d.layout_height;
+    out.default_frame_ms=static_cast<int>(d.default_period);
+    out.code_byte=d.one_byte_text ? 1 : 2;
+    out.trial_flag=d.save_layout->system.trial ? 1 : 0;
+    out.system_save_version=d.save_layout->system.version;
+    out.layer_limit=static_cast<int>(d.layer_limit);
+    out.render_layer_count=static_cast<int>(d.render_layer_count);
+    out.save_layer_records=static_cast<int>(d.save_layout->layers());
+    out.registers_okikae=d.save_layout->registers_okikae() ? 1 : 0;
+    out.window_message_number=static_cast<int>(d.window_message_max);
+    out.full_message_number=static_cast<int>(d.full_message_max);
+    out.message_font_size=d.message_font_size;
+    out.print_x=d.print_x;
+    out.print_y=d.print_y;
+    out.next_x=d.next_x;
+    out.next_y=d.next_y;
+    out.lprint_x=d.lprint_x;
+    out.lprint_y=d.lprint_y;
+    out.lnext_x=d.lnext_x;
+    out.lnext_y=d.lnext_y;
+    out.append_skip_name=d.append_skip_name ? 1 : 0;
+    out.window_percent_raw=d.shared_runtime->get_system_parameter(nnn::NNNPARAM_WINDOWPERCENT);
+    out.window_opacity_percent=100-std::clamp(out.window_percent_raw,0,100);
+    out.chara_voice_count=static_cast<int>(d.playback.character_volume_count());
+    out.title_bgm_number=d.title_bgm_number;
+    out.year_var_index=year_variable_index();
+    out.date_var_index=date_variable_index();
+    return out;
+}
+std::size_t GameSession::full_message_number() const noexcept { return data_->full_message_max; }
+int GameSession::window_opacity_percent() const noexcept {
+    return 100-std::clamp(data_->shared_runtime->get_system_parameter(nnn::NNNPARAM_WINDOWPERCENT),0,100);
+}
+int GameSession::year_variable_index() const noexcept {
+    return data_->year_id<variable_count ? static_cast<int>(data_->year_id) : -1;
+}
+int GameSession::date_variable_index() const noexcept {
+    return data_->date_id<variable_count ? static_cast<int>(data_->date_id) : -1;
 }
 std::vector<nnn::Byte> GameSession::export_pc_save(const std::vector<std::uint32_t>& pixels, int width, int height) {
     return pc::write_save(data_->make_pc_save(pixels,width,height));

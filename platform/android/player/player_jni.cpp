@@ -83,6 +83,21 @@ jintArray int_array(JNIEnv* env,const std::vector<int>& values) {
     if (array && size) env->SetIntArrayRegion(array,0,size,values.data());
     return array;
 }
+template <std::size_t N>
+jintArray fixed_int_array(JNIEnv* env,const std::array<int,N>& values) {
+    const auto size=static_cast<jsize>(values.size());
+    auto array=env->NewIntArray(size);
+    if (array && size) env->SetIntArrayRegion(array,0,size,values.data());
+    return array;
+}
+std::string directory_path(JNIEnv* env,jbyteArray raw) {
+    if (!raw) return {};
+    const auto n=env->GetArrayLength(raw);
+    if (n<=0 || n>32768) throw std::invalid_argument("Invalid game directory");
+    std::string value(static_cast<std::size_t>(n),'\0');
+    env->GetByteArrayRegion(raw,0,n,reinterpret_cast<jbyte*>(value.data()));
+    return value;
+}
 std::vector<std::string> read_text_fields(JNIEnv* env,jobjectArray array,jsize max_fields,jsize max_bytes) {
     if (!array || env->GetArrayLength(array)>max_fields) throw std::invalid_argument("Invalid text field count");
     const auto count=env->GetArrayLength(array);
@@ -949,7 +964,7 @@ API jobjectArray JNICALL FN(inspectPcSave)(JNIEnv* env,jclass,jbyteArray raw,jin
         auto preview=GameSession::inspect_pc_save(data,static_cast<std::size_t>(std::max(0,picture_budget)));
         const auto type=env->FindClass("java/lang/Object");
         if (!type) return nullptr;
-        auto result=env->NewObjectArray(3,type,nullptr);
+        auto result=env->NewObjectArray(4,type,nullptr);
         if (!result) return nullptr;
         std::vector<int> fields(preview.time.begin(),preview.time.end());
         fields.insert(fields.end(),{preview.artwork,preview.width,preview.height});
@@ -964,7 +979,39 @@ API jobjectArray JNICALL FN(inspectPcSave)(JNIEnv* env,jclass,jbyteArray raw,jin
             env->SetIntArrayRegion(image,0,count,reinterpret_cast<const jint*>(preview.pixels.data()));
             if (!env->ExceptionCheck()) env->SetObjectArrayElement(result,2,image);
         }
+        if (!env->ExceptionCheck()) {
+            auto vars=int_array(env,preview.vars);
+            if (!vars) return nullptr;
+            env->SetObjectArrayElement(result,3,vars);
+        }
         return result;
+    } catch (const std::exception& e) { fail(env,e.what());return nullptr; }
+}
+API jintArray JNICALL FN(pcSaveDateVariables)(JNIEnv* env,jclass,jbyteArray path) {
+    try {
+        const auto root=directory_path(env,path);
+        if (env->ExceptionCheck() || root.empty() || root.find('\0')!=std::string::npos) return nullptr;
+        return fixed_int_array(env,GameSession::pc_save_date_variables(std::filesystem::u8path(root)));
+    } catch (const std::exception& e) { fail(env,e.what());return nullptr; }
+}
+API jintArray JNICALL FN(inspectPcSaveGameDate)(JNIEnv* env,jclass,jbyteArray raw,jint year_var,jint date_var) {
+    try {
+        const auto size=raw?env->GetArrayLength(raw):0;
+        if (size<=0 || size>16*1024*1024) throw std::invalid_argument("Invalid PC save length");
+        std::vector<nnn::Byte> data(static_cast<std::size_t>(size));
+        env->GetByteArrayRegion(raw,0,size,reinterpret_cast<jbyte*>(data.data()));
+        if (env->ExceptionCheck()) return nullptr;
+        const auto info=GameSession::inspect_pc_save_game_date(data,year_var,date_var);
+        if (!info.valid) return nullptr;
+        return fixed_int_array(env,std::array<int,5>{{info.year,info.date,info.month,info.day,info.weekday}});
+    } catch (const std::exception& e) { fail(env,e.what());return nullptr; }
+}
+API jint JNICALL FN(computeGameWeekday)(JNIEnv*,jclass,jint year,jint month,jint day) {
+    return GameSession::game_weekday(year,month,day);
+}
+API jintArray JNICALL FN(sharedConfigSnapshot)(JNIEnv* env,jclass,jlong handle) {
+    try {
+        return fixed_int_array(env,player(handle).game->shared_config_snapshot().to_array());
     } catch (const std::exception& e) { fail(env,e.what());return nullptr; }
 }
 API jboolean JNICALL FN(inspectSaveSnapshot)(JNIEnv* env,jclass,jobject raw,jint length,jint wait,jint word,jint line,
