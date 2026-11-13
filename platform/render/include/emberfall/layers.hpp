@@ -62,6 +62,9 @@ struct MessagePlane {
     unsigned width=0,height=0;
     std::size_t stride=0;
     std::vector<Byte> rgba;
+    // CTaihi-style decorations, presented after the screen effect and never
+    // included in EFFECT_GET, PREPAREOVERRAP, or a save thumbnail.
+    std::vector<Byte> floating_rgba;
     bool show_backdrop=true;
 };
 

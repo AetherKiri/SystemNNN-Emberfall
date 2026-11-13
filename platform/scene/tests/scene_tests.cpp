@@ -3636,11 +3636,14 @@ int main(){
 
         // Push Line 2 plane (20,40,210,255) on tick 2 -> presents immediately (only 1 skipped tick, 0 warnings).
         const std::array<Byte,4> blue_ui{20,40,210,255};
-        ui_token->push(blue_ui.data(),4,1,1,key2,true);
+        const std::array<Byte,4> yellow_cursor{240,220,0,255};
+        ui_token->push(blue_ui.data(),4,1,1,key2,true,yellow_cursor.data(),4);
         require(compositor->present(*game,false,true,submit)==Outcome::Presented &&
             compositor->skipped_ticks()==0 && warnings.size()==2 &&
-            submitted.rgb==Bytes({20,40,210}),
+            submitted.rgb==Bytes({240,220,0}),
             "line 2 matching plane did not present cleanly");
+        require(game->surface().rgb==Bytes({20,40,210}),
+            "floating cursor leaked into the clean capture frame");
 
         // Advance into PREPAREOVERRAP + OVERLAP (to tiny_green 0,255,0) with ZERO OverlapCapture callback:
         // Wipe frame 0 must start strictly from S_clean = (20,40,210)!
