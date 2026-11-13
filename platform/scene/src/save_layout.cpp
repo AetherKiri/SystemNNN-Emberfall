@@ -14,8 +14,9 @@ namespace emberfall::scene::pc {
 namespace fs=std::filesystem;
 namespace {
 constexpr char config_name[]="emberfall-system.cfg";
-constexpr int config_version=3;
+constexpr int config_version=4;
 constexpr std::array<std::string_view,4> system_sources{{"","exe","org","game_files"}};
+constexpr std::array<std::string_view,4> extension_sources{{"unknown","game_files","exe","engine"}};
 std::mutex layout_mutex;
 
 struct CachedLayout {
@@ -24,6 +25,8 @@ struct CachedLayout {
     std::optional<ExecutableSaveLayout> executable;
     SystemSaveFormat system;
     std::optional<std::uint32_t> extension_code_base;
+    std::optional<std::vector<ExtensionSize>> extension_sizes;
+    bool has_extension_code_field=false;
 };
 
 struct LocatedLayout {
@@ -50,7 +53,7 @@ std::optional<CachedLayout> read_layout(const fs::path& file) {
     if (!fs::is_regular_file(fs::symlink_status(file,error))) return {};
     std::ifstream input(file,std::ios::binary);
     if (!input) return {};
-    std::array<char,1024> text{};
+    std::array<char,12288> text{};
     input.read(text.data(),static_cast<std::streamsize>(text.size()));
     if (input.bad() || !input.eof()) return {};
     std::istringstream fields(std::string(text.data(),static_cast<std::size_t>(input.gcount())));
@@ -65,8 +68,12 @@ std::optional<CachedLayout> read_layout(const fs::path& file) {
         !field(fields,"file_system_save_version",system) || system<1 || system>3 ||
         !field(fields,"exe_analyzed",analyzed) || (analyzed!=0 && analyzed!=1)) return {};
 
-    CachedLayout layout{{static_cast<unsigned>(layers),static_cast<std::size_t>(width),
-                         static_cast<std::size_t>(status),okikae!=0,system},std::nullopt,{},std::nullopt};
+    CachedLayout layout;
+    layout.files.layer_records=static_cast<unsigned>(layers);
+    layout.files.message_width=static_cast<std::size_t>(width);
+    layout.files.status_bytes=static_cast<std::size_t>(status);
+    layout.files.registers_okikae=okikae!=0;
+    layout.files.system_save_version=system;
     if (analyzed) {
         if (!field(fields,"exe_layer_records",layers) || (layers!=0 && !valid_layers(layers)) ||
             !field(fields,"exe_message_width",width) || (width!=0 && !valid_width(width)) ||
@@ -98,6 +105,7 @@ std::optional<CachedLayout> read_layout(const fs::path& file) {
             cached_version ? SystemSaveSource::Executable : SystemSaveSource::GameFiles};
     }
     if (version>=3) {
+        layout.has_extension_code_field=true;
         std::string code;
         if (!field(fields,"ext_start_code",code)) return {};
         if (code==u8"无") layout.extension_code_base=0;
@@ -107,6 +115,22 @@ std::optional<CachedLayout> read_layout(const fs::path& file) {
             if (parsed.ec!=std::errc{} || parsed.ptr!=code.data()+code.size()) return {};
             if (number<min_legacy_extension_code || number>static_cast<std::uint32_t>(INT32_MAX)-max_extensions) return {};
             layout.extension_code_base=number;
+        }
+    }
+    if (version>=4) {
+        int count;
+        if (!field(fields,"ext_block_count",count) || count<0 || static_cast<std::size_t>(count)>max_extensions ||
+            (count!=0)!=(layout.extension_code_base!=0)) return {};
+        auto& sizes=layout.extension_sizes.emplace();
+        sizes.reserve(static_cast<std::size_t>(count));
+        for (int i=0;i<count;++i) {
+            int length;
+            std::string source;
+            if (!field(fields,"ext_block_size",length) || !(fields>>source) || length < -1 ||
+                (length>=0 && static_cast<std::size_t>(length)>max_extension_payload)) return {};
+            const auto origin=std::find(extension_sources.begin(),extension_sources.end(),source);
+            if (origin==extension_sources.end() || (length==-1)!=(origin==extension_sources.begin())) return {};
+            sizes.push_back({length,static_cast<ExtensionSizeSource>(origin-extension_sources.begin())});
         }
     }
     std::string extra;
@@ -142,6 +166,10 @@ bool write_layout(const fs::path& file,const CachedLayout& layout) {
        <<"system_save_source "<<system_sources[static_cast<std::size_t>(layout.system.source)]<<'\n';
     out<<"ext_start_code "<<(layout.extension_code_base ?
         (*layout.extension_code_base ? std::to_string(*layout.extension_code_base) : u8"无") : u8"解析失败")<<'\n';
+    const auto& sizes=*layout.extension_sizes;
+    out<<"ext_block_count "<<sizes.size()<<'\n';
+    for (const auto& block:sizes)
+        out<<"ext_block_size "<<block.bytes<<' '<<extension_sources[static_cast<std::size_t>(block.source)]<<'\n';
     out.close();
     if (out) fs::rename(pending,file,error);
     if (out && !error) return true;
@@ -159,7 +187,8 @@ std::array<fs::path,2> config_directories(const fs::path& root) {
 }
 
 DirectorySaveLayout layout_values(const CachedLayout& cached) {
-    return {cached.files,cached.executable.value_or(ExecutableSaveLayout{}),cached.system,cached.extension_code_base};
+    return {cached.files,cached.executable.value_or(ExecutableSaveLayout{}),cached.system,cached.extension_code_base,
+        cached.extension_sizes,cached.has_extension_code_field};
 }
 
 std::optional<LocatedLayout> find_layout(const std::array<fs::path,2>& directories,bool strict=true) {
@@ -229,15 +258,23 @@ SystemSaveFormat system_format(const fs::path& root,const FileSaveLayout& files,
 
 CachedLayout analyze_layout(const fs::path& root,bool analyze_executable,
                             const std::function<FileSaveLayout()>& file_defaults) {
-    CachedLayout layout{file_defaults(),std::nullopt,{},std::nullopt};
+    CachedLayout layout;
+    layout.files=file_defaults();
     if (analyze_executable) layout.executable=executable_save_layout(root);
     layout.system=system_format(root,layout.files,layout.executable ? layout.executable->system_save_version : std::nullopt);
     const bool okikae=layout.executable && layout.executable->registers_okikae ?
         *layout.executable->registers_okikae : layout.files.registers_okikae;
-    const auto count=layout.files.configured_extensions+(okikae ? layout.files.configured_okikae_extensions+1U : 0U);
-    if (count>max_extensions) throw std::runtime_error("Too many PC extensions");
-    if (count==0) layout.extension_code_base=0;
-    else if (layout.executable) layout.extension_code_base=layout.executable->extension_code_base;
+    auto& sizes=layout.extension_sizes.emplace(std::move(layout.files.extension_sizes[okikae ? 1 : 0]));
+    if (sizes.size()>max_extensions) throw std::runtime_error("Too many PC extensions");
+    layout.has_extension_code_field=true;
+    if (sizes.empty()) layout.extension_code_base=0;
+    else if (layout.executable) {
+        layout.extension_code_base=layout.executable->extension_code_base;
+        if (const auto& exe_sizes=layout.executable->extension_sizes) {
+            for (std::size_t i=0;i<std::min(sizes.size(),exe_sizes->size());++i)
+                sizes[i]={(*exe_sizes)[i],ExtensionSizeSource::Executable};
+        }
+    }
     return layout;
 }
 

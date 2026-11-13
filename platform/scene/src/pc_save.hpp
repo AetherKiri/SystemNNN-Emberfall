@@ -14,6 +14,7 @@ namespace emberfall::scene::pc {
 
 inline constexpr std::size_t max_save_bytes=16U*1024U*1024U;
 inline constexpr std::size_t header_size=32;
+inline constexpr std::size_t max_extension_payload=max_save_bytes-header_size;
 inline constexpr std::size_t effect_size=1024, filename_size=256;
 inline constexpr std::size_t classic_layer_count=16;
 inline constexpr std::size_t layer_count=32;
@@ -54,10 +55,18 @@ struct ExecutableSaveLayout {
     std::optional<bool> registers_okikae;
     std::optional<int> system_save_version;
     std::optional<std::uint32_t> extension_code_base;
+    std::optional<std::vector<int>> extension_sizes;
 };
 
 // Recognizes SystemNNN write headers in PE32 x86 code sections.
 ExecutableSaveLayout executable_save_layout(const std::filesystem::path& game_root);
+
+enum class ExtensionSizeSource { Unknown, GameFiles, Executable, Engine };
+
+struct ExtensionSize {
+    int bytes=-1;
+    ExtensionSizeSource source=ExtensionSizeSource::Unknown;
+};
 
 struct FileSaveLayout {
     unsigned layer_records=layer_count;
@@ -65,7 +74,7 @@ struct FileSaveLayout {
     bool registers_okikae=true;
     int system_save_version=1;
     bool trial=false;
-    unsigned configured_extensions=0, configured_okikae_extensions=0;
+    std::array<std::vector<ExtensionSize>,2> extension_sizes;
 };
 
 enum class SystemSaveSource { Pending=0, Executable, Template, GameFiles };
@@ -82,11 +91,18 @@ struct DirectorySaveLayout {
     SystemSaveFormat system;
     // null: unresolved (including old configs); 0: confirmed no EXT blocks.
     std::optional<std::uint32_t> extension_code_base;
+    std::optional<std::vector<ExtensionSize>> extension_sizes;
+    // V1 and V2 omitted the start code even when a game needed EXT.
+    bool has_extension_code_field=false;
 
     unsigned layers() const { return executable.layer_records.value_or(files.layer_records); }
     std::size_t message_width() const { return executable.message_width.value_or(files.message_width); }
     std::size_t status_bytes() const { return executable.status_bytes.value_or(files.status_bytes); }
     bool registers_okikae() const { return executable.registers_okikae.value_or(files.registers_okikae); }
+    int extension_enabled() const {
+        if (extension_code_base) return *extension_code_base!=0;
+        return has_extension_code_field || registers_okikae() ? 1 : -1;
+    }
 };
 
 struct SaveLayoutConfig {

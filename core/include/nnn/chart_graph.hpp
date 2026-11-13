@@ -16,6 +16,17 @@
 
 namespace nnn::chart {
 
+inline std::size_t chart_slot_capacity(Value pages,Value block_size) {
+    if (pages<1 || pages>32 || block_size<1 ||
+        std::int64_t{pages}*block_size>static_cast<std::int64_t>(max_progress_slots))
+        throw std::runtime_error("Invalid chart page or slot count");
+    return static_cast<std::size_t>(pages)*static_cast<std::size_t>(block_size);
+}
+
+inline std::size_t configured_slot_capacity(const game_config::NameListSetup& config) {
+    return chart_slot_capacity(config.integer("chartListNumber",1),config.integer("chartBlockSize",1000));
+}
+
 struct Point { Value x=0,y=0; };
 struct Rect { Value x=0,y=0,w=0,h=0; };
 
@@ -109,8 +120,7 @@ public:
         const game_config::NameListSetup list(config);
         const auto page_count=list.integer("chartListNumber",1);
         const auto block_size=list.integer("chartBlockSize",1000);
-        if (page_count<1 || page_count>32 || block_size<1 || std::int64_t{page_count}*block_size>max_slots)
-            throw std::runtime_error("Invalid chart page or slot count");
+        const auto slots=chart_slot_capacity(page_count,block_size);
         if (logical_width<=0 || logical_height<=0 || logical_width>max_coord || logical_height>max_coord)
             throw std::runtime_error("Invalid chart canvas dimensions");
         setup_.block_size=block_size;
@@ -124,7 +134,7 @@ public:
         const auto bottom_space=bounded(list.integer("bottomSpace",60));
         const auto directory=resource::find_directory(root,"chart",encode);
         pages_.reserve(static_cast<std::size_t>(page_count));
-        slot_indices_.assign(static_cast<std::size_t>(page_count)*static_cast<std::size_t>(block_size),-1);
+        slot_indices_.assign(slots,-1);
         for (Value id=0;id<page_count;++id) {
             auto page=page_setup(list,id);
             const auto name="chart"+std::to_string(id+1)+(encrypted ? ".fxf" : ".xtx");
@@ -195,14 +205,14 @@ public:
         return {std::vector<Byte>(aligned(slot_capacity(),4U)),std::vector<Byte>(slot_capacity())};
     }
     RunState run_defaults() const {
-        return {std::vector<Byte>(aligned(slot_capacity(),16U)),
+        return {std::vector<Byte>(move_road_bytes(slot_capacity())),
             std::vector<Word>(selection_words(slot_capacity()),UINT32_MAX)};
     }
     bool valid(const Progress& progress) const noexcept {
         return progress.seen.size()==aligned(slot_capacity(),4U) && progress.traversed.size()==slot_capacity();
     }
     bool valid(const RunState& run) const noexcept {
-        return run.move_road.size()==aligned(slot_capacity(),16U) &&
+        return run.move_road.size()==move_road_bytes(slot_capacity()) &&
             run.can_select.size()==selection_words(slot_capacity());
     }
     void new_game(RunState& run) const {
@@ -459,7 +469,7 @@ public:
     }
 
 private:
-    static constexpr Value max_slots=256*1024,max_coord=16*1024*1024,max_tiles=1024;
+    static constexpr Value max_coord=16*1024*1024,max_tiles=1024;
     static std::size_t aligned(std::size_t n,std::size_t alignment) noexcept { return (n+alignment-1U)&~(alignment-1U); }
     static Value bounded(std::int64_t n) {
         if (n< -max_coord || n>max_coord) throw std::runtime_error("Chart coordinate exceeds limit");

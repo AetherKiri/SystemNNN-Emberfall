@@ -394,19 +394,38 @@ bool instructions(const Bytes& bytes,const Section& code,std::size_t at,std::ini
     return true;
 }
 
-bool calls_make_header(const Bytes& bytes,const std::vector<Section>& image,const Section& code,std::size_t call) {
-    if (!code.includes(call,5) || bytes[call]!=0xe8) return false;
-    const auto target=static_cast<std::int64_t>(code.address)+static_cast<std::int64_t>(call-code.offset)+5+
-        static_cast<std::int32_t>(word(bytes,call+1));
-    for (const auto& callee:image) {
-        if (!callee.executable || target<callee.address || target>=static_cast<std::int64_t>(callee.address)+static_cast<std::int64_t>(callee.size)) continue;
-        const auto at=callee.offset+static_cast<std::size_t>(target-callee.address);
-        // MakeHeader(header, size, type, name): size -> +0, type -> +4.
-        return instructions(bytes,callee,at,{0x8b,0x44,0x24,4,0x8b,0x4c,0x24,8,0x8b,0x54,0x24,12,0x56,0x89,8,0x89,0x50,4}) ||
-            instructions(bytes,callee,at,{0x55,0x8b,0xec,0x83,0xec,12,0x89,0x4d,0xf4,0x8b,0x45,8,0x89,0x45,0xf8,
-                0x8b,0x4d,0xf8,0x8b,0x55,12,0x89,0x11,0x8b,0x45,0xf8,0x8b,0x4d,16,0x89,0x48,4});
+struct ImagePosition {
+    const Section* section;
+    std::size_t offset;
+};
+
+std::optional<ImagePosition> position(const std::vector<Section>& image,std::uint32_t address,std::size_t length,
+                                      std::optional<bool> executable={}) {
+    for (const auto& section:image) {
+        if (executable && section.executable!=*executable) continue;
+        if (address>=section.address && contains(section.size,address-section.address,length))
+            return ImagePosition{&section,section.offset+(address-section.address)};
     }
-    return false;
+    return {};
+}
+
+std::optional<std::uint32_t> call_target(const Bytes& bytes,const Section& code,std::size_t call) {
+    if (!code.includes(call,5) || bytes[call]!=0xe8) return {};
+    const auto target=std::int64_t(code.address)+static_cast<std::int64_t>(call-code.offset)+5+
+        static_cast<std::int32_t>(word(bytes,call+1));
+    if (target<0 || target>UINT32_MAX) return {};
+    return static_cast<std::uint32_t>(target);
+}
+
+bool calls_make_header(const Bytes& bytes,const std::vector<Section>& image,const Section& code,std::size_t call) {
+    const auto target=call_target(bytes,code,call);
+    const auto callee=target ? position(image,*target,1,true) : std::nullopt;
+    if (!callee) return false;
+    const auto at=callee->offset;
+    // MakeHeader(header, size, type, name): size -> +0, type -> +4.
+    return instructions(bytes,*callee->section,at,{0x8b,0x44,0x24,4,0x8b,0x4c,0x24,8,0x8b,0x54,0x24,12,0x56,0x89,8,0x89,0x50,4}) ||
+        instructions(bytes,*callee->section,at,{0x55,0x8b,0xec,0x83,0xec,12,0x89,0x4d,0xf4,0x8b,0x45,8,0x89,0x45,0xf8,
+            0x8b,0x4d,0xf8,0x8b,0x55,12,0x89,0x11,0x8b,0x45,0xf8,0x8b,0x4d,16,0x89,0x48,4});
 }
 
 std::optional<std::uint32_t> extension_writer_base(const Bytes& bytes,const std::vector<Section>& image,
@@ -438,8 +457,131 @@ std::optional<std::uint32_t> extension_writer_base(const Bytes& bytes,const std:
     return {};
 }
 
-std::optional<std::uint32_t> image_extension_base(const Bytes& bytes,const std::vector<Section>& image) {
-    std::optional<std::uint32_t> result;
+std::optional<unsigned> extension_save_slot(const Bytes& bytes,const Section& code,std::size_t ref) {
+    const auto at=ref+51;
+    // The unoptimized writer passes the payload pointer and index to GetExtDataForSaveGeneral.
+    if (!instructions(bytes,code,at,{0x8b,0x45,0xd0,0x8b,0x88,-1,-1,-1,-1,0x89,0x4d,0xfc,
+        0x8b,0x55,0xfc,0x83,0xc2,32,0x89,0x55,0xfc,0x8b,0x45,8,0x50,0x8b,0x4d,0xfc,0x51,
+        0x8b,0x55,0xd0,0x8b,0x42,4,0x8b,0x4d,0xd0,0x8b,0x49,4,0x8b,0x10,0x8b,0x82,-1,-1,-1,-1,0xff,0xd0}))
+        return {};
+    const auto slot=word(bytes,at+45);
+    if (word(bytes,at+5)!=word(bytes,ref+38) || slot<4 || slot>4096 || slot%4!=0) return {};
+    return slot;
+}
+
+bool extension_save_dispatch(const Bytes& bytes,ImagePosition dispatch,unsigned private_slot) {
+    const auto& code=*dispatch.section;
+    const auto start=dispatch.offset;
+    if (!instructions(bytes,code,start,{0x55,0x8b,0xec,0x83,0xec,16,0x89,0x4d,0xf0})) return false;
+    const auto end=std::min(code.offset+code.size,start+256);
+    for (auto at=start+9;at<end;++at) {
+        if (instructions(bytes,code,at,{0x8b,0x4d,12,0x51,0x8b,0x55,8,0x52,0x8b,0x45,0xf0,0x8b,0x10,
+            0x8b,0x4d,0xf0,0x8b,0x82,-1,-1,-1,-1,0xff,0xd0,0x8b,0xe5,0x5d,0xc2,8,0}) &&
+            word(bytes,at+18)==private_slot) return true;
+    }
+    return false;
+}
+
+std::optional<std::vector<int>> extension_size_switch(const Bytes& bytes,const std::vector<Section>& image,
+                                                       ImagePosition getter) {
+    const auto& code=*getter.section;
+    const auto at=getter.offset;
+    // MSVC uses an unsigned bounds check, a jump table, and one shared return.
+    if (!instructions(bytes,code,at,{0x55,0x8b,0xec,0x83,0xec,12,0x89,0x4d,0xf8,0xc7,0x45,0xfc,0,0,0,0,
+        0x8b,0x45,8,0x89,0x45,0xf4,0x83,0x7d,0xf4,-1,0x77,-1,0x8b,0x4d,0xf4,0xff,0x24,0x8d,-1,-1,-1,-1}))
+        return {};
+    const auto count=static_cast<unsigned>(bytes[at+25])+1;
+    const auto jump=bytes[at+27];
+    if (count>128 || jump<10 || jump>127) return {};
+    const auto exit=at+28+jump;
+    if (!instructions(bytes,code,exit,{0x8b,0x45,0xfc,0x8b,0xe5,0x5d,0xc2,4,0})) return {};
+    const auto table=position(image,word(bytes,at+34),count*4);
+    if (!table || (table->section==&code && table->offset<exit+9)) return {};
+    std::vector<int> result;
+    result.reserve(count);
+    for (unsigned i=0;i<count;++i) {
+        const auto entry=position(image,word(bytes,table->offset+i*4),7,true);
+        if (!entry || entry->section!=&code || entry->offset<at+38 || entry->offset+7>exit ||
+            !instructions(bytes,code,entry->offset,{0xc7,0x45,0xfc,-1,-1,-1,-1})) return {};
+        const auto branch=entry->offset+7;
+        if (branch!=exit && (!instructions(bytes,code,branch,{0xeb,-1}) ||
+            static_cast<std::int64_t>(branch+2)+static_cast<std::int8_t>(bytes[branch+1])!=static_cast<std::int64_t>(exit))) return {};
+        const auto size=word(bytes,entry->offset+3);
+        if (size>max_extension_payload) return {};
+        result.push_back(static_cast<int>(size));
+    }
+    return result;
+}
+
+std::optional<std::vector<int>> extension_sizes_from_table(const Bytes& bytes,const std::vector<Section>& image,
+                                                            ImagePosition table,unsigned slot) {
+    const auto dispatch=position(image,word(bytes,table.offset+slot),1,true);
+    const auto getter=position(image,word(bytes,table.offset+slot-4),1,true);
+    const auto writer=position(image,word(bytes,table.offset+slot+8),1,true);
+    if (!dispatch || !getter || !writer) return {};
+    const auto get=getter->offset,save=writer->offset;
+    const auto wrapper=[&](ImagePosition function) {
+        return instructions(bytes,*function.section,function.offset,{0x55,0x8b,0xec,0x83,0xec,8,0x89,0x4d,0xf8,
+            0x8b,0x45,0xf8,0x8b,0x88,-1,-1,-1,-1,0x89,0x4d,0xfc});
+    };
+    if (!wrapper(*getter) || !wrapper(*writer) || word(bytes,get+14)!=word(bytes,save+14) ||
+        !instructions(bytes,*getter->section,get+21,{0x8b,0x55,8,0x52,0x8b,0x4d,0xfc,0xe8,-1,-1,-1,-1,0x8b,0xe5,0x5d,0xc2,4,0}) ||
+        !instructions(bytes,*writer->section,save+21,{0x8b,0x55,12,0x52,0x8b,0x45,8,0x50,0x8b,0x4d,0xfc,0xe8,-1,-1,-1,-1,
+            0x8b,0xe5,0x5d,0xc2,8,0}) || !extension_save_dispatch(bytes,*dispatch,slot+8)) return {};
+    const auto getter_target=call_target(bytes,*getter->section,get+28);
+    const auto writer_target=call_target(bytes,*writer->section,save+32);
+    if (!getter_target || !writer_target) return {};
+    const auto size_fn=position(image,*getter_target,1,true);
+    const auto save_fn=position(image,*writer_target,1,true);
+    if (!size_fn || !save_fn) return {};
+    const auto& code=*save_fn->section;
+    const auto start=save_fn->offset;
+    if (!instructions(bytes,code,start,{0x55,0x8b,0xec,0x83,0xec,12,0x89,0x4d,0xf8})) return {};
+    const auto end=std::min(code.offset+code.size,start+256);
+    // Verify the save handler calls this same getter with the original index
+    // and passes the result to the payload copy.
+    for (auto at=start+9;at<end;++at) {
+        if (instructions(bytes,code,at,{0x8b,0x55,12,0x52,0x8b,0x4d,0xf8,0xe8,-1,-1,-1,-1,0x50,0x8b,0x45,0xfc,0x50,
+            0x8b,0x4d,8,0x51,0xe8,-1,-1,-1,-1,0x83,0xc4,12,0x8b,0xe5,0x5d,0xc2,8,0}) &&
+            call_target(bytes,code,at+7)==getter_target) return extension_size_switch(bytes,image,*size_fn);
+    }
+    return {};
+}
+
+std::optional<std::vector<int>> image_extension_sizes(const Bytes& bytes,const std::vector<Section>& image,unsigned slot) {
+    std::optional<std::vector<int>> result;
+    std::vector<std::uint32_t> examined;
+    for (const auto& code:image) {
+        if (!code.executable) continue;
+        const std::string_view text(reinterpret_cast<const char*>(bytes.data()+code.offset),code.size);
+        for (auto pos=text.find('\xc7');pos!=text.npos;pos=text.find('\xc7',pos+1)) {
+            const auto at=code.offset+pos;
+            // A constructor writes the vtable address through an object pointer.
+            if (!code.includes(at,6) || bytes[at+1]>7 || bytes[at+1]==4 || bytes[at+1]==5) continue;
+            const auto address=word(bytes,at+2);
+            if (address%4!=0) continue;
+            const auto table=position(image,address,slot+12,false);
+            if (!table || std::find(examined.begin(),examined.end(),address)!=examined.end()) continue;
+            if (examined.size()==1024) return {};
+            examined.push_back(address);
+            const auto sizes=extension_sizes_from_table(bytes,image,*table,slot);
+            if (!sizes) continue;
+            if (result && *result!=*sizes) return {};
+            result=sizes;
+        }
+    }
+    return result;
+}
+
+struct ExecutableExtensions {
+    std::optional<std::uint32_t> base;
+    std::optional<std::vector<int>> sizes;
+};
+
+ExecutableExtensions image_extensions(const Bytes& bytes,const std::vector<Section>& image) {
+    ExecutableExtensions result;
+    std::optional<unsigned> save_slot;
+    bool conflicting_slots=false;
     unsigned names=0,references=0;
     for (const auto& data:image) {
         if (data.executable) continue;
@@ -458,12 +600,17 @@ std::optional<std::uint32_t> image_extension_base(const Bytes& bytes,const std::
                     if (++references>128) return {};
                     const auto base=extension_writer_base(bytes,image,code,code.offset+ref);
                     if (!base) continue;
-                    if (*base<min_legacy_extension_code || *base>127 || (result && *result!=*base)) return {};
-                    result=base;
+                    if (*base<min_legacy_extension_code || *base>127 || (result.base && *result.base!=*base)) return {};
+                    result.base=base;
+                    if (const auto slot=extension_save_slot(bytes,code,code.offset+ref)) {
+                        if (save_slot && *save_slot!=*slot) conflicting_slots=true;
+                        save_slot=slot;
+                    }
                 }
             }
         }
     }
+    if (save_slot && !conflicting_slots) result.sizes=image_extension_sizes(bytes,image,*save_slot);
     return result;
 }
 } // namespace
@@ -504,19 +651,21 @@ ExecutableSaveLayout executable_save_layout(const std::filesystem::path& root) {
                 ? std::optional<std::size_t>{*status.size} : std::nullopt;
             const auto okikae=image_okikae(bytes,image);
             const auto system_version=image_system_save_version(bytes,image);
-            const auto extension_base=image_extension_base(bytes,image);
+            const auto extensions=image_extensions(bytes,image);
             if (!result.layer_records) {
                 result.message_width=width;
                 result.status_bytes=status_bytes;
                 result.registers_okikae=okikae;
                 result.system_save_version=system_version;
-                result.extension_code_base=extension_base;
+                result.extension_code_base=extensions.base;
+                result.extension_sizes=extensions.sizes;
             } else {
                 if (result.message_width!=width) result.message_width.reset();
                 if (result.status_bytes!=status_bytes) result.status_bytes.reset();
                 if (result.registers_okikae!=okikae) result.registers_okikae.reset();
                 if (result.system_save_version!=system_version) result.system_save_version.reset();
-                if (result.extension_code_base!=extension_base) result.extension_code_base.reset();
+                if (result.extension_code_base!=extensions.base) result.extension_code_base.reset();
+                if (result.extension_sizes!=extensions.sizes) result.extension_sizes.reset();
             }
             result.layer_records=count;
         } catch (const std::runtime_error&) {

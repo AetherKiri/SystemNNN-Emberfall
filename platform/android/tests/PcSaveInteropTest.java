@@ -69,7 +69,6 @@ public final class PcSaveInteropTest {
         rejects(()->SaveLayoutConfig.fromFields(cfgPath,null),"null fields");
         rejects(()->SaveLayoutConfig.fromFields(cfgPath,new int[]{32,1024,7088,3,1,1,1}),"legacy 7-field array");
         rejects(()->SaveLayoutConfig.fromFields(cfgPath,new int[9]),"short 9-field array");
-        rejects(()->SaveLayoutConfig.fromFields(cfgPath,new int[12]),"long 12-field array");
         rejects(()->SaveLayoutConfig.fromFields(cfgPath,new int[]{32,1024,7088,1,1,1,-1,1,0,1}),"negative source");
         rejects(()->SaveLayoutConfig.fromFields(cfgPath,new int[]{32,1024,7088,1,1,1,4,1,0,1}),"out-of-range source");
         rejects(()->SaveLayoutConfig.fromFields(cfgPath,new int[]{32,1024,7088,1,1,1,0,1,0,1}),"pending source with nonzero version");
@@ -88,6 +87,18 @@ public final class PcSaveInteropTest {
         }
         int[] invalidExt=executable.clone();invalidExt[10]=7;
         rejects(()->SaveLayoutConfig.fromFields(cfgPath,invalidExt),"EXT collides with base blocks");
+        int[] extensions={16,256,7088,1,1,0,1,1,1,1,100,1,116,36,0,-1};
+        SaveLayoutConfig details=SaveLayoutConfig.fromFields(cfgPath,extensions);
+        check(details.extensionEnabled==1&&details.extensionSizes.equals(Arrays.asList(116,36,0,-1)),
+            "EXT payloads retain order, zero and unknown");
+        check(Arrays.equals(details.fields(),extensions),"EXT metadata survives IPC transport");
+        int[] invalidSize=extensions.clone();invalidSize[12]=-2;
+        rejects(()->SaveLayoutConfig.fromFields(cfgPath,invalidSize),"invalid EXT payload size");
+        int[] disabledWithSizes=extensions.clone();disabledWithSizes[10]=0;disabledWithSizes[11]=0;
+        rejects(()->SaveLayoutConfig.fromFields(cfgPath,disabledWithSizes),"disabled EXT with payloads");
+        int[] absent={16,256,7088,1,0,0,3,0,0,0,0,0};
+        SaveLayoutConfig none=SaveLayoutConfig.fromFields(cfgPath,absent);
+        check(none.extensionEnabled==0&&none.extensionSizes.isEmpty()&&Arrays.equals(none.fields(),absent),"no EXT");
         verifyCalcuWeekFormula();
         verifyVarLookupAndGameVarExtraction();
 

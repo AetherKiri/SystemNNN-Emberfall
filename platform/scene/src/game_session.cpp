@@ -114,6 +114,17 @@ struct PcExtensions {
     std::vector<PcExtension> entries;
     std::size_t sub_end=0;
     bool valid=true;
+
+    std::vector<PcExtension> order(bool automatic_okikae) const {
+        if (!valid) throw std::runtime_error("Invalid PC extension configuration");
+        std::vector<PcExtension> result;
+        for (std::size_t i=0;i<=entries.size();++i) {
+            if (i==sub_end && automatic_okikae) result.push_back(PcExtension::Okikae);
+            if (i<entries.size() && (entries[i]!=PcExtension::Okikae || automatic_okikae))
+                result.push_back(entries[i]);
+        }
+        return result;
+    }
 };
 PcExtensions configured_pc_extensions(const std::string& init,bool face_enabled) {
     PcExtensions result;
@@ -139,6 +150,65 @@ PcExtensions configured_pc_extensions(const std::string& init,bool face_enabled)
     if (result.valid) result.entries.resize(result.sub_end+static_cast<std::size_t>(count),PcExtension::Game);
     return result;
 }
+bool optional_class_created(const std::string& init,const std::string& name);
+
+std::array<std::vector<pc::ExtensionSize>,2> file_extension_sizes(const fs::path& root,const std::string& init,
+                                                                  const nnn::game_config::NameListSetup& setup) {
+    using Source=pc::ExtensionSizeSource;
+    const int face_depth=config_int(init,"facePrintMode",0);
+    const auto extensions=configured_pc_extensions(init,face_depth && !config_int(init,"noScriptFlag",0));
+    pc::ExtensionSize face,chart;
+    if (std::find(extensions.entries.begin(),extensions.entries.end(),PcExtension::Face)!=extensions.entries.end()) {
+        try {
+            Faces faces;
+            faces.configure(face_depth,root,{});
+            face={static_cast<int>(faces.pc_payload().size()),Source::GameFiles};
+        } catch (const std::runtime_error&) {
+            // The configuration can still describe the slot without a known length.
+        }
+    }
+    if (optional_class_created(init,"selectchart") &&
+        std::find(extensions.entries.begin(),extensions.entries.end(),PcExtension::Chart)!=extensions.entries.end()) {
+        try {
+            const auto path=nnn::game_config::find(root,"init","selectchart.xtx");
+            if (!path.empty()) {
+                const nnn::game_config::NameListSetup config(nnn::game_config::read_text(path));
+                const auto slots=nnn::chart::configured_slot_capacity(config);
+                chart={static_cast<int>(nnn::chart::selection_words(slots)*sizeof(nnn::Word)+
+                    nnn::chart::move_road_bytes(slots)),Source::GameFiles};
+            }
+        } catch (const std::runtime_error&) {
+            // Chart data is optional for layout inspection.
+        }
+    }
+
+    std::array<std::vector<pc::ExtensionSize>,2> sizes;
+    for (std::size_t registration=0;registration<sizes.size();++registration) {
+        std::size_t game_index=0;
+        auto& lengths=sizes[registration];
+        for (const auto kind:extensions.order(registration!=0)) {
+            pc::ExtensionSize length;
+            switch (kind) {
+            case PcExtension::Empty: length={0,Source::Engine};break;
+            case PcExtension::Chart: length=chart;break;
+            case PcExtension::Face: length=face;break;
+            case PcExtension::Okikae: length={pc::okikae_count*pc::okikae_width,Source::Engine};break;
+            case PcExtension::Game:
+                if (const auto value=setup.field("extSaveDataSize"+std::to_string(++game_index))) {
+                    auto text=*value;
+                    if (!text.empty() && text.front()=='+') text.remove_prefix(1);
+                    int bytes=0;
+                    const auto parsed=std::from_chars(text.data(),text.data()+text.size(),bytes);
+                    if (parsed.ec==std::errc{} && bytes>=0 && static_cast<std::size_t>(bytes)<=pc::max_extension_payload)
+                        length={bytes,Source::GameFiles};
+                }
+                break;
+            }
+            lengths.push_back(length);
+        }
+    }
+    return sizes;
+}
 pc::FileSaveLayout game_files_save_layout(const fs::path& root) {
     const auto init=nnn::game_config::read(root,"init","game.xtx");
     const auto spt=nnn::resource::find_directory(root,"spt");
@@ -157,12 +227,7 @@ pc::FileSaveLayout game_files_save_layout(const fs::path& root) {
     const bool classic_vars=!has_var2 || (has_var && config_int(init,"varType",1)==0);
     layout.system_save_version=classic_vars ? 1 : (setup.field("scriptseVolumeUseFlag") ? 3 : 2);
     layout.trial=config_int(init,"taikenflag",0)!=0;
-    const auto extensions=configured_pc_extensions(init,false);
-    if (!extensions.valid) throw std::runtime_error("Invalid PC extension configuration");
-    for (auto kind:extensions.entries) {
-        if (kind==PcExtension::Okikae) ++layout.configured_okikae_extensions;
-        else ++layout.configured_extensions;
-    }
+    layout.extension_sizes=file_extension_sizes(root,init,setup);
     return layout;
 }
 pc::DirectorySaveLayout resolve_pc_save_layout(const fs::path& root,bool analyze_executable) {
@@ -504,9 +569,7 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
     Cutins cutins;
     std::optional<pc::OmakeWords> omake;
     std::array<std::optional<nnn::status_party::Visit>,2> attached_status;
-    std::vector<PcExtension> pc_extensions;
-    std::size_t pc_sub_end=0;
-    bool pc_extension_count_valid=true;
+    PcExtensions pc_extensions;
     std::array<std::string,4> loaded_pc_preview;
     struct InactivePcLayer { pc::Effect effect; std::string filename; };
     std::array<std::optional<InactivePcLayer>,pc::layer_count> inactive_pc_layers;
@@ -3985,23 +4048,14 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         return true;
     }
     void configure_pc_extensions(const std::string& init) {
-        auto setup=configured_pc_extensions(init,faces.enabled());
-        pc_extensions=std::move(setup.entries);
-        pc_sub_end=setup.sub_end;
-        pc_extension_count_valid=setup.valid;
+        pc_extensions=configured_pc_extensions(init,faces.enabled());
         if (!decorative_preview && replay_films.empty() && !pc_extension_order(save_layout->registers_okikae()).empty() &&
             (!save_layout->extension_code_base || !*save_layout->extension_code_base))
             throw std::runtime_error("EXT_START_UNRESOLVED: This game requires EXT save blocks. Enable the EXE parser and manually regenerate emberfall-system.cfg; no EXT starting code was inferred.");
     }
 
     std::vector<PcExtension> pc_extension_order(bool automatic_okikae) const {
-        if (!pc_extension_count_valid) throw std::runtime_error("Invalid PC extension configuration");
-        std::vector<PcExtension> order;
-        for (std::size_t i=0;i<=pc_extensions.size();++i) {
-            if (i==pc_sub_end && automatic_okikae) order.push_back(PcExtension::Okikae);
-            if (i<pc_extensions.size() && (pc_extensions[i]!=PcExtension::Okikae || automatic_okikae))
-                order.push_back(pc_extensions[i]);
-        }
+        auto order=pc_extensions.order(automatic_okikae);
         if (order.size()>pc::max_extensions) throw std::runtime_error("Too many PC extensions");
         return order;
     }
@@ -5363,10 +5417,16 @@ std::optional<GameSession::PcSaveConfiguration> GameSession::pc_save_configurati
                                  : pc::read_save_layout(root);
     if (!config) return {};
     const auto& layout=config->layout;
+    std::vector<int> sizes;
+    if (layout.extension_sizes) {
+        sizes.reserve(layout.extension_sizes->size());
+        for (const auto& block:*layout.extension_sizes) sizes.push_back(block.bytes);
+    }
     return PcSaveConfiguration{config->file,layout.layers(),layout.message_width(),layout.status_bytes(),
         layout.system.version,static_cast<int>(layout.system.source),layout.executable.layer_records.has_value(),
         layout.registers_okikae(),layout.executable.message_width.has_value(),layout.executable.status_bytes.has_value(),
-        layout.executable.registers_okikae.has_value(),layout.extension_code_base ? static_cast<int>(*layout.extension_code_base) : -1};
+        layout.executable.registers_okikae.has_value(),layout.extension_code_base ? static_cast<int>(*layout.extension_code_base) : -1,
+        layout.extension_enabled(),std::move(sizes)};
 }
 nnn::Value GameSession::save_slot_art() const { return data_->save_slot_art(); }
 void GameSession::restore_snapshot(const nnn::snapshot::Bytes& bytes,const std::function<bool(const FrameState&)>& verify,
