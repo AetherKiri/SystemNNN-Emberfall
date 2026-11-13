@@ -2202,6 +2202,35 @@ int main(){
         require(rgba[0]==100 && rgba[1]==100 && rgba[2]==100,"hidden window must leave the scene alone");
         require(game.surface().rgb[0]==100,"window decoration changed the native scene cache");
     });
+    suite.test("PREPAREOVERRAP keeps the last DRAW if host capture fails",[]{
+        Model model;
+        model.code.number(effect,{0,54,0,64,0,0});
+        model.code.present();
+        model.code.number(effect,{0,54,0,0,64,0});
+        model.code.number(0x33330011U,{}); // PREPAREOVERRAP
+        model.code.number(0x22220005U,{0,2}); // OVERRAP
+        model.code.end();
+        TempGame temp(model);
+        scene::GameSession game(temp.root,test_options());
+        require(game.step_frame(0).wait==scene::Wait::Draw,"initial DRAW not reached");
+        const auto displayed=game.surface().rgb;
+        require(displayed==Bytes{64,0,0},"initial DRAW pixels");
+
+        unsigned attempts=0;
+        const auto capture=[&](emberfall::render::Surface& frame) {
+            require(frame.rgb==displayed,"host must receive the last DRAW as its base");
+            ++attempts;
+            return false;
+        };
+        const auto period=game.frame_ms();
+        require(game.step_frame({period,period},{},capture).wait==scene::Wait::Overlap && attempts==1,
+            "overlap must use the single capture from PREPAREOVERRAP");
+        require(game.surface().rgb==displayed,"overlap frame zero must match the last DRAW");
+        require(game.step_frame(period).wait==scene::Wait::Overlap && game.surface().rgb==Bytes{32,32,0},
+            "overlap midpoint must blend the displayed DRAW and the new layers");
+        require(game.step_frame(period).wait==scene::Wait::Running && game.surface().rgb==Bytes{0,64,0},
+            "overlap must end on the new layers");
+    });
     for (const Word transition:{draw,0x22220005U}) suite.test(transition==draw?"DRAW then APPEND":"OVERRAP then APPEND",[transition]{
         Model m;m.message=true;m.message_text="Old";
         m.code.add({6,command,0x22220002U,0,1,0});
