@@ -61,6 +61,85 @@ class ConfigAuditTest(unittest.TestCase):
         self.assertEqual(game["fields"][1]["upstream"], {"literal": ["nnnLib/commonprintmessage.cpp:1"]})
         self.assertEqual(game["fields"][2]["value"], "zero")
 
+    def test_upstream_unused_and_wave1_supported_classifications(self):
+        self.write(
+            "src/nnnLib/commonprintmessage.cpp",
+            b'GetInitGameParam(&m_LBlockX, "LBlockX");\n'
+            b'GetInitGameParam(&m_LBlockY, "LBlockY");\n'
+            b'GetInitGameParam(&rows, "fullMessageNumber");\n',
+        )
+        self.write("game/SPT/sys.spt", b"")
+        self.write("game/init/printmessage.xtx", b"LBlockX 1\nLBlockY 20\nfullMessageNumber 12\n")
+        self.write("game/init/selectobject.xtx", b"optionOffVarFlag 1\noptionOffVarname hideOpt\n")
+        self.write("game/init/selectplace.xtx", b"optionOffVarFlag 1\noptionOffVarname hidePlace\n")
+        self.write("game/init/config.xtx", b"MustStartPage1Flag 1\n")
+        self.write("game/init/listenBGM.xtx", b"cannotColorR 64\ncannotColorG 80\ncannotColorB 96\n")
+        self.write(
+            "game/init/selectcg.xtx",
+            b"filenameDifferenceFont ta_cg_font\ndifferencePrintFlag 1\ndifferencePrintByGetFlag 0\n"
+            b"differencePrintX 8\ndifferencePrintY 12\ndifferenceFontSizeX 21\ndifferenceFontSizeY 27\n"
+            b"differenceFontNextX 18\ndifferentKeta 2\n",
+        )
+        self.write(
+            "game/init/systemMenu.xtx",
+            b"systemMenuSceneBackFileName ta_back\nsystemMenuSceneEndFileName ta_end\n",
+        )
+        self.write(
+            "game/init/dataFile.xtx",
+            b"filenameOverwriteCursor ta_ow\n"
+            b"saveAnimePattern 4\nsaveAnimePattern2 2\nsaveAnimeSpeed 3\nsaveAnimeSpeed2 1\n"
+            b"saveAnimeType 1\nsaveAnimeType2 5\n"
+            b"loadAnimePattern 4\nloadAnimePattern2 2\nloadAnimeSpeed 3\nloadAnimeSpeed2 1\n"
+            b"loadAnimeType 1\nloadAnimeType2 5\n"
+            b"overwriteAnimePattern 6\noverwriteAnimePattern2 2\noverwriteAnimeSpeed 2\noverwriteAnimeSpeed2 1\n"
+            b"overwriteAnimeType 3\noverwriteAnimeType2 5\n",
+        )
+        game = audit([self.root / "game"], self.root / "src")["games"][0]
+        self.assertEqual(
+            game["status_counts"],
+            {"SUPPORTED": 34, "UNSUPPORTED_BEHAVIOR": 1, "UPSTREAM_UNUSED": 6},
+        )
+        by_key = {(Path(row["file"]).stem.lower(), row["key"].lower()): row for row in game["fields"]}
+        self.assertIn("commonprintmessage.cpp:398-404", by_key[("printmessage", "lblockx")]["behavior"])
+        self.assertIn("commonSelectObject.cpp:607", by_key[("selectobject", "optionoffvarflag")]["behavior"])
+        self.assertIn("commonSelectPlace.cpp:614", by_key[("selectplace", "optionoffvarname")]["behavior"])
+
+    def test_kazari_inactive_group_folding_when_disabled_or_missing(self):
+        self.write(
+            "src/nnnLib/commonSelectSceneChara.cpp",
+            b'GetInitGameParam(&flag, "kazariPrintFlag");\n'
+            b'GetInitGameParam(&x, "kazariPrintX");\n'
+            b'GetInitGameParam(&y, "kazariPrintY");\n'
+            b'GetInitGameString(&name, "filenameKazari");\n',
+        )
+        self.write("off/SPT/sys.spt", b"")
+        self.write(
+            "off/init/printmessage.xtx",
+            b"kazariPrintFlag 0\nkazariPrintX 10\nkazariPrintY 20\n",
+        )
+        self.write(
+            "off/init/dataFile.xtx",
+            b"filenameKazari ta_kazari\nkazariSizeX 32\n",
+        )
+        self.write("on/SPT/sys.spt", b"")
+        self.write(
+            "on/init/printmessage.xtx",
+            b"kazariPrintFlag 1\nkazariPrintX 10\nkazariPrintY 20\n",
+        )
+        self.write(
+            "on/init/dataFile.xtx",
+            b"kazariPrintFlag 1\nfilenameKazari ta_kazari\nkazariSizeX 32\n",
+        )
+        games = {g["game"]: g for g in audit([self.root / "off", self.root / "on"], self.root / "src")["games"]}
+        self.assertEqual(games["off"]["status_counts"], {"INACTIVE_IN_GAME": 4, "REVIEW": 1})
+        off_Status = {row["key"]: row["status"] for row in games["off"]["fields"]}
+        self.assertEqual(off_Status["kazariPrintFlag"], "REVIEW")
+        self.assertEqual(off_Status["kazariPrintX"], "INACTIVE_IN_GAME")
+        self.assertEqual(off_Status["filenameKazari"], "INACTIVE_IN_GAME")
+
+        self.assertNotIn("INACTIVE_IN_GAME", games["on"]["status_counts"])
+        self.assertEqual(games["on"]["status_counts"], {"REVIEW": 5, "UNKNOWN": 1})
+
 
 if __name__ == "__main__":
     unittest.main()

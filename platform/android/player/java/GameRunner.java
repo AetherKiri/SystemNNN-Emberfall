@@ -264,7 +264,8 @@ final class GameRunner {
     private GalleryCatalog.MovieList movieList;
     private GalleryCatalog.Page galleryPage;
     private long galleryRequest,galleryWritten;
-    private boolean replaying,galleryMusicPlaying,galleryMusicPaused;
+    private volatile boolean replaying;
+    private boolean galleryMusicPlaying,galleryMusicPaused;
     private MusicSpectrum gallerySpectrum;
     private boolean moviePlaying;
     private int galleryCue=-1,gallerySong=-1,galleryVolume=100;
@@ -527,7 +528,7 @@ final class GameRunner {
         if(handle!=0)NativeGame.close(handle);
         offerScreenLayer(-1);
         handle=candidate;commitRuntime(candidate);onTitle=true;menuOpen=false;menuModal=null;systemMenuModal=false;
-        choiceClicking=false;failed=false;history=null;current=null;shownWait=-1;
+        choiceClicking=false;failed=false;history=null;current=null;shownWait=-1;resetDialogueDecorations();
         configMask=0;
         replaying=false; galleryPage=null; currentTitle=title; galleryWritten=unsaved?-1:stored;
         galleryCue=title==null?-1:title.musicNumber();
@@ -836,7 +837,7 @@ final class GameRunner {
         if(!systemStateEstablished)writeReadLines();
         queueGalleryWrite();
         GameSave.Run last=next.lastInput();x=last.x;y=last.y;
-        failed=false;shownWait=-1;current=null;autoMode=false;skipMode=false;syncModes();
+        failed=false;shownWait=-1;current=null;resetDialogueDecorations();autoMode=false;skipMode=false;syncModes();
         ui.style(dialogueStyle);
         publishParameters();if(save!=null){NativeGame.captureBacklogJump(handle,0);ui.loaded();}
         if(meta[0]==NativeGame.MOVIE)startStoryMovie();else updateUi();
@@ -1164,7 +1165,7 @@ final class GameRunner {
             ui.style(dialogueStyle);
             ui.loaded();
         }else if(history!=null)history.recordNativeBoundary(x,y);
-        menuOpen=true;shownWait=-1;current=null;choiceClicking=false;
+        menuOpen=true;shownWait=-1;current=null;resetDialogueDecorations();choiceClicking=false;
         step(0,false,0);
         return failed?rejectedModal():new ModalUpdate(2,meta[0],0,current==null?null:current.modal);
     }
@@ -1444,7 +1445,7 @@ final class GameRunner {
             tasks.removeCallbacks(ticker); stopSound(); NativeGame.close(handle);
             offerScreenLayer(-1);
             handle=candidate; galleryWritten=stored; onTitle=false; replaying=true; menuOpen=false; history=null;
-            current=null; shownWait=-1; x=y=0;
+            current=null; shownWait=-1; resetDialogueDecorations(); x=y=0;
             System.arraycopy(state,0,meta,0,meta.length);
             bindSurface(true);
             ui.galleryReplayStarted(); queueGalleryWrite();
@@ -1469,6 +1470,7 @@ final class GameRunner {
         }
         return scene.hiddenLayers;
     }
+    boolean isGallerySceneReplay(){return replaying;}
     void endGalleryReplay() { tasks.post(() -> { if (replaying) finishReplay(); }); }
     private void finishReplay() {
         try { openTitle(); ui.galleryReplayFinished(); }
@@ -1540,7 +1542,7 @@ final class GameRunner {
         // Both the engine and the staged journal have passed validation.
         history=prefix;
         GameSave.Run last=history.lastInput();x=last.x;y=last.y;
-        choiceClicking=false;shownWait=-1;current=null;setModes(false,false);
+        choiceClicking=false;shownWait=-1;current=null;resetDialogueDecorations();setModes(false,false);
         publishParameters();ui.loaded();updateUi();
         Log.i("SystemNNN","Backlog jump restored line="+meta[2]+" word="+meta[1]+" cursor="+history.cursor());
         done.accept(true);
@@ -2022,6 +2024,10 @@ final class GameRunner {
     private void publishScreenLayer(){
         // Keep the outgoing frame until the modal has captured its backdrop.
         if(shownWait!=NativeGame.MODAL)offerScreenLayer(NativeGame.takeScreenLayer(handle));
+    }
+    private void resetDialogueDecorations(){
+        dialogueVisualFields=null;
+        dialogueDecorations=DialogueDecorations.EMPTY;
     }
     private DialogueDecorations dialogueDecorations(){
         byte[][] raw=NativeGame.dialogueVisuals(handle);

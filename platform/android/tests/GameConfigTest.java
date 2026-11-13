@@ -168,6 +168,49 @@ public final class GameConfigTest {
                 OriginalSettingsModel explicit=new OriginalSettingsModel(flags,null,800,600,old);
                 check(explicit.sliders.size()==7&&explicit.sliders.get(6).index==6,"explicit slider flags override the profile");
             }
+            write(new File(root,"init/pageDefault.xtx"),"modePageMax 3\nmusicVolumePrintX 100\nmusicBarFileName bar\n",false);
+            GameUiAssets.Config pageDefault=GameUiAssets.readConfig(root,"pageDefault");
+            OriginalSettingsModel pageModel=new OriginalSettingsModel(pageDefault);
+            OriginalSettingsModel fallbackModel=new OriginalSettingsModel(GameUiAssets.readConfig(root,"missingSettings"));
+            check(GameSettingsPanel.pageCount(pageModel)==3&&GameSettingsPanel.pageCount(fallbackModel)==2,
+                "settings page count covers original and two-page fallback models");
+            check(GameSettingsPanel.openingPage(pageDefault,3,0)==0&&
+                GameSettingsPanel.openingPage(pageDefault,3,2)==2&&
+                GameSettingsPanel.openingPage(pageDefault,3,9)==2&&
+                GameSettingsPanel.openingPage(pageDefault,3,-4)==0,
+                "omitted MustStartPage1Flag defaults to 0 and clamps remembered page");
+            write(new File(root,"init/pageRetain.xtx"),"modePageMax 3\nMustStartPage1Flag 0\n",false);
+            check(GameSettingsPanel.openingPage(GameUiAssets.readConfig(root,"pageRetain"),3,1)==1&&
+                GameSettingsPanel.openingPage(GameUiAssets.readConfig(root,"pageRetain"),1,1)==0,
+                "explicit MustStartPage1Flag 0 retains and clamps remembered page");
+            write(new File(root,"init/pageReset.xtx"),"modePageMax 3\nMustStartPage1Flag 1\n",false);
+            check(GameSettingsPanel.openingPage(GameUiAssets.readConfig(root,"pageReset"),3,2)==0&&
+                GameSettingsPanel.openingPage(GameUiAssets.readConfig(root,"pageReset"),2,1)==0,
+                "MustStartPage1Flag 1 resets opening page to page 1 (index 0)");
+            for(int i=0;i<9;i++){
+                check(GameSystemMenuPanel.standardButtonEnabled(i,false),"normal system menu enables standard slot "+i);
+                check(GameSystemMenuPanel.standardButtonEnabled(i,true)==(i>=2),
+                    "scene replay disables only Save (0) and Load (1) among standard slots: "+i);
+            }
+            write(new File(root,"init/systemScene.xtx"),
+                "Menu1Button1FileName ta_menu_bt1\nMenu1Button8FileName ta_menu_cancel\nMenu1Button9FileName ta_menu_exit\n"+
+                "systemMenuSceneBackFileName ta_scene_back\nsystemMenuSceneEndFileName ta_scene_end\n",false);
+            GameUiAssets.Config systemScene=GameUiAssets.readConfig(root,"systemScene");
+            check(GameSystemMenuPanel.standardButtonSprite(systemScene,"Menu1Button8","Menu1Button1",7,false,s->true).equals("ta_menu_cancel")&&
+                GameSystemMenuPanel.standardButtonSprite(systemScene,"Menu1Button9","Menu1Button1",8,false,s->true).equals("ta_menu_exit"),
+                "normal system menu keeps standard cancel and exit button art");
+            check(GameSystemMenuPanel.standardButtonSprite(systemScene,"Menu1Button8","Menu1Button1",7,true,s->true).equals("ta_scene_back")&&
+                GameSystemMenuPanel.standardButtonSprite(systemScene,"Menu1Button9","Menu1Button1",8,true,s->true).equals("ta_scene_end")&&
+                GameSystemMenuPanel.standardButtonSprite(systemScene,"Menu1Button3","Menu1Button1",2,true,s->true).equals("ta_menu_bt1"),
+                "scene replay swaps cancel (7) and exit (8) sprites when scene overrides exist");
+            check(GameSystemMenuPanel.standardButtonSprite(systemScene,"Menu1Button8","Menu1Button1",7,true,"ta_scene_end"::equals).equals("ta_menu_cancel")&&
+                GameSystemMenuPanel.standardButtonSprite(systemScene,"Menu1Button9","Menu1Button1",8,true,"ta_scene_back"::equals).equals("ta_menu_exit"),
+                "scene replay falls back to standard button art when override sprite is missing");
+            write(new File(root,"init/systemNoScene.xtx"),"Menu1Button8FileName ta_menu_cancel\nMenu1Button9FileName ta_menu_exit\n",false);
+            GameUiAssets.Config systemNoScene=GameUiAssets.readConfig(root,"systemNoScene");
+            check(GameSystemMenuPanel.standardButtonSprite(systemNoScene,"Menu1Button8","Menu1Button1",7,true,s->{throw new AssertionError("empty override queried");}).equals("ta_menu_cancel")&&
+                GameSystemMenuPanel.standardButtonSprite(systemNoScene,"Menu1Button9","Menu1Button1",8,true,s->{throw new AssertionError("empty override queried");}).equals("ta_menu_exit"),
+                "empty scene replay sprite names do not query assets and preserve standard art");
             byte[] mapping=new byte[SjisTunnelDecoder.MAX_MAPPINGS*2];
             for(int i=0;i<SjisTunnelDecoder.MAX_MAPPINGS;i++){int cp=0x4e00+i;mapping[i*2]=(byte)cp;mapping[i*2+1]=(byte)(cp>>8);}
             Files.write(new File(root,"sjis_ext.bin").toPath(),mapping);
@@ -215,6 +258,15 @@ public final class GameConfigTest {
             check(model.tabs.get(0).on.art.image.equals("ta_cnf_pgbt11"),"radio selected state is Button2");
             check(model.characters.get(0).button.off.art.image.equals("ta_cnf_vocha12"),"character state0 uses Button1 (muted)");
             check(GameUiAssets.readConfig(root,"config").imageNames().contains("sys/ta_cnf_sysvocha71"),"theme images are preloaded from the system route");
+            check(GameSettingsPanel.openingPage(GameUiAssets.readConfig(root,"config"),GameSettingsPanel.pageCount(model),2)==0,
+                "real MNG MustStartPage1Flag=1 resets settings to first page");
+            GameUiAssets.Config mngSystem=GameUiAssets.readConfig(root,"systemmenu");
+            String sceneBack=mngSystem.value("systemMenuSceneBackFileName","");
+            String sceneEnd=mngSystem.value("systemMenuSceneEndFileName","");
+            check(!sceneBack.isEmpty()&&!sceneEnd.isEmpty()&&
+                GameSystemMenuPanel.standardButtonSprite(mngSystem,"Menu1Button8","Menu1Button1",7,true,s->true).equals(sceneBack)&&
+                GameSystemMenuPanel.standardButtonSprite(mngSystem,"Menu1Button9","Menu1Button1",8,true,s->true).equals(sceneEnd),
+                "real MNG systemmenu scene replay back/end sprites");
         }
         for(int i=1;i<args.length;i++){
             File game=new File(args[i]);

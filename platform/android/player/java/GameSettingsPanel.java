@@ -8,6 +8,7 @@ import android.view.*;
 import android.widget.ImageView;
 import android.widget.TextView;
 import java.util.ArrayList;
+import java.util.function.IntConsumer;
 import java.util.function.IntSupplier;
 
 /** Configuration pages retain the selected game's artwork, coordinates and parameter groups. */
@@ -15,6 +16,7 @@ final class GameSettingsPanel extends GameUiPanel {
     private final SharedPreferences preferences;
     private final GameRunner runner;
     private final Runnable close;
+    private final IntConsumer onPageChanged;
     private final boolean previewMutedVoice;
     private final int configMask;
     private final DialogueMarkup.Style previewMarkup;
@@ -42,14 +44,24 @@ final class GameSettingsPanel extends GameUiPanel {
         if(writingPreferences||PlayerSettings.READING_SIZE.equals(key)||RuntimeSettingsAdapter.isPersistedKey(key))return;
         removeCallbacks(refresh);post(refresh);
     };
+    static int pageCount(OriginalSettingsModel model){return Math.max(1,model.original?model.pages:2);}
+    static int openingPage(GameUiAssets.Config config,int pages,int rememberedPage){
+        return config.number("mustStartPage1Flag",0)!=0?0:Math.max(0,Math.min(rememberedPage,Math.max(1,pages)-1));
+    }
     GameSettingsPanel(Context context,GameUiAssets assets,SharedPreferences prefs,GameRunner runner,Runnable click,Runnable close,int width,int height,int configMask,
                       UiPreviewPool.Warmup warmup){
+        this(context,assets,prefs,runner,click,close,width,height,configMask,warmup,0,null);
+    }
+    GameSettingsPanel(Context context,GameUiAssets assets,SharedPreferences prefs,GameRunner runner,Runnable click,Runnable close,int width,int height,int configMask,
+                      UiPreviewPool.Warmup warmup,int initialPage,IntConsumer onPageChanged){
         super(context,assets,"ta_cnf_bg01",click);preferences=prefs;this.runner=runner;this.close=close;this.configMask=configMask;
+        this.onPageChanged=onPageChanged;
         previewMutedVoice=assets.config.number("playOffToOnSoundFlag",0)!=0;
         previewMarkup=new DialogueMarkup.Style(assets.game.fields());
         canvas(width,height);model=settingsModel();setContentDescription("环境设置");
+        page=openingPage(assets.config,pageCount(model),initialPage);
         printMode=12;
-        if(model.original){uiBackground(assets.config,12,1,warmup);backgroundPage=0;}
+        if(model.original){uiBackground(assets.config,12,page+1,warmup);backgroundPage=page;}
         opening(assets.config,false);
     }
     @Override void canvas(int width,int height){
@@ -83,7 +95,9 @@ final class GameSettingsPanel extends GameUiPanel {
         if(!prepareBackgroundPage(selected+1,()->{backgroundPage=selected;showPage(selected);}))showPage(selected);
     }
     private void showPage(int selected){
-        page=Math.max(0,Math.min(selected,(model.original?model.pages:2)-1));clearControls();
+        page=Math.max(0,Math.min(selected,pageCount(model)-1));
+        if(onPageChanged!=null)onPageChanged.accept(page);
+        clearControls();
         previewWindow=null;previewNameWindow=null;
         removeCallbacks(typeSample);sampleRows.clear();sampleLines.clear();
         sampleSpeed=preferences.getInt("originalSlider.messageSpeed",Math.round(preferences.getInt("textSpeed",1)*4/3f));

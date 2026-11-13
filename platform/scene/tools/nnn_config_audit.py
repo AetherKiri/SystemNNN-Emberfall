@@ -38,26 +38,104 @@ REVIEWED = {
     ("config", "soundsenumber"): ("SUPPORTED", "Themed configuration feedback test"),
     ("config", "voicesenumber"): ("SUPPORTED", "Themed configuration feedback test"),
     ("config", "voiceisvoice"): ("SUPPORTED", "Themed configuration feedback test"),
+    ("config", "muststartpage1flag"): ("SUPPORTED", "Settings page retention in GameSettingsPanel and PlayerActivity"),
     ("printmessage", "drawoverrapoptionflag"): ("SUPPORTED", "GameStoryControlsTest"),
     ("printmessage", "drawwindowwithmessageflag"): ("SUPPORTED", "Message visibility during wipes"),
     ("printmessage", "lprintbgmode"): ("SUPPORTED", "Long-print background tests"),
+    ("printmessage", "lblockx"): (
+        "UPSTREAM_UNUSED", "Read at nnnLib/commonprintmessage.cpp:398-404 and never used in layout or rendering"
+    ),
+    ("printmessage", "lblocky"): (
+        "UPSTREAM_UNUSED", "Read at nnnLib/commonprintmessage.cpp:398-404 and never used in layout or rendering"
+    ),
+    ("selectobject", "optionoffvarflag"): (
+        "UPSTREAM_UNUSED", "SetOptionVarOn call commented out at nnnLib/commonSelectObject.cpp:607"
+    ),
+    ("selectobject", "optionoffvarname"): (
+        "UPSTREAM_UNUSED", "SetOptionVarOn call commented out at nnnLib/commonSelectObject.cpp:607"
+    ),
+    ("selectplace", "optionoffvarflag"): (
+        "UPSTREAM_UNUSED", "SetOptionVarOn call commented out at nnnLib/commonSelectPlace.cpp:614"
+    ),
+    ("selectplace", "optionoffvarname"): (
+        "UPSTREAM_UNUSED", "SetOptionVarOn call commented out at nnnLib/commonSelectPlace.cpp:614"
+    ),
+    ("game", "optionoffvarflag"): (
+        "UPSTREAM_UNUSED",
+        "Read at nnnLib/gamecallback.cpp:2440-2447; SetOptionVarOn commented out at "
+        "nnnLib/commonSelectObject.cpp:607 and nnnLib/commonSelectPlace.cpp:614",
+    ),
+    ("game", "optionoffvarname"): (
+        "UPSTREAM_UNUSED",
+        "Read at nnnLib/gamecallback.cpp:2440-2447; SetOptionVarOn commented out at "
+        "nnnLib/commonSelectObject.cpp:607 and nnnLib/commonSelectPlace.cpp:614",
+    ),
     ("maincontrol", "mutexname"): ("PC_WINDOW_ONLY", "Windows CreateMutex name"),
     ("maincontrol", "checkmutexflag"): ("PC_WINDOW_ONLY", "Windows CreateMutex startup check"),
     ("game", "vistacheck"): ("PC_WINDOW_ONLY", "Windows version check"),
     ("game", "f9keyexitoffflag"): ("PC_WINDOW_ONLY", "Windows F9 exit shortcut"),
-    ("config", "muststartpage1flag"): (
-        "PARTIAL", "A zero value lets PC retain the last page. Android always opens page 1"
-    ),
     ("printmessage", "fullmessagenumber"): (
         "UNSUPPORTED_BEHAVIOR", "PC uses this limit to scroll long-print rows in CommonPrintMessage"
     ),
     ("selectcg", "filenamedifferencefont"): (
-        "UNSUPPORTED_BEHAVIOR", "PC CG difference counter uses the configured digit atlas, Android draws text"
+        "SUPPORTED", "CG difference digit atlas in GalleryCatalog and GameGalleryPanel"
     ),
-    ("listenbgm", "cannotcolorr"): ("UNSUPPORTED_BEHAVIOR", "PC uses this RGB component for locked BGM labels"),
-    ("listenbgm", "cannotcolorg"): ("UNSUPPORTED_BEHAVIOR", "PC uses this RGB component for locked BGM labels"),
-    ("listenbgm", "cannotcolorb"): ("UNSUPPORTED_BEHAVIOR", "PC uses this RGB component for locked BGM labels"),
+    ("selectcg", "differenceprintflag"): (
+        "SUPPORTED", "CG difference counter visibility flag in GalleryCatalog and GameGalleryPanel"
+    ),
+    ("selectcg", "differenceprintbygetflag"): (
+        "SUPPORTED", "CG difference counter zero-unlock rule in GameGalleryPanel"
+    ),
+    ("selectcg", "differenceprintx"): ("SUPPORTED", "CG difference counter X offset in GameGalleryPanel"),
+    ("selectcg", "differenceprinty"): ("SUPPORTED", "CG difference counter Y offset in GameGalleryPanel"),
+    ("selectcg", "differencefontsizex"): ("SUPPORTED", "CG difference digit width in GameGalleryPanel"),
+    ("selectcg", "differencefontsizey"): ("SUPPORTED", "CG difference digit height in GameGalleryPanel"),
+    ("selectcg", "differencefontnextx"): ("SUPPORTED", "CG difference digit advance in GameGalleryPanel"),
+    ("selectcg", "differentketa"): ("SUPPORTED", "CG difference digit column count in GameGalleryPanel"),
+    ("listenbgm", "cannotcolorr"): ("SUPPORTED", "Locked BGM label RGB color in GameGalleryPanel"),
+    ("listenbgm", "cannotcolorg"): ("SUPPORTED", "Locked BGM label RGB color in GameGalleryPanel"),
+    ("listenbgm", "cannotcolorb"): ("SUPPORTED", "Locked BGM label RGB color in GameGalleryPanel"),
+    ("systemmenu", "systemmenuscenebackfilename"): (
+        "SUPPORTED", "Scene replay return button sprite in GameSystemMenuPanel"
+    ),
+    ("systemmenu", "systemmenusceneendfilename"): (
+        "SUPPORTED", "Scene replay end button sprite in GameSystemMenuPanel"
+    ),
+    ("datafile", "filenameoverwritecursor"): (
+        "SUPPORTED", "Overwrite slot cursor sprite in GameUiAssets and GameSlotsPanel"
+    ),
+    ("datafile", "saveanimepattern"): ("SUPPORTED", "Save slot cursor animation in GameSlotsPanel"),
+    ("datafile", "saveanimepattern2"): ("SUPPORTED", "Save slot selected cursor animation in GameSlotsPanel"),
+    ("datafile", "saveanimespeed"): ("SUPPORTED", "Save slot cursor animation speed in GameSlotsPanel"),
+    ("datafile", "saveanimespeed2"): ("SUPPORTED", "Save slot selected cursor animation speed in GameSlotsPanel"),
+    ("datafile", "saveanimetype"): ("SUPPORTED", "Save slot cursor animation type in GameSlotsPanel"),
+    ("datafile", "saveanimetype2"): ("SUPPORTED", "Save slot selected cursor animation type in GameSlotsPanel"),
+    ("datafile", "loadanimepattern"): ("SUPPORTED", "Load slot cursor animation in GameSlotsPanel"),
+    ("datafile", "loadanimepattern2"): ("SUPPORTED", "Load slot selected cursor animation in GameSlotsPanel"),
+    ("datafile", "loadanimespeed"): ("SUPPORTED", "Load slot cursor animation speed in GameSlotsPanel"),
+    ("datafile", "loadanimespeed2"): ("SUPPORTED", "Load slot selected cursor animation speed in GameSlotsPanel"),
+    ("datafile", "loadanimetype"): ("SUPPORTED", "Load slot cursor animation type in GameSlotsPanel"),
+    ("datafile", "loadanimetype2"): ("SUPPORTED", "Load slot selected cursor animation type in GameSlotsPanel"),
+    ("datafile", "overwriteanimepattern"): ("SUPPORTED", "Overwrite slot cursor animation in GameSlotsPanel"),
+    ("datafile", "overwriteanimepattern2"): ("SUPPORTED", "Overwrite slot selected cursor animation in GameSlotsPanel"),
+    ("datafile", "overwriteanimespeed"): ("SUPPORTED", "Overwrite slot cursor animation speed in GameSlotsPanel"),
+    ("datafile", "overwriteanimespeed2"): (
+        "SUPPORTED", "Overwrite slot selected cursor animation speed in GameSlotsPanel"
+    ),
+    ("datafile", "overwriteanimetype"): ("SUPPORTED", "Overwrite slot cursor animation type in GameSlotsPanel"),
+    ("datafile", "overwriteanimetype2"): ("SUPPORTED", "Overwrite slot selected cursor animation type in GameSlotsPanel"),
 }
+
+KAZARI_GATED_STEMS = frozenset(("printmessage", "datafile", "selectscenechara"))
+
+
+def inactive_behavior(stem, key, fields):
+    if stem in KAZARI_GATED_STEMS and key != "kazariprintflag":
+        if key.startswith("kazari") or key == "filenamekazari":
+            gate = fields.get("kazariprintflag")
+            if gate is None or gate[2] != "set":
+                return "Inactive because kazariPrintFlag is not enabled in this setup file"
+    return None
 
 
 def mask_cpp_tokens(source, retain_literals=True):
@@ -173,9 +251,16 @@ def game_report(root, lookup):
         raise ValueError(f"No init/*.xtx or init2/*.fxf in {root}")
     rows = []
     for stem, path in files:
-        for key, (spelling, line, value) in setup_fields(path).items():
+        fields = setup_fields(path)
+        for key, (spelling, line, value) in fields.items():
             evidence = lookup(key)
-            status, behavior = REVIEWED.get((stem, key), ("REVIEW" if evidence else "UNKNOWN", ""))
+            inactive = inactive_behavior(stem, key, fields)
+            if (stem, key) in REVIEWED:
+                status, behavior = REVIEWED[(stem, key)]
+            elif inactive is not None:
+                status, behavior = "INACTIVE_IN_GAME", inactive
+            else:
+                status, behavior = ("REVIEW" if evidence else "UNKNOWN"), ""
             rows.append({
                 "key": spelling, "file": path.relative_to(root).as_posix(), "line": line,
                 "value": value, "status": status, "behavior": behavior, "upstream": evidence,
