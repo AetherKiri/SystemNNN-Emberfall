@@ -1,5 +1,6 @@
 #include "emberfall/scene.hpp"
 #include "emberfall/game_session.hpp"
+#include "emberfall/story_compositor.hpp"
 #include "nnn/player_behavior.hpp"
 #include "nnn/snapshot.hpp"
 #include "fixtures/generated_cases.hpp"
@@ -18,6 +19,7 @@
 #include <map>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -3529,6 +3531,219 @@ int main(){
         require(gated.audio().pc_state().music_number==1 &&
             gated.audio().state().bgm.name=="second",
             "AdjustLoadBGM did not remap after SetVarByLoad restored non-zero gate variable");
+    });
+    suite.test("StoryCompositor enforces R1 2-tick skip cap, 3rd-tick logged fallback, 0-skip revision wakeup, S_clean wipe, and detached PlaneMailbox safety",[]{
+        constexpr Word prepare_overlap_fn=0x33330011U,overlap_cmd=0x22220005U;
+        Model model;
+        model.extra_messages={"First line","Second line"};
+        model.code.image(0,1);
+        model.code.number(effect,{0,0});
+        model.code.print(1,0);
+        model.code.print(2,1);
+        model.code.number(prepare_overlap_fn,{});
+        model.code.image(0,2);
+        model.code.number(effect,{0,0});
+        model.code.number(overlap_cmd,{0,2});
+        model.code.end();
+
+        TempGame temp(model);
+        temp.write("dwq/red.dwq",asset("tiny_red"));
+        temp.write("dwq/green.dwq",asset("tiny_green"));
+        auto options=test_options();
+        options.width=1;options.height=1;
+        auto game=std::make_unique<scene::GameSession>(temp.root,options);
+
+        std::vector<std::string> warnings;
+        auto compositor=std::make_unique<scene::StoryCompositor>(
+            std::make_shared<scene::PlaneMailbox>(),
+            [&](const std::string& msg){ warnings.push_back(msg); });
+        auto ui_token=compositor->mailbox();
+        ui_token->set_attached(true);
+
+        emberfall::render::Surface submitted;
+        unsigned submit_count=0;
+        const auto submit=[&](const emberfall::render::Surface& s){
+            submitted=s;
+            ++submit_count;
+            return true;
+        };
+
+        // Step to Line 1 ("First line").
+        require(game->step_frame(0).wait==scene::Wait::Dialogue,"did not reach first dialogue line");
+        const auto key1=game->expected_plane_key();
+        require(key1[0]==static_cast<std::int32_t>(scene::Wait::Dialogue) && key1[1]==1 && key1[2]==1,
+            "unexpected expected_plane_key on line 1");
+
+        using Outcome=scene::StoryCompositor::PresentOutcome;
+        // R1: Ticks 1 and 2 skip without blocking or logging while waiting for matching UI plane.
+        require(compositor->present(*game,true,true,submit)==Outcome::SkippedPending &&
+            compositor->skipped_ticks()==1 && submit_count==0 && warnings.empty(),
+            "tick 1 should skip pending UI plane");
+        require(compositor->present(*game,false,true,submit)==Outcome::SkippedPending &&
+            compositor->skipped_ticks()==2 && submit_count==0 && warnings.empty(),
+            "tick 2 should skip pending UI plane");
+        // Tick 3 hits the 2-tick cap, logs fallback once, and presents clean scene (255,0,0) without blocking.
+        require(compositor->present(*game,false,true,submit)==Outcome::Presented &&
+            submit_count==1 && warnings.size()==1 &&
+            submitted.rgb==Bytes({255,0,0}),
+            "tick 3 did not log fallback and present clean scene");
+        // Tick 4 with static scene and still no UI plane stays Idle without spamming logs or submits.
+        require(compositor->present(*game,false,true,submit)==Outcome::Idle &&
+            submit_count==1 && warnings.size()==1,
+            "tick 4 should remain idle when nothing changed after fallback");
+
+        // UI pushes Line 1 plane (0,180,0,255): immediate 0-skip wakeup!
+        const std::array<Byte,4> green_ui{0,180,0,255};
+        ui_token->push(green_ui.data(),4,1,1,key1,true);
+        require(compositor->present(*game,false,true,submit)==Outcome::Presented &&
+            compositor->skipped_ticks()==0 && submit_count==2 &&
+            submitted.rgb==Bytes({0,180,0}) &&
+            compositor->presented_plane_key()==key1,
+            "matching UI plane did not wake up with 0 skips");
+
+        // Same-key update (typewriter / ui_state key[5]) skips 0 frames and updates presented_plane_key()[5].
+        auto key1_substate=key1;
+        key1_substate[5]=(1<<16)|3;
+        const std::array<Byte,4> teal_ui{0,220,40,255};
+        ui_token->push(teal_ui.data(),4,1,1,key1_substate,true);
+        require(!game->needs_redraw(),"static scene should not need C++ layer redraw");
+        require(compositor->present(*game,false,true,submit)==Outcome::Presented &&
+            compositor->skipped_ticks()==0 && submit_count==3 &&
+            submitted.rgb==Bytes({0,220,40}) &&
+            compositor->presented_plane_key()[5]==((1<<16)|3),
+            "same-key revision/ui_state update did not present with 0 skips");
+
+        // .sav MINICG captures composed frame (0,220,40) while scene_surface() keeps pure (255,0,0).
+        require(game->scene_surface().rgb==Bytes({255,0,0}),
+            "scene_surface() was polluted by UI message plane");
+        const auto pc_sav=game->export_pc_save();
+        const auto sav_preview=scene::GameSession::inspect_pc_save(pc_sav,64*1024);
+        require(!sav_preview.pixels.empty() && sav_preview.pixels[0]==0xff00dc28U &&
+            sav_preview.pixels.back()==0xff00dc28U,
+            "export_pc_save MINICG did not capture single-pass composed Story frame");
+
+        // Advance to Line 2 on static BG while stale Line 1 plane is still in PlaneMailbox:
+        // R1 must NOT blend stale Line 1 plane onto Line 2!
+        scene::InputState tap;tap.advance=true;
+        require(game->step_frame(16,tap).wait==scene::Wait::Dialogue,"did not advance to second line");
+        const auto key2=game->expected_plane_key();
+        require(!scene::scene_plane_key_matches(key1_substate,key2) && key2[1]==2,
+            "line 2 did not advance expected_plane_key sequence");
+        require(compositor->present(*game,false,true,submit)==Outcome::SkippedPending &&
+            compositor->skipped_ticks()==1,
+            "line 2 tick 1 did not skip stale line 1 UI plane");
+
+        // Push Line 2 plane (20,40,210,255) on tick 2 -> presents immediately (only 1 skipped tick, 0 warnings).
+        const std::array<Byte,4> blue_ui{20,40,210,255};
+        ui_token->push(blue_ui.data(),4,1,1,key2,true);
+        require(compositor->present(*game,false,true,submit)==Outcome::Presented &&
+            compositor->skipped_ticks()==0 && warnings.size()==1 &&
+            submitted.rgb==Bytes({20,40,210}),
+            "line 2 matching plane did not present cleanly");
+
+        // Advance into PREPAREOVERRAP + OVERLAP (to tiny_green 0,255,0) with ZERO OverlapCapture callback:
+        // Wipe frame 0 must start strictly from S_clean = (20,40,210)!
+        require(game->step_frame(16,tap).wait==scene::Wait::Overlap,"did not enter overlap");
+        require(compositor->present(*game,false,true,submit)==Outcome::Presented &&
+            submitted.rgb==Bytes({20,40,210}),
+            "OVERLAP frame 0 did not start from S_clean=(20,40,210)");
+
+        // Concurrent producer/consumer + post-close detached token UAF safety.
+        std::thread producer([token=ui_token,key2]{
+            for (int i=0;i<64;++i) {
+                const std::array<Byte,4> px{static_cast<Byte>(i),10,20,255};
+                auto k=key2;k[5]=i;
+                token->push(px.data(),4,1,1,k,true);
+            }
+        });
+        for (int i=0;i<16;++i) (void)compositor->present(*game,false,true,submit);
+        producer.join();
+
+        // Simulate FN(close): detach mailbox and destroy GameSession + StoryCompositor while UI retains ui_token.
+        ui_token->set_attached(false);
+        compositor.reset();
+        game.reset();
+        std::thread late_ui([token=ui_token,key2]{
+            const std::array<Byte,4> px{99,88,77,255};
+            token->push(px.data(),4,1,1,key2,true);
+            token->push(nullptr,0,0,0,key2,false);
+        });
+        late_ui.join();
+        require(!ui_token->attached() && !ui_token->snapshot().has_plane,
+            "detached PlaneMailbox retained pixels or attached state after close");
+    });
+    suite.test("Single-pass StoryCompositor + PlaneMailbox acceptance on local DeadEndAegis [zh] and [zht]",[]{
+        const std::filesystem::path dea_root="/mnt/c/Users/a7188/Desktop/\xe9\xad\x94\xe6\xb3\x95\xe5\xb0\x91\xe5\xa5\xb3\xe6\xb6\x88\xe8\x80\x97\xe6\x88\x98\xe7\xba\xbf \xe6\xad\xbb\xe7\xbb\x88\xce\xa9\xe7\xa5\x9e\xe7\x9b\xbe";
+        for (const char* edition:{"DeadEndAegis [zh]","DeadEndAegis [zht]"}) {
+            const auto game_dir=dea_root/edition;
+            if (!std::filesystem::exists(game_dir/"init/game.xtx")) continue;
+            scene::SessionOptions options;
+            options.audio.enabled=false;
+            options.queue_audio_events=false;
+            scene::GameSession game(game_dir,options);
+            const auto cfg=game.shared_config_snapshot();
+            require(cfg.render_layer_count==32 && cfg.screen_width==1280 && cfg.screen_height==720,
+                std::string(edition)+": expected 32-layer 1280x720 configuration");
+
+            scene::StoryCompositor compositor;
+            auto mailbox=compositor.mailbox();
+            mailbox->set_attached(true);
+            emberfall::render::Surface last_frame;
+            const auto submit=[&](const emberfall::render::Surface& s){
+                last_frame=s;
+                return true;
+            };
+
+            scene::InputState input;
+            input.play_movies=false;
+            bool reached_dialogue=false;
+            for (int step=0;step<240;++step) {
+                const auto& st=game.step_frame(16,input);
+                input.advance=(st.wait==scene::Wait::Draw || st.wait==scene::Wait::Overlap);
+                if (st.wait==scene::Wait::Dialogue) {
+                    reached_dialogue=true;
+                    break;
+                }
+                (void)compositor.present(game,step==0,true,submit);
+            }
+            require(reached_dialogue,std::string(edition)+": dea_00_00 did not reach first dialogue line");
+
+            const auto expected_key=game.expected_plane_key();
+            const unsigned w=static_cast<unsigned>(cfg.screen_width);
+            const unsigned h=static_cast<unsigned>(cfg.screen_height);
+            std::vector<Byte> ui_rgba(std::size_t{w}*h*4,0);
+            // Paint an opaque UI marker strip near bottom-center (x=640, y=660).
+            const std::size_t marker_px=(std::size_t{660}*w+640)*4;
+            ui_rgba[marker_px]=12;ui_rgba[marker_px+1]=234;ui_rgba[marker_px+2]=56;ui_rgba[marker_px+3]=255;
+            mailbox->push(ui_rgba.data(),std::size_t{w}*4,w,h,expected_key,true);
+
+            const auto outcome=compositor.present(game,true,true,submit);
+            require(outcome==scene::StoryCompositor::PresentOutcome::Presented &&
+                compositor.skipped_ticks()==0 &&
+                compositor.presented_plane_key()==expected_key,
+                std::string(edition)+": single-pass StoryCompositor failed to present dialogue frame");
+
+            const std::size_t rgb_idx=(std::size_t{660}*w+640)*3;
+            const auto& clean_scene=game.scene_surface();
+            require(last_frame.width==w && last_frame.height==h && clean_scene.width==w && clean_scene.height==h,
+                std::string(edition)+": unexpected surface dimensions");
+            // Unless Slot 31 opaque pixel covers (640,660), composed frame shows UI marker while scene_surface does not.
+            const auto& slot31=game.layers()[31];
+            if (!slot31.enabled) {
+                require(last_frame.rgb[rgb_idx]==12 && last_frame.rgb[rgb_idx+1]==234 && last_frame.rgb[rgb_idx+2]==56 &&
+                    (clean_scene.rgb[rgb_idx]!=12 || clean_scene.rgb[rgb_idx+1]!=234 || clean_scene.rgb[rgb_idx+2]!=56),
+                    std::string(edition)+": UI marker missing from composed frame or leaked into scene_surface");
+            }
+
+            // Native snapshot_version=16 and PC .sav export remain 100% intact.
+            const auto snap=game.snapshot();
+            require(!snap.empty(),std::string(edition)+": snapshot() returned empty bytes");
+            const auto sav=game.export_pc_save();
+            const auto preview=scene::GameSession::inspect_pc_save(sav,256*1024);
+            require(preview.width>0 && preview.height>0 &&
+                preview.pixels.size()==static_cast<std::size_t>(preview.width)*static_cast<std::size_t>(preview.height),
+                std::string(edition)+": PC .sav MINICG export failed");
+        }
     });
     std::cout<<"SCENE RESULT "<<suite.passed<<" passed, "<<suite.failed<<" failed\n";return suite.failed==0?0:1;
 }

@@ -124,9 +124,11 @@ struct SessionStats {
     std::size_t draws=0, overlaps=0, choices=0, file_transfers=0, audio_events=0, cg_unlocks=0;
 };
 struct ScriptRestrictions { int auto_message=0, cannot_click=0, cannot_skip=0, option_off=0; };
+using PlaneKey=std::array<std::int32_t,6>;
 
 class GameSession {
 public:
+    using PlaneKey=emberfall::scene::PlaneKey;
     struct RuntimeRef {
         std::shared_ptr<nnn::RuntimeContext> runtime;
         std::shared_ptr<const pc::DirectorySaveLayout> save_layout;
@@ -173,6 +175,13 @@ public:
     bool restore_backlog_jump(std::uint64_t id,unsigned journal_cursor);
     void trim_replayed_backlog(unsigned keep);
     const render::Surface& surface();
+    const render::Surface& scene_surface();
+    void set_message_plane(std::shared_ptr<const render::MessagePlane> plane);
+    void clear_message_plane() noexcept;
+    bool needs_message_plane() const noexcept;
+    PlaneKey expected_plane_key() const noexcept;
+    void after_present();
+    const render::Surface& presented_surface() const noexcept;
     bool screen_layer_active() const;
     bool story_draws_screen_layer() const;
     std::uint64_t screen_layer_revision() const;

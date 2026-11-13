@@ -56,6 +56,15 @@ struct ChartLayerScratch {
     Surface frame;
 };
 
+// Logical-resolution premultiplied RGBA8 UI plane for single-pass Story composition
+// (Layers 0..N-2 -> optional C++ LPrintBG backdrop -> MessagePlane -> Layer Slot N-1).
+struct MessagePlane {
+    unsigned width=0,height=0;
+    std::size_t stride=0;
+    std::vector<Byte> rgba;
+    bool show_backdrop=true;
+};
+
 // A detached frame for a host that draws its message UI between the scene and
 // the last script layer. The host supplies a premultiplied RGBA message plane.
 class ScreenLayerFrame {
@@ -104,6 +113,16 @@ public:
     unsigned height() const noexcept { return output_.height; }
     unsigned layer_count() const noexcept { return screen_slot_+1; }
     const Surface& surface();
+    const Surface& scene_surface();
+    void set_message_plane(std::shared_ptr<const MessagePlane> plane,OverlapDecoration backdrop={},
+                           bool draw_screen_slot=true);
+    void clear_message_plane() noexcept;
+    bool message_plane_active() const noexcept { return message_plane_active_; }
+    void after_present();
+    void set_presented_solid(Byte r,Byte g,Byte b);
+    void clear_presented() noexcept { presented_={}; }
+    const Surface& presented_surface() const noexcept { return presented_; }
+    bool has_last_decorated_endpoint() const noexcept { return !last_decorated_endpoint_.rgb.empty(); }
     bool screen_layer_active() const noexcept;
     void capture_screen_layer(bool enable,OverlapDecoration backdrop={});
     std::unique_ptr<ScreenLayerFrame> take_screen_layer() noexcept { return std::move(screen_layer_); }
@@ -122,8 +141,8 @@ public:
                               unsigned raster_width=0,unsigned raster_height=0);
     std::uint64_t composition_revision() const noexcept { return revision_; }
     void saved_screen(Surface frame,bool background=false);
-    bool needs_redraw() const noexcept { return dirty_ || output_changed_; }
-    void hide_layers(std::uint32_t mask) noexcept { hidden_=mask; dirty_=true; }
+    bool needs_redraw() const noexcept { return dirty_ || story_dirty_ || output_changed_; }
+    void hide_layers(std::uint32_t mask) noexcept { hidden_=mask; invalidate(); }
     void animation_textures(TextureReader reader) { animation_textures_=std::move(reader); ++revision_; }
     void set_animation_off(bool off) noexcept { animation_off_=off; invalidate(); }
     void set_speaking(bool value) noexcept;
@@ -142,12 +161,19 @@ private:
     std::array<Layer,32> slots_;
     TextureReader animation_textures_;
     Surface output_, previous_, target_, saved_, overlap_display_, last_decorated_endpoint_;
+    Surface scene_base_, story_output_, presented_;
+    std::shared_ptr<const MessagePlane> message_plane_;
+    OverlapDecoration message_backdrop_;
     std::uint32_t overlap_time_ = 0, overlap_count_ = 0;
     int overlap_type_=0;
     unsigned screen_slot_=31;
     std::uint32_t hidden_ = 0;
     std::uint64_t revision_=0;
     bool dirty_ = true;
+    bool story_dirty_ = false;
+    bool message_plane_active_ = false;
+    bool message_draw_screen_slot_ = true;
+    bool slot_last_once_before_ = false;
     bool has_rendered_ = false;
     bool saved_background_ = false;
     bool animation_off_ = false, speaking_ = false;
@@ -159,5 +185,6 @@ private:
     bool output_changed_ = false;
     void invalidate() noexcept { dirty_=true; ++revision_; }
     void compose(Surface& out,const OverlapDecoration& decorate={});
+    void compose_story(bool rebuild_scene);
 };
 } // namespace emberfall::render

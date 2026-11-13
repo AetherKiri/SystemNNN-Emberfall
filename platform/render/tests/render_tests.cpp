@@ -1481,5 +1481,114 @@ int main() {
         require(layers.surface().rgb==std::vector<Byte>({0,64,0}));
     }
     geometry_effects();animation_effects();condensation_effect();
+    for (const unsigned layer_count : {16U,32U}) {
+        const unsigned sprite_slot=layer_count-3U,last=layer_count-1U;
+        Layers layers(2,1,layer_count);
+        auto bg=std::make_shared<Texture>();
+        bg->canvas_width=2;bg->canvas_height=1;bg->content={0,0,2,1};
+        bg->pixels={2,1,{200,0,0,255, 200,0,0,255}};
+        auto mid=std::make_shared<Texture>();
+        mid->canvas_width=2;mid->canvas_height=1;mid->content={0,0,2,1};
+        mid->has_mask=true;
+        mid->pixels={2,1,{0,0,200,255, 0,0,0,0}};
+        auto fg=std::make_shared<Texture>();
+        fg->canvas_width=2;fg->canvas_height=1;fg->content={0,0,2,1};
+        fg->has_mask=true;
+        fg->pixels={2,1,{255,255,0,255, 0,0,0,0}};
+
+        layers.bind(0,bg,false);require(layers.effect(0,0,{}));
+        layers.bind(sprite_slot,mid,false);require(layers.effect(sprite_slot,0,{}));
+        layers.bind(last,fg,false);require(layers.effect(last,0,{}));
+
+        auto plane=std::make_shared<MessagePlane>();
+        plane->width=2;plane->height=1;plane->stride=8;plane->show_backdrop=true;
+        // Premultiplied green (0,120,0,128) across both pixels.
+        plane->rgba={0,120,0,128, 0,120,0,128};
+        layers.set_message_plane(plane,[](Surface& s) {
+            for (auto& ch : s.rgb) ch=static_cast<Byte>(ch/2U);
+        },true);
+
+        // Pixel 0: Slot 0..N-2 gives (0,0,200) -> backdrop -> (0,0,100) -> UI plane ->
+        //   occluded by opaque Slot N-1 fg (255,255,0)!
+        // Pixel 1: Slot 0..N-2 gives (200,0,0) -> backdrop -> (100,0,0) -> UI plane ->
+        //   R=0+(100*127+127)/255=50, G=120+0=120, B=0; Slot N-1 transparent -> (50,120,0)!
+        const auto composed=layers.surface().rgb;
+        require(composed==std::vector<Byte>({255,255,0, 50,120,0}));
+
+        // scene_surface() returns pure 0..N-1 without backdrop or UI plane:
+        // Pixel 0 has Slot N-1 (255,255,0); Pixel 1 has Slot 0 (200,0,0).
+        require(layers.scene_surface().rgb==std::vector<Byte>({255,255,0, 200,0,0}));
+
+        // SELECTMESSAGE backPrintMode != 2 omits Slot N-1 above UI plane:
+        layers.set_message_plane(plane,[](Surface& s) {
+            for (auto& ch : s.rgb) ch=static_cast<Byte>(ch/2U);
+        },false);
+        // Pixel 0 now keeps (0,0,100) blended with (0,120,0,128) -> (0,120,50).
+        require(layers.surface().rgb==std::vector<Byte>({0,120,50, 50,120,0}));
+
+        // EFFECT_GET (73) in Slot N-1 captures 0..N-2 + backdrop + MessagePlane in ONE pass:
+        Layers get_layers(1,1,layer_count);
+        require(get_layers.effect(0,54,{0,100,0,0}));
+        require(get_layers.effect(last,73,{}));
+        auto ui1=std::make_shared<MessagePlane>();
+        ui1->width=1;ui1->height=1;ui1->stride=4;ui1->rgba={0,100,0,255};
+        get_layers.set_message_plane(ui1);
+        require(get_layers.surface().rgb==std::vector<Byte>({0,100,0}));
+        get_layers.clear_message_plane();
+        get_layers.clear(0);
+        get_layers.clear(last);
+        // Effect 2 with param[4]=1 draws saved_ captured by EFFECT_GET (73).
+        require(get_layers.effect(0,2,{1,100,100,0,1}));
+        require(get_layers.surface().rgb==std::vector<Byte>({0,100,0}));
+    }
+    {
+        // Physical invariant 1: previous_ == S_clean (from after_present), immune to
+        // unpresented intermediate surface() reads, plus set_presented_solid for movies.
+        Layers layers(1,1,16);
+        require(layers.effect(0,54,{0,40,0,0}));
+        auto plane=std::make_shared<MessagePlane>();
+        plane->width=1;plane->height=1;plane->stride=4;plane->rgba={0,200,0,255};
+        layers.set_message_plane(plane);
+        require(layers.surface().rgb==std::vector<Byte>({0,200,0}));
+        layers.after_present();
+
+        // Mutate scene and read surface() WITHOUT after_present(); S_clean must stay (0,200,0)!
+        layers.clear_message_plane();
+        require(layers.effect(0,54,{0,0,0,180}));
+        require(layers.surface().rgb==std::vector<Byte>({0,0,180}));
+
+        require(layers.effect(0,54,{0,100,0,0}));
+        layers.prepare_overlap();
+        require(layers.start_overlap(2));
+        require(layers.surface().rgb==std::vector<Byte>({0,200,0}));
+        layers.advance(1);
+        require(layers.surface().rgb==std::vector<Byte>({50,100,0}));
+        layers.advance(1);
+        require(layers.surface().rgb==std::vector<Byte>({100,0,0}));
+
+        // Movie exit solid screen seeds S_clean directly:
+        layers.set_presented_solid(12,34,56);
+        require(layers.effect(0,54,{0,112,134,156}));
+        layers.prepare_overlap();
+        require(layers.start_overlap(2));
+        require(layers.surface().rgb==std::vector<Byte>({12,34,56}));
+    }
+    {
+        // Physical invariant 2: surface() preserves last_decorated_endpoint_ until after_present().
+        Layers layers(1,1,16);
+        require(layers.effect(0,54,{0,64,0,0}));
+        require(layers.start_overlap(1,0,[](Surface& frame) { frame.rgb={10,80,90}; }));
+        layers.advance(1);
+        require(layers.surface().rgb==std::vector<Byte>({10,80,90}));
+        layers.resume_overlap_scene();
+        require(layers.has_last_decorated_endpoint());
+        // Thumbnail / inspection reads via surface() must NOT clear last_decorated_endpoint_!
+        require(layers.surface().rgb==std::vector<Byte>({64,0,0}));
+        require(layers.has_last_decorated_endpoint());
+        // Actual presentation clears last_decorated_endpoint_ and locks presented_.
+        layers.after_present();
+        require(!layers.has_last_decorated_endpoint());
+        require(layers.presented_surface().rgb==std::vector<Byte>({64,0,0}));
+    }
     std::printf("PASS compositor: %u assertions\n", checks);
 }

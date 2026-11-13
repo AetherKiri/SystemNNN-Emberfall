@@ -346,7 +346,13 @@ void Layers::clear(unsigned slot) {
     l={}; l.source=l.from=l.to={0,0,static_cast<int>(output_.width),static_cast<int>(output_.height)};
     invalidate();
 }
-void Layers::clear_all() { for (unsigned i=0;i<slots_.size();++i) clear(i); }
+void Layers::clear_all() {
+    for (unsigned i=0;i<slots_.size();++i) clear(i);
+    scene_base_={};
+    story_output_={};
+    presented_={};
+    last_decorated_endpoint_={};
+}
 void Layers::bind(unsigned slot,std::shared_ptr<const Texture> texture,bool preload) {
     auto& l=slots_.at(slot);
     if (l.effect==97 && l.effect_state && (l.texture!=texture || arg(l,8)!=0))
@@ -458,6 +464,21 @@ bool keeps_once_pixels(const std::array<Layer,32>& layers,std::uint32_t hidden,u
     }
     return false;
 }
+void blend_message_plane(Surface& out,const Byte* pixels,std::size_t stride) {
+    for (unsigned y=0;y<out.height;++y) {
+        const auto* overlay=pixels+std::size_t{y}*stride;
+        auto* dst=out.rgb.data()+std::size_t{y}*out.width*3;
+        for (unsigned x=0;x<out.width;++x,overlay+=4,dst+=3) {
+            const unsigned alpha=overlay[3];
+            if (alpha==255U) std::copy_n(overlay,3,dst);
+            else if (alpha!=0U) {
+                const unsigned remain=255U-alpha;
+                for (unsigned c=0;c<3;++c)
+                    dst[c]=static_cast<Byte>(std::min(255U,overlay[c]+(dst[c]*remain+127U)/255U));
+            }
+        }
+    }
+}
 }
 bool Layers::screen_layer_active() const noexcept {
     const auto& layer=slots_[screen_slot_];
@@ -520,6 +541,73 @@ void ScreenLayerFrame::composite(Byte* pixels,std::size_t stride,bool show_backd
             std::copy_n(rgb,3,row);
             row[3]=255;
         }
+    }
+}
+
+void Layers::set_message_plane(std::shared_ptr<const MessagePlane> plane,OverlapDecoration backdrop,
+                               bool draw_screen_slot) {
+    const bool had_backdrop=static_cast<bool>(message_backdrop_);
+    const bool has_backdrop=static_cast<bool>(backdrop);
+    const bool changed=!message_plane_active_ || message_plane_!=plane ||
+        had_backdrop || has_backdrop || message_draw_screen_slot_!=draw_screen_slot;
+    message_plane_=std::move(plane);
+    message_backdrop_=std::move(backdrop);
+    message_draw_screen_slot_=draw_screen_slot;
+    if (!message_plane_active_) {
+        message_plane_active_=true;
+        if (scene_base_.rgb.empty() && !overlapping()) dirty_=true;
+        story_dirty_=true;
+        ++revision_;
+    } else if (changed) {
+        story_dirty_=true;
+        ++revision_;
+    }
+}
+
+void Layers::clear_message_plane() noexcept {
+    if (!message_plane_active_) return;
+    message_plane_.reset();
+    message_backdrop_={};
+    message_plane_active_=false;
+    message_draw_screen_slot_=true;
+    story_dirty_=false;
+    output_changed_=true;
+    ++revision_;
+}
+
+void Layers::compose_story(bool rebuild_scene) {
+    const auto last=screen_slot_;
+    const bool draw_last=!(hidden_&(std::uint32_t{1}<<last));
+    if (rebuild_scene) {
+        if (saved_background_ && !saved_.rgb.empty()) output_=saved_;
+        else if (!keeps_once_pixels(slots_,hidden_,last)) std::fill(output_.rgb.begin(),output_.rgb.end(),0);
+        for (unsigned i=0;i<last;++i)
+            if (!(hidden_&(std::uint32_t{1}<<i)))
+                draw(output_,slots_,i,last,saved_,saved_,animation_textures_,animation_off_,speaking_);
+        screen_layer_.reset();
+        scene_base_=output_;
+        slot_last_once_before_=slots_[last].effect_state && slots_[last].effect_state->once_drawn;
+        if (draw_last) {
+            const auto& layer=slots_[last];
+            if (layer.effect==73) draw_capture_picture(output_,layer);
+            else draw(output_,slots_,last,last,saved_,saved_,animation_textures_,animation_off_,speaking_);
+            if (layer.effect_state) layer.effect_state->once_drawn=slot_last_once_before_;
+        }
+    }
+    story_output_=scene_base_;
+    if ((!message_plane_ || message_plane_->show_backdrop) && message_backdrop_)
+        message_backdrop_(story_output_);
+    if (message_plane_ && !message_plane_->rgba.empty()) {
+        if (message_plane_->width!=width() || message_plane_->height!=height() ||
+            message_plane_->stride<std::size_t{width()}*4 ||
+            message_plane_->rgba.size()<std::size_t{height()-1U}*message_plane_->stride+std::size_t{width()}*4)
+            throw std::invalid_argument("Invalid message plane dimensions");
+        blend_message_plane(story_output_,message_plane_->rgba.data(),message_plane_->stride);
+    }
+    if (draw_last && message_draw_screen_slot_) {
+        const auto& layer=slots_[last];
+        if (layer.effect_state) layer.effect_state->once_drawn=slot_last_once_before_;
+        draw(story_output_,slots_,last,last,saved_,saved_,animation_textures_,animation_off_,speaking_);
     }
 }
 
@@ -711,7 +799,12 @@ bool Layers::draw_chart_composite(unsigned center,ChartLayerSource base,ChartLay
 }
 void Layers::saved_screen(Surface frame,bool background) {
     commit_screen_capture(std::move(frame));
-    saved_background_=background; invalidate();
+    saved_background_=background;
+    scene_base_={};
+    story_output_={};
+    presented_={};
+    last_decorated_endpoint_={};
+    invalidate();
 }
 void Layers::commit_screen_capture(Surface frame) {
     if (frame.width!=output_.width || frame.height!=output_.height || frame.rgb.size()!=output_.rgb.size())
@@ -764,11 +857,16 @@ void Layers::advance(std::uint32_t frames,Point cursor) {
 }
 void Layers::prepare_overlap(const OverlapCapture& capture) {
     // PREPAREOVERRAP captures the outgoing frame before pending layer changes
-    // are drawn. The host may have displayed new text over the same native scene.
+    // are drawn. When explicit present tracking is active, previous_ comes
+    // strictly from the last actually presented frame (S_clean).
     const auto& scene=!has_rendered_ && saved_background_ && !saved_.rgb.empty() ? saved_ : output_;
     const auto& endpoint=!overlapping() && has_overlap_decoration() && !output_changed_
         ? overlap_display_ : last_decorated_endpoint_;
     if (!capture || scene.rgb.empty()) {
+        if (!presented_.rgb.empty()) {
+            previous_=presented_;
+            return;
+        }
         previous_=endpoint.rgb.empty() ? scene : endpoint;
         return;
     }
@@ -778,6 +876,7 @@ void Layers::prepare_overlap(const OverlapCapture& capture) {
 bool Layers::start_overlap(std::uint32_t frames,int type,const OverlapDecoration& decorate,
                            const OverlapCapture& capture) {
     if (frames && previous_.rgb.empty()) prepare_overlap(capture);
+    last_decorated_endpoint_={};
     overlap_display_={};
     compose(target_,decorate); overlap_time_=frames; overlap_count_=0; invalidate();
     const bool supported=supports_wipe(type);
@@ -787,6 +886,7 @@ bool Layers::start_overlap(std::uint32_t frames,int type,const OverlapDecoration
 }
 void Layers::finish_overlap() {
     if (!target_.rgb.empty()) { output_=std::move(target_); output_changed_=true; }
+    scene_base_={}; story_output_={}; presented_={};
     previous_={}; target_={}; overlap_time_=overlap_count_=0; overlap_type_=0; dirty_=false; ++revision_;
 }
 void Layers::resume_overlap_scene() {
@@ -908,21 +1008,75 @@ void Layers::load_snapshot(nnn::snapshot::Reader& in,const std::function<std::sh
     if (decorated_overlap) read_surface(overlap_display_,false,false);
     if (inspect) return;
     std::fill(slots_.begin()+layer_count(),slots_.end(),Layer{});
+    scene_base_={};
+    story_output_={};
+    presented_={};
     last_decorated_endpoint_={};
     has_rendered_=!rendered.rgb.empty();
     if (!has_rendered_) dirty_=true;
     else output_=std::move(rendered);
+    if (message_plane_active_) story_dirty_=true;
     output_changed_=true; ++revision_;
 }
 const Surface& Layers::surface() {
     output_changed_=false;
-    last_decorated_endpoint_={};
     has_rendered_=true;
     if (!overlapping() && has_overlap_decoration()) return overlap_display_;
-    if (!dirty_) return output_;
-    if (!overlapping()) compose(output_);
-    else draw_wipe(output_,previous_,has_overlap_decoration()?overlap_display_:target_,overlap_type_,overlap_count_,overlap_time_);
-    dirty_=false;
+    if (overlapping()) {
+        if (dirty_) {
+            draw_wipe(output_,previous_,has_overlap_decoration()?overlap_display_:target_,overlap_type_,overlap_count_,overlap_time_);
+            dirty_=false;
+        }
+        return output_;
+    }
+    if (!message_plane_active_) {
+        if (dirty_) {
+            compose(output_);
+            dirty_=false;
+        }
+        return output_;
+    }
+    if (dirty_ || scene_base_.rgb.empty()) {
+        compose_story(true);
+        dirty_=false;
+        story_dirty_=false;
+    } else if (story_dirty_ || story_output_.rgb.empty()) {
+        compose_story(false);
+        story_dirty_=false;
+    }
+    return story_output_;
+}
+const Surface& Layers::scene_surface() {
+    has_rendered_=true;
+    if (!overlapping() && has_overlap_decoration()) return overlap_display_;
+    if (dirty_) {
+        if (overlapping()) {
+            draw_wipe(output_,previous_,has_overlap_decoration()?overlap_display_:target_,overlap_type_,overlap_count_,overlap_time_);
+            dirty_=false;
+        } else if (message_plane_active_) {
+            compose_story(true);
+            dirty_=false;
+            story_dirty_=false;
+        } else {
+            compose(output_);
+            dirty_=false;
+        }
+    }
     return output_;
+}
+void Layers::after_present() {
+    presented_=surface();
+    last_decorated_endpoint_={};
+}
+void Layers::set_presented_solid(Byte r,Byte g,Byte b) {
+    presented_.width=width();
+    presented_.height=height();
+    presented_.rgb.resize(output_.rgb.size());
+    for (std::size_t i=0;i<presented_.rgb.size();i+=3) {
+        presented_.rgb[i]=r;
+        presented_.rgb[i+1]=g;
+        presented_.rgb[i+2]=b;
+    }
+    last_decorated_endpoint_={};
 }
 } // namespace emberfall::render
