@@ -257,6 +257,9 @@ public:
     static void inspect_snapshot(nnn::snapshot::Reader& in,const std::function<bool(const FrameState&)>& verify={});
     // Import uses a staged owner and commits only a fully validated PC slot.
     void restore_pc_save(const std::vector<nnn::Byte>& bytes);
+    // A host that already constructed a private load candidate can use it
+    // directly. Discard that candidate if loading throws.
+    void load_pc_save_candidate(const std::vector<nnn::Byte>& bytes);
     struct PcSaveLayout {
         enum class Source { GameFiles=0, Executable=2 }; // Values used by Android debug metadata.
         unsigned render_layers=0, layer_limit=0, layer_records=0;
@@ -347,6 +350,7 @@ public:
     int year_variable_index() const noexcept;
     int date_variable_index() const noexcept;
     std::vector<nnn::Byte> export_pc_save(const std::vector<std::uint32_t>& pixels={}, int width=0, int height=0);
+    std::vector<nnn::Byte> export_presented_pc_save();
     nnn::Value save_slot_art() const;
     void restore_snapshot(const nnn::snapshot::Bytes& bytes,const std::function<bool(const FrameState&)>& verify={},
                           bool keep_music_position=false,bool migrate_legacy_system_variables=false,bool restart_music=false);

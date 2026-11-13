@@ -1923,6 +1923,29 @@ int main(){
             return message.find("PC save audio: Missing WGQ segment: missing_intro")!=std::string::npos;
         }),"missing BGM was not recorded");
     });
+    suite.test("A private PC load candidate reuses its initialized session and isolates rejection",[]{
+        Model model;model.message=true;model.code.print(1);model.code.print(2);model.code.end();
+        TempGame temp(model);
+        const auto options=test_options();
+        scene::GameSession live(temp.root,options);
+        const auto first=live.step_frame(0);
+        const auto slot=live.export_pc_save();
+        scene::InputState advance;advance.advance=true;
+        require(live.step_frame(0,advance).dialogue.sequence==2,"fixture did not leave its saved position");
+        auto candidate_options=options;
+        candidate_options.runtime=live.runtime()->fork();
+        scene::GameSession candidate(temp.root,candidate_options);
+        const auto owner=candidate.runtime();
+        candidate.load_pc_save_candidate(slot);
+        require(candidate.runtime()==owner && candidate.state().wait==scene::Wait::Dialogue &&
+            candidate.state().dialogue.raw_bytes==first.dialogue.raw_bytes &&
+            candidate.state().dialogue.message_id==first.dialogue.message_id &&
+            live.state().dialogue.sequence==2,"the staged import rebuilt the runtime or changed the live session");
+        bool rejected=false;
+        try { live.load_pc_save_candidate(slot); }
+        catch (const std::runtime_error&) { rejected=true; }
+        require(rejected && live.state().dialogue.sequence==2,"in-place candidate loading accepted an active session");
+    });
     suite.test("backlog jump validates the cursor and truncates future dialogue",[]{
         Model model;model.message=true;model.code.print(1);model.code.print(2);model.code.end();
         TempGame temp(model);temp.text("init/game.xtx","JumpFlag 1\n");
@@ -3769,6 +3792,30 @@ int main(){
         require(game.surface().rgb==Bytes({12,34,56}),"temporary cleanup erased the movie exit frame before capture");
         }
     });
+    suite.test("PlaneMailbox replaces, removes and resizes the floating plane",[]{
+        scene::PlaneMailbox mailbox;
+        mailbox.set_attached(true);
+        const scene::PlaneKey key{};
+        const std::array<Byte,16> rgba{};
+        const std::array<Byte,8> first{20,30,40,255, 50,60,70,255};
+        const std::array<Byte,8> second{80,90,100,255, 110,120,130,255};
+        mailbox.push(rgba.data(),8,2,1,key,true,first.data(),8);
+        mailbox.push(rgba.data(),8,2,1,key,true,second.data(),8);
+        mailbox.push(rgba.data(),8,2,1,key,true,first.data(),8);
+        require(mailbox.snapshot().plane->floating_rgba==Bytes(first.begin(),first.end()),
+            "replacement kept old floating pixels");
+        mailbox.push(rgba.data(),8,2,1,key,true);
+        require(mailbox.snapshot().plane->floating_rgba.empty(),"removed floating plane kept pixels");
+
+        const std::array<Byte,16> padded{1,2,3,255, 99,99,99,99, 4,5,6,255, 88,88,88,88};
+        mailbox.push(rgba.data(),4,1,2,key,true,padded.data(),8);
+        require(mailbox.snapshot().plane->floating_rgba==Bytes({1,2,3,255,4,5,6,255}),
+            "restored floating plane included stride padding");
+        mailbox.push(rgba.data(),8,2,2,key,true,rgba.data(),8);
+        const auto resized=mailbox.snapshot().plane;
+        require(resized->width==2 && resized->height==2 && resized->floating_rgba==Bytes(rgba.begin(),rgba.end()),
+            "resized floating plane kept stale pixels or dimensions");
+    });
     suite.test("StoryCompositor retains complete frames for late UI, wakes on revisions, and captures clean wipes",[]{
         constexpr Word prepare_overlap_fn=0x33330011U,overlap_cmd=0x22220005U;
         Model model;
@@ -3849,7 +3896,7 @@ int main(){
         // .sav MINICG captures composed frame (0,220,40) while scene_surface() keeps pure (255,0,0).
         require(game->scene_surface().rgb==Bytes({255,0,0}),
             "scene_surface() was polluted by UI message plane");
-        const auto pc_sav=game->export_pc_save();
+        const auto pc_sav=game->export_presented_pc_save();
         const auto sav_preview=scene::GameSession::inspect_pc_save(pc_sav,64*1024);
         require(!sav_preview.pixels.empty() && sav_preview.pixels[0]==0xff00dc28U &&
             sav_preview.pixels.back()==0xff00dc28U,
@@ -3862,6 +3909,10 @@ int main(){
         const auto key2=game->expected_plane_key();
         require(!scene::scene_plane_key_matches(key1_substate,key2) && key2[1]==2,
             "line 2 did not advance expected_plane_key sequence");
+        const auto before_pending_save=game->snapshot();
+        const auto pending_save=scene::GameSession::inspect_pc_save(game->export_presented_pc_save(),64*1024);
+        require(!pending_save.pixels.empty() && pending_save.pixels[0]==0xff000000U &&
+            game->snapshot()==before_pending_save,"unpresented save reused a stale thumbnail or changed the scene");
         require(compositor->present(*game,false,true,submit)==Outcome::SkippedPending &&
             compositor->skipped_ticks()==1,
             "line 2 tick 1 did not skip stale line 1 UI plane");
@@ -3881,7 +3932,7 @@ int main(){
             "line 2 matching plane did not present cleanly");
         require(game->surface().rgb==Bytes({20,40,210}),
             "floating cursor leaked into the clean capture frame");
-        const auto clean_preview=scene::GameSession::inspect_pc_save(game->export_pc_save(),64*1024);
+        const auto clean_preview=scene::GameSession::inspect_pc_save(game->export_presented_pc_save(),64*1024);
         require(!clean_preview.pixels.empty() && clean_preview.pixels[0]==0xff1428d2U,
             "save preview captured display-only floating controls");
         require(compositor->present(*game,true,true,submit)==Outcome::Presented &&
