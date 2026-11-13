@@ -3532,7 +3532,7 @@ int main(){
             gated.audio().state().bgm.name=="second",
             "AdjustLoadBGM did not remap after SetVarByLoad restored non-zero gate variable");
     });
-    suite.test("StoryCompositor enforces R1 2-tick skip cap, 3rd-tick logged fallback, 0-skip revision wakeup, S_clean wipe, and detached PlaneMailbox safety",[]{
+    suite.test("StoryCompositor retains complete frames for late UI, wakes on revisions, and captures clean wipes",[]{
         constexpr Word prepare_overlap_fn=0x33330011U,overlap_cmd=0x22220005U;
         Model model;
         model.extra_messages={"First line","Second line"};
@@ -3582,21 +3582,17 @@ int main(){
         require(compositor->present(*game,false,true,submit)==Outcome::SkippedPending &&
             compositor->skipped_ticks()==2 && submit_count==0 && warnings.empty(),
             "tick 2 should skip pending UI plane");
-        // Tick 3 hits the 2-tick cap, logs fallback once, and presents clean scene (255,0,0) without blocking.
-        require(compositor->present(*game,false,true,submit)==Outcome::Presented &&
-            submit_count==1 && warnings.size()==1 &&
-            submitted.rgb==Bytes({255,0,0}),
-            "tick 3 did not log fallback and present clean scene");
-        // Tick 4 with static scene and still no UI plane stays Idle without spamming logs or submits.
-        require(compositor->present(*game,false,true,submit)==Outcome::Idle &&
-            submit_count==1 && warnings.size()==1,
-            "tick 4 should remain idle when nothing changed after fallback");
+        // The warning threshold never authorizes a bare scene or a false ack.
+        for (unsigned tick=0;tick<60;++tick)
+            require(compositor->present(*game,false,true,submit)==Outcome::SkippedPending &&
+                submit_count==0 && warnings.size()==1 && compositor->presented_plane_key()==scene::PlaneKey{},
+                "late UI exposed an incomplete frame or generated repeated warnings");
 
         // UI pushes Line 1 plane (0,180,0,255): immediate 0-skip wakeup!
         const std::array<Byte,4> green_ui{0,180,0,255};
         ui_token->push(green_ui.data(),4,1,1,key1,true);
         require(compositor->present(*game,false,true,submit)==Outcome::Presented &&
-            compositor->skipped_ticks()==0 && submit_count==2 &&
+            compositor->skipped_ticks()==0 && submit_count==1 &&
             submitted.rgb==Bytes({0,180,0}) &&
             compositor->presented_plane_key()==key1,
             "matching UI plane did not wake up with 0 skips");
@@ -3608,7 +3604,7 @@ int main(){
         ui_token->push(teal_ui.data(),4,1,1,key1_substate,true);
         require(!game->needs_redraw(),"static scene should not need C++ layer redraw");
         require(compositor->present(*game,false,true,submit)==Outcome::Presented &&
-            compositor->skipped_ticks()==0 && submit_count==3 &&
+            compositor->skipped_ticks()==0 && submit_count==2 &&
             submitted.rgb==Bytes({0,220,40}) &&
             compositor->presented_plane_key()[5]==((1<<16)|3),
             "same-key revision/ui_state update did not present with 0 skips");
@@ -3632,12 +3628,17 @@ int main(){
         require(compositor->present(*game,false,true,submit)==Outcome::SkippedPending &&
             compositor->skipped_ticks()==1,
             "line 2 tick 1 did not skip stale line 1 UI plane");
+        for (unsigned tick=0;tick<60;++tick)
+            require(compositor->present(*game,false,true,submit)==Outcome::SkippedPending &&
+                submit_count==2 && submitted.rgb==Bytes({0,220,40}) &&
+                compositor->presented_plane_key()==key1_substate,
+                "pending line 2 replaced the last complete line 1 frame");
 
         // Push Line 2 plane (20,40,210,255) on tick 2 -> presents immediately (only 1 skipped tick, 0 warnings).
         const std::array<Byte,4> blue_ui{20,40,210,255};
         ui_token->push(blue_ui.data(),4,1,1,key2,true);
         require(compositor->present(*game,false,true,submit)==Outcome::Presented &&
-            compositor->skipped_ticks()==0 && warnings.size()==1 &&
+            compositor->skipped_ticks()==0 && warnings.size()==2 &&
             submitted.rgb==Bytes({20,40,210}),
             "line 2 matching plane did not present cleanly");
 

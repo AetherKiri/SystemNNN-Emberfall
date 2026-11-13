@@ -52,9 +52,8 @@ private:
     bool attached_=false;
 };
 
-// Single-pass Story presenter implementing the R1 non-blocking 2-tick frame-skip
-// cap, 3rd-tick logged fallback, 0-skip same-key revision wakeup, and S_clean
-// after_present() tracking.
+// Non-blocking Story presenter. A late UI plane retains the last complete frame;
+// the warning threshold never licenses a partial frame or a presentation ack.
 class StoryCompositor {
 public:
     using WarningLogger=std::function<void(const std::string&)>;
@@ -95,7 +94,6 @@ private:
     bool presented_with_plane_=false;
     bool has_expected_key_=false;
     bool fallback_logged_=false;
-    bool fallback_presented_=false;
     bool pending_retry_=false;
 };
 

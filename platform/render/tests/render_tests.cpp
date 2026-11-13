@@ -1554,6 +1554,7 @@ int main() {
 
         // Mutate scene and read surface() WITHOUT after_present(); S_clean must stay (0,200,0)!
         layers.clear_message_plane();
+        layers.clear_all();
         require(layers.effect(0,54,{0,0,0,180}));
         require(layers.surface().rgb==std::vector<Byte>({0,0,180}));
 
@@ -1565,6 +1566,14 @@ int main() {
         require(layers.surface().rgb==std::vector<Byte>({50,100,0}));
         layers.advance(1);
         require(layers.surface().rgb==std::vector<Byte>({100,0,0}));
+
+        // Completing an undisplayed wipe must not replace the actual screen.
+        require(layers.presented_surface().rgb==std::vector<Byte>({0,200,0}));
+        layers.saved_screen(Surface{1,1,{210,220,230}},true);
+        layers.prepare_overlap([](Surface& frame) { frame.rgb={1,2,3}; return false; });
+        require(layers.start_overlap(2));
+        require(layers.surface().rgb==std::vector<Byte>({0,200,0}));
+        layers.finish_overlap();
 
         // Movie exit solid screen seeds S_clean directly:
         layers.set_presented_solid(12,34,56);

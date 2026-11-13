@@ -4911,7 +4911,8 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         if (resume_movie) {
             if (movie_fill_exit_screen) {
                 renderer->set_presented_solid(movie_exit_rgb[0],movie_exit_rgb[1],movie_exit_rgb[2]);
-                movie_exit_scope={renderer.get(),!had_presented};
+                movie_exit_scope.layers=renderer.get();
+                movie_exit_scope.clear_on_exit=!had_presented;
             }
             frame.wait=Wait::Running; frame.movie=0;
         } else input=in;

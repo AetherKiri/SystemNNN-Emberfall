@@ -94,7 +94,6 @@ void StoryCompositor::reset_present_state() noexcept {
     presented_with_plane_=false;
     has_expected_key_=false;
     fallback_logged_=false;
-    fallback_presented_=false;
     pending_retry_=false;
 }
 
@@ -107,8 +106,8 @@ StoryCompositor::PresentOutcome StoryCompositor::present(GameSession& game,bool 
     const bool needs_plane=use_mailbox && game.needs_message_plane();
     const bool revision_changed=needs_plane && snap.has_plane && snap.revision!=presented_revision_;
     const bool plane_state_changed=
-        (needs_plane!=presented_with_plane_ && !(needs_plane && fallback_presented_)) ||
-        (needs_plane && !fallback_presented_ && !scene_plane_key_matches(expected,presented_key_));
+        needs_plane!=presented_with_plane_ ||
+        (needs_plane && !scene_plane_key_matches(expected,presented_key_));
 
     if (!force_repaint && has_presented_ && !game.needs_redraw() && !revision_changed &&
         !plane_state_changed && !pending_retry_) {
@@ -124,7 +123,6 @@ StoryCompositor::PresentOutcome StoryCompositor::present(GameSession& game,bool 
                 last_expected_key_=expected;
                 skip_ticks_=0;
                 fallback_logged_=false;
-                fallback_presented_=false;
             }
             if (skip_ticks_<max_skip_ticks) {
                 ++skip_ticks_;
@@ -136,29 +134,18 @@ StoryCompositor::PresentOutcome StoryCompositor::present(GameSession& game,bool 
                 if (logger_) {
                     logger_("StoryCompositor fallback: UI plane key ["+format_plane_key(expected)+
                             "] not ready after "+std::to_string(max_skip_ticks)+
-                            " skipped ticks; presenting without matching UI plane");
+                            " skipped ticks; retaining the last complete frame");
                 }
             }
-            game.set_message_plane(nullptr);
-            const auto& frame=game.surface();
-            if (!submit(frame)) {
-                pending_retry_=true;
-                return PresentOutcome::SubmitFailed;
-            }
-            game.after_present();
-            has_presented_=true;
-            presented_with_plane_=false;
-            fallback_presented_=true;
-            pending_retry_=false;
-            presented_key_={};
-            presented_revision_=snap.revision;
-            return PresentOutcome::Presented;
+            // Audio and the event loop keep running. Never publish a new scene
+            // without its UI, nor acknowledge an image that was not displayed.
+            pending_retry_=true;
+            return PresentOutcome::SkippedPending;
         }
         has_expected_key_=true;
         last_expected_key_=expected;
         skip_ticks_=0;
         fallback_logged_=false;
-        fallback_presented_=false;
         game.set_message_plane(snap.plane);
         const auto& frame=game.surface();
         if (!submit(frame)) {
@@ -177,7 +164,6 @@ StoryCompositor::PresentOutcome StoryCompositor::present(GameSession& game,bool 
     game.clear_message_plane();
     skip_ticks_=0;
     fallback_logged_=false;
-    fallback_presented_=false;
     has_expected_key_=false;
     const auto& frame=override_surface ? *override_surface : game.surface();
     if (!submit(frame)) {
