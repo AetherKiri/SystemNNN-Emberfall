@@ -53,6 +53,7 @@ struct ExecutableSaveLayout {
     std::optional<std::size_t> status_bytes;
     std::optional<bool> registers_okikae;
     std::optional<int> system_save_version;
+    std::optional<std::uint32_t> extension_code_base;
 };
 
 // Recognizes SystemNNN write headers in PE32 x86 code sections.
@@ -64,6 +65,7 @@ struct FileSaveLayout {
     bool registers_okikae=true;
     int system_save_version=1;
     bool trial=false;
+    unsigned configured_extensions=0, configured_okikae_extensions=0;
 };
 
 enum class SystemSaveSource { Pending=0, Executable, Template, GameFiles };
@@ -78,6 +80,8 @@ struct DirectorySaveLayout {
     FileSaveLayout files;
     ExecutableSaveLayout executable;
     SystemSaveFormat system;
+    // null: unresolved (including old configs); 0: confirmed no EXT blocks.
+    std::optional<std::uint32_t> extension_code_base;
 
     unsigned layers() const { return executable.layer_records.value_or(files.layer_records); }
     std::size_t message_width() const { return executable.message_width.value_or(files.message_width); }

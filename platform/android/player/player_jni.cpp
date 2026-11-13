@@ -997,7 +997,7 @@ API jobjectArray JNICALL FN(saveLayoutConfig)(JNIEnv* env,jclass,jbyteArray path
         auto fields=int_array(env,{static_cast<int>(config->layer_records),static_cast<int>(config->message_width),
             static_cast<int>(config->status_bytes),config->system_save_version,config->executable_layout,config->okikae,
             config->system_save_source,config->executable_message_width,config->executable_status_bytes,
-            config->executable_okikae});
+            config->executable_okikae,config->extension_start_code});
         if (fields) env->SetObjectArrayElement(result,1,fields);
         return result;
     } catch (const std::exception& e) { fail(env,e.what());return nullptr; }

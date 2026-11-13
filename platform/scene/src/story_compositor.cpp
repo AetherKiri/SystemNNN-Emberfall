@@ -168,6 +168,7 @@ StoryCompositor::PresentOutcome StoryCompositor::present(GameSession& game,bool 
             if (floating.size()!=std::size_t{frame.width}*frame.height*4)
                 throw std::invalid_argument("Invalid floating plane dimensions");
             for (std::size_t px=0,rgb=0;px<floating.size();px+=4,rgb+=3) {
+                if (floating[px+3]==0) continue;
                 const unsigned inverse=255U-floating[px+3];
                 for (std::size_t c=0;c<3;++c)
                     display_.rgb[rgb+c]=static_cast<render::Byte>(std::min(255U,

@@ -77,7 +77,9 @@ std::size_t modrm_length(const Bytes& bytes,const Section& code,std::size_t at) 
     const unsigned modrm=bytes[at],mod=modrm>>6U,rm=modrm&7U;
     if (mod==3U) return 1;
     const std::size_t sib=rm==4U ? 1U : 0U;
-    const std::size_t disp=(mod==0U && rm==5U) || mod==2U ? 4U : (mod==1U ? 1U : 0U);
+    if (!code.includes(at,1+sib)) return 0;
+    const bool no_base=mod==0U && (rm==5U || (sib && (bytes[at+1]&7U)==5U));
+    const std::size_t disp=no_base || mod==2U ? 4U : (mod==1U ? 1U : 0U);
     return code.includes(at,1+sib+disp) ? 1+sib+disp : 0;
 }
 
@@ -311,6 +313,90 @@ std::optional<int> image_system_save_version(const Bytes& bytes,const std::vecto
     }
     return version;
 }
+
+// Match bounded compiler instruction sequences, not game names, status sizes,
+// or loose constants. -1 denotes an address/displacement operand.
+bool instructions(const Bytes& bytes,const Section& code,std::size_t at,std::initializer_list<int> pattern) {
+    if (!code.includes(at,pattern.size())) return false;
+    for (int value:pattern) {
+        if (value>=0 && bytes[at]!=value) return false;
+        ++at;
+    }
+    return true;
+}
+
+bool calls_make_header(const Bytes& bytes,const std::vector<Section>& image,const Section& code,std::size_t call) {
+    if (!code.includes(call,5) || bytes[call]!=0xe8) return false;
+    const auto target=static_cast<std::int64_t>(code.address)+static_cast<std::int64_t>(call-code.offset)+5+
+        static_cast<std::int32_t>(word(bytes,call+1));
+    for (const auto& callee:image) {
+        if (!callee.executable || target<callee.address || target>=static_cast<std::int64_t>(callee.address)+static_cast<std::int64_t>(callee.size)) continue;
+        const auto at=callee.offset+static_cast<std::size_t>(target-callee.address);
+        // MakeHeader(header, size, type, name): size -> +0, type -> +4.
+        return instructions(bytes,callee,at,{0x8b,0x44,0x24,4,0x8b,0x4c,0x24,8,0x8b,0x54,0x24,12,0x56,0x89,8,0x89,0x50,4}) ||
+            instructions(bytes,callee,at,{0x55,0x8b,0xec,0x83,0xec,12,0x89,0x4d,0xf4,0x8b,0x45,8,0x89,0x45,0xf8,
+                0x8b,0x4d,0xf8,0x8b,0x55,12,0x89,0x11,0x8b,0x45,0xf8,0x8b,0x4d,16,0x89,0x48,4});
+    }
+    return false;
+}
+
+std::optional<std::uint32_t> extension_writer_base(const Bytes& bytes,const std::vector<Section>& image,
+                                                  const Section& code,std::size_t ref) {
+    if (ref<code.offset+7) return {};
+    // Unoptimized MSVC: EXT(index+1), then MakeHeader(...,index+base,...).
+    if (instructions(bytes,code,ref-7,{0x8b,0x55,8,0x83,0xc2,1,0x52}) &&
+        instructions(bytes,code,ref+5,{0x8d,0x45,0xd8,0x50,0xff,0x15,-1,-1,-1,-1,0x83,0xc4,12,
+            0x8d,0x4d,0xd8,0x51,0x8b,0x55,8,0x83,0xc2,-1,0x52,0x8b,0x45,0xd4,0x50,
+            0x8b,0x4d,0xd0,0x8b,0x91,-1,-1,-1,-1,0x52,0x8b,0x4d,0xd0,0xe8}) &&
+        calls_make_header(bytes,image,code,ref+46)) return bytes[ref+27];
+    // Older optimized MSVC keeps the zero-based index in EBP.
+    if (ref>=code.offset+8 && instructions(bytes,code,ref-8,{0x8d,0x45,1,0x8d,0x4c,0x24,16,0x50}) &&
+        instructions(bytes,code,ref+5,{0x51,0xff,0x15,-1,-1,-1,-1,0x8b,0x8e,-1,-1,-1,-1,
+            0x83,0xc4,12,0x8d,0x54,0x24,16,0x8d,0x45,-1,0x52,0x50,0x53,0x51,0x8b,0xce,0xe8}) &&
+        calls_make_header(bytes,image,code,ref+34)) return bytes[ref+27];
+    // Inlined header: index in EBX, name buffer EBP-36, type stored at +4.
+    if (instructions(bytes,code,ref-7,{0x8d,0x43,1,0x50,0x8d,0x45,0xdc}) &&
+        instructions(bytes,code,ref+5,{0x50,0xff,0x15,-1,-1,-1,-1,0x8b,0x8e,-1,-1,-1,-1,
+            0x8d,0x43,-1,0x89,0x41,4,0x8d,0x51,16,0x89,0x39,
+            0xc7,0x41,8,0,0,0,0,0xc7,0x41,12,0,0,0,0,0x8d,0x45,0xdc})) return bytes[ref+20];
+    // Newer optimized MSVC computes type first: ESI=index+base;
+    // wsprintf gets ESI+(1-base). Verify both arithmetic operands agree.
+    if (ref>=code.offset+10 && instructions(bytes,code,ref-10,{0x8d,0x73,-1,0x8d,0x46,-1,0x50,0x8d,0x45,0xdc}) &&
+        instructions(bytes,code,ref+5,{0x50,0xff,0x15,-1,-1,-1,-1,0x8b,0x87,-1,-1,-1,-1,0x0f,0x57,0xc0,
+            0x8b,0x8d,-1,-1,-1,-1,0x83,0xc4,24,0x89,0x70,4,0x8d,0x50,16,0x89,8,
+            0xc7,0x40,8,0,0,0,0,0xc7,0x40,12,0,0,0,0,0x8d,0x45,0xdc,0x0f,0x11,2}) &&
+        static_cast<int>(bytes[ref-8])+static_cast<std::int8_t>(bytes[ref-5])==1) return bytes[ref-8];
+    return {};
+}
+
+std::optional<std::uint32_t> image_extension_base(const Bytes& bytes,const std::vector<Section>& image) {
+    std::optional<std::uint32_t> result;
+    unsigned names=0,references=0;
+    for (const auto& data:image) {
+        if (data.executable) continue;
+        const std::string_view strings(reinterpret_cast<const char*>(bytes.data()+data.offset),data.size);
+        const std::string_view format("EXT%d\0",6);
+        for (auto pos=strings.find(format);pos!=strings.npos;pos=strings.find(format,pos+1)) {
+            if (++names>32) return {};
+            const auto address=data.address+static_cast<std::uint32_t>(pos);
+            std::array<char,5> push{{0x68,0,0,0,0}};
+            for (unsigned i=0;i<4;++i) push[i+1]=static_cast<char>(address>>(8U*i));
+            for (const auto& code:image) {
+                if (!code.executable) continue;
+                const std::string_view instructions_view(reinterpret_cast<const char*>(bytes.data()+code.offset),code.size);
+                const std::string_view needle(push.data(),push.size());
+                for (auto ref=instructions_view.find(needle);ref!=instructions_view.npos;ref=instructions_view.find(needle,ref+1)) {
+                    if (++references>128) return {};
+                    const auto base=extension_writer_base(bytes,image,code,code.offset+ref);
+                    if (!base) continue;
+                    if (*base<min_legacy_extension_code || *base>127 || (result && *result!=*base)) return {};
+                    result=base;
+                }
+            }
+        }
+    }
+    return result;
+}
 } // namespace
 
 ExecutableSaveLayout executable_save_layout(const std::filesystem::path& root) {
@@ -349,16 +435,19 @@ ExecutableSaveLayout executable_save_layout(const std::filesystem::path& root) {
                 ? std::optional<std::size_t>{*status.size} : std::nullopt;
             const auto okikae=image_okikae(bytes,image);
             const auto system_version=image_system_save_version(bytes,image);
+            const auto extension_base=image_extension_base(bytes,image);
             if (!result.layer_records) {
                 result.message_width=width;
                 result.status_bytes=status_bytes;
                 result.registers_okikae=okikae;
                 result.system_save_version=system_version;
+                result.extension_code_base=extension_base;
             } else {
                 if (result.message_width!=width) result.message_width.reset();
                 if (result.status_bytes!=status_bytes) result.status_bytes.reset();
                 if (result.registers_okikae!=okikae) result.registers_okikae.reset();
                 if (result.system_save_version!=system_version) result.system_save_version.reset();
+                if (result.extension_code_base!=extension_base) result.extension_code_base.reset();
             }
             result.layer_records=count;
         } catch (const std::runtime_error&) {

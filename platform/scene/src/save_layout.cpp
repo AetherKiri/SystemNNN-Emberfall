@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <charconv>
 #include <fstream>
 #include <locale>
 #include <mutex>
@@ -13,7 +14,7 @@ namespace emberfall::scene::pc {
 namespace fs=std::filesystem;
 namespace {
 constexpr char config_name[]="emberfall-system.cfg";
-constexpr int config_version=2;
+constexpr int config_version=3;
 constexpr std::array<std::string_view,4> system_sources{{"","exe","org","game_files"}};
 std::mutex layout_mutex;
 
@@ -22,6 +23,7 @@ struct CachedLayout {
     // An empty result after a completed EXE scan is also cached.
     std::optional<ExecutableSaveLayout> executable;
     SystemSaveFormat system;
+    std::optional<std::uint32_t> extension_code_base;
 };
 
 struct LocatedLayout {
@@ -55,7 +57,7 @@ std::optional<CachedLayout> read_layout(const fs::path& file) {
     fields.imbue(std::locale::classic());
 
     int version,layers,width,status,okikae,system,analyzed;
-    if (!field(fields,"emberfall_system",version) || (version!=1 && version!=config_version) ||
+    if (!field(fields,"emberfall_system",version) || version<1 || version>config_version ||
         !field(fields,"file_layer_records",layers) || !valid_layers(layers) ||
         !field(fields,"file_message_width",width) || !valid_width(width) ||
         !field(fields,"file_status_bytes",status) || !valid_status(status) ||
@@ -64,7 +66,7 @@ std::optional<CachedLayout> read_layout(const fs::path& file) {
         !field(fields,"exe_analyzed",analyzed) || (analyzed!=0 && analyzed!=1)) return {};
 
     CachedLayout layout{{static_cast<unsigned>(layers),static_cast<std::size_t>(width),
-                         static_cast<std::size_t>(status),okikae!=0,system},std::nullopt,{}};
+                         static_cast<std::size_t>(status),okikae!=0,system},std::nullopt,{},std::nullopt};
     if (analyzed) {
         if (!field(fields,"exe_layer_records",layers) || (layers!=0 && !valid_layers(layers)) ||
             !field(fields,"exe_message_width",width) || (width!=0 && !valid_width(width)) ||
@@ -79,7 +81,7 @@ std::optional<CachedLayout> read_layout(const fs::path& file) {
         if (okikae!=-1) exe.registers_okikae=okikae!=0;
         if (system) exe.system_save_version=system;
     }
-    if (version==config_version) {
+    if (version>=2) {
         int trial;
         std::string source;
         if (!field(fields,"system_save_version",system) || system<1 || system>3 ||
@@ -88,6 +90,24 @@ std::optional<CachedLayout> read_layout(const fs::path& file) {
         const auto origin=std::find(system_sources.begin()+1,system_sources.end(),source);
         if (origin==system_sources.end()) return {};
         layout.system={system,trial!=0,static_cast<SystemSaveSource>(origin-system_sources.begin())};
+    } else {
+        // Existing configurations are authoritative. Upgrading never initiates
+        // another EXE/template scan behind the user's back.
+        const auto cached_version=layout.executable ? layout.executable->system_save_version : std::nullopt;
+        layout.system={cached_version.value_or(layout.files.system_save_version),false,
+            cached_version ? SystemSaveSource::Executable : SystemSaveSource::GameFiles};
+    }
+    if (version>=3) {
+        std::string code;
+        if (!field(fields,"ext_start_code",code)) return {};
+        if (code==u8"无") layout.extension_code_base=0;
+        else if (code!=u8"解析失败") {
+            std::uint32_t number=0;
+            const auto parsed=std::from_chars(code.data(),code.data()+code.size(),number);
+            if (parsed.ec!=std::errc{} || parsed.ptr!=code.data()+code.size()) return {};
+            if (number<min_legacy_extension_code || number>static_cast<std::uint32_t>(INT32_MAX)-max_extensions) return {};
+            layout.extension_code_base=number;
+        }
     }
     std::string extra;
     if (fields>>extra) return {};
@@ -120,6 +140,8 @@ bool write_layout(const fs::path& file,const CachedLayout& layout) {
     out<<"system_save_version "<<layout.system.version<<'\n'
        <<"system_save_trial "<<layout.system.trial<<'\n'
        <<"system_save_source "<<system_sources[static_cast<std::size_t>(layout.system.source)]<<'\n';
+    out<<"ext_start_code "<<(layout.extension_code_base ?
+        (*layout.extension_code_base ? std::to_string(*layout.extension_code_base) : u8"无") : u8"解析失败")<<'\n';
     out.close();
     if (out) fs::rename(pending,file,error);
     if (out && !error) return true;
@@ -137,15 +159,19 @@ std::array<fs::path,2> config_directories(const fs::path& root) {
 }
 
 DirectorySaveLayout layout_values(const CachedLayout& cached) {
-    return {cached.files,cached.executable.value_or(ExecutableSaveLayout{}),cached.system};
+    return {cached.files,cached.executable.value_or(ExecutableSaveLayout{}),cached.system,cached.extension_code_base};
 }
 
-std::optional<LocatedLayout> find_layout(const std::array<fs::path,2>& directories) {
+std::optional<LocatedLayout> find_layout(const std::array<fs::path,2>& directories,bool strict=true) {
+    bool invalid=false;
     for (const auto& directory:directories) {
         if (directory.empty()) continue;
         const auto file=directory/config_name;
         if (const auto layout=read_layout(file)) return LocatedLayout{*layout,file};
+        std::error_code error;
+        if (fs::is_regular_file(file,error) || fs::is_symlink(fs::symlink_status(file,error))) invalid=true;
     }
+    if (strict && invalid) throw std::runtime_error("Invalid emberfall-system.cfg; manually regenerate the configuration");
     return {};
 }
 
@@ -203,9 +229,15 @@ SystemSaveFormat system_format(const fs::path& root,const FileSaveLayout& files,
 
 CachedLayout analyze_layout(const fs::path& root,bool analyze_executable,
                             const std::function<FileSaveLayout()>& file_defaults) {
-    CachedLayout layout{file_defaults(),std::nullopt,{}};
+    CachedLayout layout{file_defaults(),std::nullopt,{},std::nullopt};
     if (analyze_executable) layout.executable=executable_save_layout(root);
     layout.system=system_format(root,layout.files,layout.executable ? layout.executable->system_save_version : std::nullopt);
+    const bool okikae=layout.executable && layout.executable->registers_okikae ?
+        *layout.executable->registers_okikae : layout.files.registers_okikae;
+    const auto count=layout.files.configured_extensions+(okikae ? layout.files.configured_okikae_extensions+1U : 0U);
+    if (count>max_extensions) throw std::runtime_error("Too many PC extensions");
+    if (count==0) layout.extension_code_base=0;
+    else if (layout.executable) layout.extension_code_base=layout.executable->extension_code_base;
     return layout;
 }
 
@@ -228,18 +260,7 @@ DirectorySaveLayout directory_save_layout(const fs::path& root,bool analyze_exec
     const std::lock_guard<std::mutex> lock(layout_mutex);
     const auto directories=config_directories(root);
     if (auto cached=find_layout(directories)) {
-        auto& layout=cached->cache;
-        if (!layout.system.version) {
-            // Old configurations already settled the story layout. Resolve the
-            // missing global archive format without replacing those fields.
-            const auto files=file_defaults();
-            auto executable=layout.executable ? layout.executable->system_save_version : std::nullopt;
-            if (!executable && analyze_executable) executable=executable_save_layout(root).system_save_version;
-            layout.system=system_format(root,files,executable);
-            layout.files.system_save_version=files.system_save_version;
-            write_layout(cached->file,layout);
-        }
-        return layout_values(layout);
+        return layout_values(cached->cache);
     }
     const auto layout=analyze_layout(root,analyze_executable,file_defaults);
     store_layout(root,directories,layout);
@@ -257,7 +278,7 @@ std::optional<SaveLayoutConfig> regenerate_save_layout(const fs::path& root,
                                                        const std::function<FileSaveLayout()>& file_defaults) {
     const std::lock_guard<std::mutex> lock(layout_mutex);
     const auto directories=config_directories(root);
-    const auto cached=find_layout(directories);
+    const auto cached=find_layout(directories,false);
     const auto layout=analyze_layout(root,true,file_defaults);
     if (cached) {
         if (!write_layout(cached->file,layout)) return {};

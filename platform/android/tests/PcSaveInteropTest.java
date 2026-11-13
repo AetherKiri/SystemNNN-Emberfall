@@ -32,7 +32,7 @@ public final class PcSaveInteropTest {
 
     public static void main(String[] args) throws Exception {
         String cfgPath="/game/init2/emberfall-system.cfg";
-        int[] executable={32,1024,7088,3,1,1,1,1,0,1};
+        int[] executable={32,1024,7088,3,1,1,1,1,0,1,37};
         SaveLayoutConfig parsed=SaveLayoutConfig.fromFields(cfgPath,executable);
         check(parsed.path.equals(cfgPath),"layout path preserved");
         check(parsed.layerRecords==32&&parsed.messageWidth==1024&&parsed.statusBytes==7088,"story geometry fields");
@@ -41,17 +41,17 @@ public final class PcSaveInteropTest {
         check(parsed.executableLayout&&parsed.okikae,"executable layout and okikae flags");
         check(parsed.executableMessageWidth&&!parsed.executableStatusBytes&&parsed.executableOkikae,
             "per-field executable provenance flags");
-        check(Arrays.equals(parsed.fields(),executable),"canonical 10-field array round-trip");
+        check(Arrays.equals(parsed.fields(),executable),"canonical 11-field array round-trip");
         SaveLayoutConfig roundTrip=SaveLayoutConfig.fromFields(parsed.path,parsed.fields());
-        check(Arrays.equals(roundTrip.fields(),executable),"re-parsed 10-field array round-trip");
+        check(Arrays.equals(roundTrip.fields(),executable),"re-parsed 11-field array round-trip");
 
-        int[] pending={16,256,7088,0,0,0,0,0,1,0};
+        int[] pending={16,256,7088,0,0,0,0,0,1,0,-1};
         SaveLayoutConfig pendingCfg=SaveLayoutConfig.fromFields(cfgPath,pending);
         check(pendingCfg.systemSaveSource==SaveLayoutConfig.SystemSaveSource.PENDING&&pendingCfg.systemSaveVersion==0,
             "pending source requires version 0");
         check(!pendingCfg.executableLayout&&!pendingCfg.okikae&&!pendingCfg.executableMessageWidth&&
             pendingCfg.executableStatusBytes&&!pendingCfg.executableOkikae,"pending boolean flags");
-        check(Arrays.equals(pendingCfg.fields(),pending),"pending 10-field round-trip");
+        check(Arrays.equals(pendingCfg.fields(),pending),"pending 11-field round-trip");
 
         for(int source=1;source<=3;source++){
             for(int version=1;version<=3;version++){
@@ -59,7 +59,7 @@ public final class PcSaveInteropTest {
                 SaveLayoutConfig normalized=SaveLayoutConfig.fromFields(cfgPath,nonCanonical);
                 check(normalized.systemSaveSource.ordinal()==source&&normalized.systemSaveVersion==version,
                     "source "+source+" version "+version);
-                check(Arrays.equals(normalized.fields(),new int[]{16,256,8112,version,1,1,source,1,0,1}),
+                check(Arrays.equals(normalized.fields(),new int[]{16,256,8112,version,1,1,source,1,0,1,-1}),
                     "fields() normalizes nonzero boolean ints to 1");
             }
         }
@@ -69,7 +69,7 @@ public final class PcSaveInteropTest {
         rejects(()->SaveLayoutConfig.fromFields(cfgPath,null),"null fields");
         rejects(()->SaveLayoutConfig.fromFields(cfgPath,new int[]{32,1024,7088,3,1,1,1}),"legacy 7-field array");
         rejects(()->SaveLayoutConfig.fromFields(cfgPath,new int[9]),"short 9-field array");
-        rejects(()->SaveLayoutConfig.fromFields(cfgPath,new int[11]),"long 11-field array");
+        rejects(()->SaveLayoutConfig.fromFields(cfgPath,new int[12]),"long 12-field array");
         rejects(()->SaveLayoutConfig.fromFields(cfgPath,new int[]{32,1024,7088,1,1,1,-1,1,0,1}),"negative source");
         rejects(()->SaveLayoutConfig.fromFields(cfgPath,new int[]{32,1024,7088,1,1,1,4,1,0,1}),"out-of-range source");
         rejects(()->SaveLayoutConfig.fromFields(cfgPath,new int[]{32,1024,7088,1,1,1,0,1,0,1}),"pending source with nonzero version");
@@ -81,6 +81,13 @@ public final class PcSaveInteropTest {
             rejects(()->SaveLayoutConfig.fromFields(cfgPath,new int[]{32,1024,7088,-1,1,1,s,1,0,1}),"resolved source "+s+" with negative version");
         }
 
+        check(parsed.extensionStartCode==37,"EXT number is not an enum");
+        for(int code:new int[]{-1,0,9,37,100,1024}){
+            int[] fields=executable.clone();fields[10]=code;
+            check(SaveLayoutConfig.fromFields(cfgPath,fields).extensionStartCode==code,"EXT state preserved");
+        }
+        int[] invalidExt=executable.clone();invalidExt[10]=7;
+        rejects(()->SaveLayoutConfig.fromFields(cfgPath,invalidExt),"EXT collides with base blocks");
         verifyCalcuWeekFormula();
         verifyVarLookupAndGameVarExtraction();
 

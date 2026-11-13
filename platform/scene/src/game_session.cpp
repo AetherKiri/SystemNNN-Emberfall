@@ -109,6 +109,36 @@ void visit_pc_sub_extensions(const nnn::game_config::NameListSetup& setup,Visit 
         visit(fold_cp932(std::string(*value)));
     }
 }
+enum class PcExtension { Empty, Chart, Face, Okikae, Game };
+struct PcExtensions {
+    std::vector<PcExtension> entries;
+    std::size_t sub_end=0;
+    bool valid=true;
+};
+PcExtensions configured_pc_extensions(const std::string& init,bool face_enabled) {
+    PcExtensions result;
+    const nnn::game_config::NameListSetup setup(init);
+    for (std::size_t i=1;i<=pc::max_extensions;++i) {
+        const auto value=setup.field("autoExtDataMode"+std::to_string(i));
+        if (!value) break;
+        const auto name=fold_cp932(std::string(*value));
+        if (name=="selectchart") result.entries.push_back(PcExtension::Chart);
+        else if (!name.empty() && std::find(nnn::system_mode_names.begin(),nnn::system_mode_names.end(),name)!=
+                 nnn::system_mode_names.end()) result.entries.push_back(PcExtension::Empty);
+    }
+    visit_pc_sub_extensions(setup,[&](const std::string& name) {
+        if (name=="face") result.entries.push_back(face_enabled ? PcExtension::Face : PcExtension::Empty);
+        if (name=="okikae") result.entries.push_back(PcExtension::Okikae);
+    });
+    if (config_int(init,"facePrintMode",0)!=0)
+        result.entries.push_back(face_enabled ? PcExtension::Face : PcExtension::Empty);
+    result.sub_end=result.entries.size();
+    const auto count=config_int(init,"extSaveDataNumber",0);
+    result.valid=count>=0 && static_cast<std::size_t>(count)<=pc::max_extensions &&
+        result.sub_end+static_cast<std::size_t>(count)<=pc::max_extensions;
+    if (result.valid) result.entries.resize(result.sub_end+static_cast<std::size_t>(count),PcExtension::Game);
+    return result;
+}
 pc::FileSaveLayout game_files_save_layout(const fs::path& root) {
     const auto init=nnn::game_config::read(root,"init","game.xtx");
     const auto spt=nnn::resource::find_directory(root,"spt");
@@ -127,6 +157,12 @@ pc::FileSaveLayout game_files_save_layout(const fs::path& root) {
     const bool classic_vars=!has_var2 || (has_var && config_int(init,"varType",1)==0);
     layout.system_save_version=classic_vars ? 1 : (setup.field("scriptseVolumeUseFlag") ? 3 : 2);
     layout.trial=config_int(init,"taikenflag",0)!=0;
+    const auto extensions=configured_pc_extensions(init,false);
+    if (!extensions.valid) throw std::runtime_error("Invalid PC extension configuration");
+    for (auto kind:extensions.entries) {
+        if (kind==PcExtension::Okikae) ++layout.configured_okikae_extensions;
+        else ++layout.configured_extensions;
+    }
     return layout;
 }
 pc::DirectorySaveLayout resolve_pc_save_layout(const fs::path& root,bool analyze_executable) {
@@ -468,7 +504,6 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
     Cutins cutins;
     std::optional<pc::OmakeWords> omake;
     std::array<std::optional<nnn::status_party::Visit>,2> attached_status;
-    enum class PcExtension { Empty, Chart, Face, Okikae, Game };
     std::vector<PcExtension> pc_extensions;
     std::size_t pc_sub_end=0;
     bool pc_extension_count_valid=true;
@@ -486,7 +521,6 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
     unsigned game_version=0,layer_limit=16,render_layer_count=32;
     const std::shared_ptr<const pc::DirectorySaveLayout> save_layout;
     std::size_t loaded_save_message_width=0;
-    std::optional<std::uint32_t> loaded_save_extension_code_base;
     bool adjust_load_bgm_enabled=false;
     unsigned adjust_load_bgm_var=variable_count;
     std::vector<int> adjust_load_bgm_table;
@@ -3951,27 +3985,13 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         return true;
     }
     void configure_pc_extensions(const std::string& init) {
-        const nnn::game_config::NameListSetup setup(init);
-        for (std::size_t i=1;i<=pc::max_extensions;++i) {
-            const auto value=setup.field("autoExtDataMode"+std::to_string(i));
-            if (!value) break;
-            const auto name=fold_cp932(std::string(*value));
-            if (name=="selectchart") pc_extensions.push_back(PcExtension::Chart);
-            else if (!name.empty() && std::find(nnn::system_mode_names.begin(),nnn::system_mode_names.end(),name)!=
-                     nnn::system_mode_names.end()) pc_extensions.push_back(PcExtension::Empty);
-        }
-        const bool face_enabled=config_int(init,"facePrintMode",0)!=0;
-        visit_pc_sub_extensions(setup,[&](const std::string& name) {
-            if (name=="face") pc_extensions.push_back(faces.enabled() ? PcExtension::Face : PcExtension::Empty);
-            if (name=="okikae") pc_extensions.push_back(PcExtension::Okikae);
-        });
-        if (face_enabled) pc_extensions.push_back(faces.enabled() ? PcExtension::Face : PcExtension::Empty);
-        pc_sub_end=pc_extensions.size();
-        const auto count=config_int(init,"extSaveDataNumber",0);
-        pc_extension_count_valid=count>=0 && static_cast<std::size_t>(count)<=pc::max_extensions &&
-            pc_sub_end+static_cast<std::size_t>(count)<=pc::max_extensions;
-        if (pc_extension_count_valid)
-            pc_extensions.resize(pc_sub_end+static_cast<std::size_t>(count),PcExtension::Game);
+        auto setup=configured_pc_extensions(init,faces.enabled());
+        pc_extensions=std::move(setup.entries);
+        pc_sub_end=setup.sub_end;
+        pc_extension_count_valid=setup.valid;
+        if (!decorative_preview && replay_films.empty() && !pc_extension_order(save_layout->registers_okikae()).empty() &&
+            (!save_layout->extension_code_base || !*save_layout->extension_code_base))
+            throw std::runtime_error("EXT_START_UNRESOLVED: This game requires EXT save blocks. Enable the EXE parser and manually regenerate emberfall-system.cfg; no EXT starting code was inferred.");
     }
 
     std::vector<PcExtension> pc_extension_order(bool automatic_okikae) const {
@@ -4056,7 +4076,6 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
     void load_pc_save(const std::vector<nnn::Byte>& bytes) {
         const auto saved=pc::parse_save(bytes,pc_save_header);
         loaded_save_message_width=saved.message_width;
-        loaded_save_extension_code_base=saved.extension_code_base;
         if (saved.log) { pc_log_layout=saved.log->layout;pc_log_voices=saved.log->voice_count; }
         if (!saved.unsupported_blocks.empty())
             throw std::runtime_error("Unsupported PC save block "+std::to_string(saved.unsupported_blocks.front().header.code));
@@ -4260,14 +4279,8 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         saved.layer_records=layout.layer_records;
         saved.message_width=layout.message_width;
         saved.status_bytes=save_layout->status_bytes();
-        if (loaded_save_extension_code_base &&
-            (*loaded_save_extension_code_base==pc::first_extension_code ||
-             (*loaded_save_extension_code_base==pc::legacy_extension_code && !saved.cutin && !pc_save_log) ||
-             (*loaded_save_extension_code_base==pc::min_legacy_extension_code && !saved.omake && !saved.cutin && !pc_save_log))) {
-            saved.extension_code_base=*loaded_save_extension_code_base;
-        } else if (saved.status_bytes==pc::legacy_status_bytes && !saved.cutin && !pc_save_log) {
-            saved.extension_code_base=pc::legacy_extension_code;
-        }
+        if (save_layout->extension_code_base && *save_layout->extension_code_base)
+            saved.extension_code_base=*save_layout->extension_code_base;
         auto& status=saved.status;
         if (place) {
             const auto mode=shared_runtime->mode();
@@ -4902,17 +4915,11 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
             commit_place(*setup,static_cast<nnn::Value>(in.choice));
             frame.wait=Wait::Running;
         }
-        const bool had_presented=!renderer->presented_surface().rgb.empty();
-        struct MovieExitScope {
-            render::Layers* layers=nullptr;
-            bool clear_on_exit=false;
-            ~MovieExitScope() { if (clear_on_exit && layers) layers->clear_presented(); }
-        } movie_exit_scope;
         if (resume_movie) {
             if (movie_fill_exit_screen) {
+                // The host displayed this exit frame. Retain it until the next
+                // actual presentation, even if the resumed script yields first.
                 renderer->set_presented_solid(movie_exit_rgb[0],movie_exit_rgb[1],movie_exit_rgb[2]);
-                movie_exit_scope.layers=renderer.get();
-                movie_exit_scope.clear_on_exit=!had_presented;
             }
             frame.wait=Wait::Running; frame.movie=0;
         } else input=in;
@@ -5359,7 +5366,7 @@ std::optional<GameSession::PcSaveConfiguration> GameSession::pc_save_configurati
     return PcSaveConfiguration{config->file,layout.layers(),layout.message_width(),layout.status_bytes(),
         layout.system.version,static_cast<int>(layout.system.source),layout.executable.layer_records.has_value(),
         layout.registers_okikae(),layout.executable.message_width.has_value(),layout.executable.status_bytes.has_value(),
-        layout.executable.registers_okikae.has_value()};
+        layout.executable.registers_okikae.has_value(),layout.extension_code_base ? static_cast<int>(*layout.extension_code_base) : -1};
 }
 nnn::Value GameSession::save_slot_art() const { return data_->save_slot_art(); }
 void GameSession::restore_snapshot(const nnn::snapshot::Bytes& bytes,const std::function<bool(const FrameState&)>& verify,

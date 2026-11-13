@@ -1837,6 +1837,29 @@ public final class PlayerActivity extends Activity implements GameRunner.Listene
     });}
     @Override public void error(String text) { runOnUiThread(() -> {
         if (isDestroyed() || isFinishing()) return;
+        if(text.contains("EXT_START_UNRESOLVED")){
+            new AlertDialog.Builder(this).setTitle("EXT 起始编号解析失败")
+                .setMessage("本游戏需要 EXT 存档区块，但尚未取得起始编号，已停止启动。可以手动重新分析并生成 emberfall-system.cfg；若仍解析失败，需要补充该 EXE 的识别规则。")
+                .setNegativeButton("返回",dialogClick((d,w)->finish()))
+                .setPositiveButton("重新生成配置",dialogClick((d,w)->{
+                    GameRunner owner=runner;
+                    new Thread(()->{
+                        try{
+                            SaveLayoutConfig config=SaveLayoutConfig.open(game,true);
+                            runOnUiThread(()->{
+                                if(isDestroyed()||isFinishing()||owner!=runner)return;
+                                if(config.extensionStartCode<0)error("EXT_START_UNRESOLVED");
+                                else if(owner!=null)owner.restart(false);
+                            });
+                        }catch(IOException|RuntimeException failure){
+                            Log.w("SystemNNN","Unable to regenerate game configuration",failure);
+                            runOnUiThread(()->{if(!isDestroyed()&&!isFinishing())
+                                Toast.makeText(this,"配置生成失败，请检查游戏目录及写入权限",Toast.LENGTH_LONG).show();});
+                        }
+                    },"nnn-config").start();
+                })).setCancelable(false).show();
+            return;
+        }
         if(returningToTitle){returningToTitle=false;titlePrevious=null;closeOriginalPanel(false);}
         if (text.contains("spt/sys.spt") && (text.contains("SPT header") || text.contains("SPTHEADER0") || text.contains("Record length"))) {
             new AlertDialog.Builder(this).setTitle("未识别为受支持的 SystemNNN 脚本")
