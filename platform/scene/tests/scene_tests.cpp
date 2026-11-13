@@ -3810,6 +3810,11 @@ int main(){
             "line 2 matching plane did not present cleanly");
         require(game->surface().rgb==Bytes({20,40,210}),
             "floating cursor leaked into the clean capture frame");
+        const auto clean_preview=scene::GameSession::inspect_pc_save(game->export_pc_save(),64*1024);
+        require(!clean_preview.pixels.empty() && clean_preview.pixels[0]==0xff1428d2U,
+            "save preview captured display-only floating controls");
+        require(compositor->present(*game,true,true,submit)==Outcome::Presented &&
+            submitted.rgb==Bytes({240,220,0}),"clean capture removed floating controls from the next display");
 
         // Advance into PREPAREOVERRAP + OVERLAP (to tiny_green 0,255,0) with ZERO OverlapCapture callback:
         // Wipe frame 0 must start strictly from S_clean = (20,40,210)!

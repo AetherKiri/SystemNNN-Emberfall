@@ -144,11 +144,13 @@ public final class DialogueLayoutTest {
         check(DialogueLayout.choiceSetId(null)==0&&DialogueLayout.choiceSetId(new int[]{4,0,0,0})==0,"choiceSetId safely handles null and short keys");
         check(DialogueLayout.choiceSetId(new int[]{4,0,0,0,0x12345678,0})!=DialogueLayout.choiceSetId(new int[]{4,0,0,0,0x12345679,0}),
             "choiceSetId distinguishes repeated SELECT loops at identical script coordinates");
-        check(DialogueLayout.portraitMoving(0,true,4,false,12),"blinking primary portrait stays active across wait cycles");
-        check(DialogueLayout.portraitMoving(0,true,4,true,0),"finite one-shot portrait animates before end frame");
-        check(!DialogueLayout.portraitMoving(0,true,4,false,0),"finite one-shot portrait converges once finished");
-        check(!DialogueLayout.portraitMoving(1,true,4,true,12),"secondary composite portrait layer fixed at frame 0 never loops");
-        check(!DialogueLayout.portraitMoving(0,false,4,true,12)&&!DialogueLayout.portraitMoving(0,true,1,true,12),
+        check(!DialogueLayout.portraitMoving(0,true,4,true,12,-12)&&
+            !DialogueLayout.portraitMoving(0,true,4,true,12,-1),"portrait waits for its deadline instead of redrawing while idle");
+        check(DialogueLayout.portraitMoving(0,true,4,false,12,0),"blinking primary portrait stays active across wait cycles");
+        check(DialogueLayout.portraitMoving(0,true,4,true,0,0),"finite one-shot portrait animates before end frame");
+        check(!DialogueLayout.portraitMoving(0,true,4,false,0,0),"finite one-shot portrait converges once finished");
+        check(!DialogueLayout.portraitMoving(1,true,4,true,12,0),"secondary composite portrait layer fixed at frame 0 never loops");
+        check(!DialogueLayout.portraitMoving(0,false,4,true,12,0)&&!DialogueLayout.portraitMoving(0,true,1,true,12,0),
             "missing or single-frame portrait never animates");
         if(args.length>0){
             Path root=Paths.get(args[0]);Map<String,String> real=read(root.resolve("init/printmessage.xtx"));
