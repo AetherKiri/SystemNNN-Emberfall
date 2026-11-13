@@ -1212,6 +1212,39 @@ void blur_effects() {
         cached.rectangle(1,moved,moved);reference.rectangle(4,moved,moved);
         require(cached.surface().rgb==reference.surface().rgb);
     }
+    // Compare the packed sums with a direct convolution, including a full
+    // 256-sample window, clipped source/destination edges and opaque RGB.
+    auto opaque=pattern(23,19);
+    opaque->canvas_width=27;opaque->canvas_height=22;opaque->content={2,1,23,19};
+    for (std::size_t i=0;i<opaque->pixels.rgba.size();i+=4) {
+        opaque->pixels.rgba[i]=255;opaque->pixels.rgba[i+3]=0;
+    }
+    for (const auto& kernel:{std::array<int,2>{16,16},{24,10},{256,1},{1,256},{3,5}}) {
+        const int kx=kernel[0],ky=kernel[1];
+        for (const Rect dst:{Rect{-5,2,24,21},Rect{3,-7,27,22},Rect{5,6,12,10},Rect{-30,-30,27,22}}) {
+            Layers layers(26,24);
+            require(layers.effect(0,54,{0,17,42,65}));
+            layers.bind(1,opaque,false);layers.rectangle(1,dst,dst);
+            require(layers.effect(1,126,{1,kx,ky,100,100}));
+            const auto& frame=layers.surface();
+            for (int y=0;y<24;++y) for (int x=0;x<26;++x) {
+                std::array<int,3> sums{};
+                int count=0;
+                for (int row=std::max(1,y-dst.y-ky/2);row<std::min({20,dst.height,y-dst.y+ky-ky/2});++row)
+                    for (int col=std::max(2,x-dst.x-kx/2);col<std::min({25,dst.width,x-dst.x+kx-kx/2});++col) {
+                        const auto i=static_cast<std::size_t>(((row-1)*23+col-2)*4);
+                        for (std::size_t channel=0;channel<3;++channel) sums[channel]+=opaque->pixels.rgba[i+channel];
+                        ++count;
+                    }
+                constexpr std::array<int,3> fill{17,42,65};
+                const auto offset=static_cast<std::size_t>((y*26+x)*3);
+                for (std::size_t channel=0;channel<3;++channel) {
+                    const auto expected=count ? ((sums[channel]>>1)*std::min(32767,32768/count))>>14 : fill[channel];
+                    require(frame.rgb[offset+channel]==expected);
+                }
+            }
+        }
+    }
 }
 void easing_tests() {
     auto white=pattern(1,1);white->pixels.rgba={255,255,255,255};

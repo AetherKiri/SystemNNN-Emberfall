@@ -1307,6 +1307,61 @@ constexpr auto blur_reciprocals=[] {
     return values;
 }();
 
+void blur_background(Surface& out,const Texture& texture,Rect dst,Rect clip,Rect visible,int kx,int ky) {
+    const int xl=kx/2,xr=kx-xl,yt=ky/2,yb=ky-yt;
+    const int clip_right=clip.x+clip.width,clip_bottom=clip.y+clip.height;
+    const int first_x=visible.x-dst.x,first_y=visible.y-dst.y;
+    // Zero columns outside the image let the horizontal window slide through
+    // the clipped edges. A kernel has at most 256 samples, so each RGB sum
+    // fits in its own 16-bit lane with no carry into adjacent channels.
+    const int padding=kx+1;
+    std::vector<std::uint64_t> padded(static_cast<std::size_t>(clip.width+2*padding));
+    auto* columns=padded.data()+padding;
+    const auto update=[&](int y,bool add) {
+        if (y<clip.y || y>=clip_bottom) return;
+        const auto start=static_cast<std::size_t>(y-texture.content.y)*texture.pixels.width+
+            static_cast<unsigned>(clip.x-texture.content.x);
+        const auto* pixel=texture.pixels.rgba.data()+start*4;
+        for (int i=0;i<clip.width;++i,pixel+=4) {
+            const auto rgb=std::uint64_t{pixel[0]}|(std::uint64_t{pixel[1]}<<16U)|(std::uint64_t{pixel[2]}<<32U);
+            columns[i]+=add ? rgb : -rgb;
+        }
+    };
+    for (int y=first_y-yt;y<first_y+yb;++y) update(y,true);
+
+    std::vector<int> counts(static_cast<std::size_t>(visible.width));
+    for (int i=0;i<visible.width;++i) {
+        const int x=first_x+i;
+        counts[static_cast<std::size_t>(i)]=std::max(0,std::min(clip_right,x+xr)-std::max(clip.x,x-xl));
+    }
+    const auto* sample_widths=counts.data();
+    const auto* reciprocals=blur_reciprocals.data();
+    for (int row=0;row<visible.height;++row) {
+        const int y=first_y+row;
+        const int height=std::max(0,std::min(clip_bottom,y+yb)-std::max(clip.y,y-yt));
+        if (height) {
+            auto* dest=out.rgb.data()+(static_cast<std::size_t>(visible.y+row)*out.width+
+                static_cast<unsigned>(visible.x))*3;
+            const auto* left=columns+first_x-clip.x-xl;
+            const auto* right=left+kx;
+            std::uint64_t sum=0;
+            for (auto* col=left;col!=right;++col) sum+=*col;
+            for (int x=0;x<visible.width;++x,dest+=3) {
+                const int count=sample_widths[x]*height;
+                if (count) {
+                    const unsigned scale=static_cast<unsigned>(reciprocals[count]);
+                    dest[0]=static_cast<Byte>(((sum&0xffffU)>>1U)*scale>>14U);
+                    dest[1]=static_cast<Byte>(((sum>>16U&0xffffU)>>1U)*scale>>14U);
+                    dest[2]=static_cast<Byte>(((sum>>32U&0xffffU)>>1U)*scale>>14U);
+                }
+                sum+=*right++-*left++;
+            }
+        }
+        update(y-yt,false);
+        update(y+yb,true);
+    }
+}
+
 void blur_character(Surface& out,const Layer& l,int kx,int ky,bool background,bool cache_background) {
     if (!l.texture) return;
     const Rect dst=destination(l);
@@ -1341,8 +1396,18 @@ void blur_character(Surface& out,const Layer& l,int kx,int ky,bool background,bo
             return;
         }
     }
+    if (background) {
+        blur_background(out,t,dst,{clip_left,clip_top,clip_right-clip_left,clip_bottom-clip_top},
+            {left,top,right-left,bottom-top},kx,ky);
+        if (cacheable) try {
+            l.effect_state->background_blur=std::make_shared<BlurredBackground>(BlurredBackground{l.texture,dst,kx,ky,out});
+        } catch (const std::bad_alloc&) {
+            l.effect_state->background_blur.reset();
+        }
+        return;
+    }
     std::vector<std::array<int,4>> columns(static_cast<std::size_t>(clip_right-clip_left));
-    const bool repeat_bottom=!background && value(l,8)!=0 && clip_bottom>1;
+    const bool repeat_bottom=value(l,8)!=0 && clip_bottom>1;
     const auto update=[&](int row,int direction,bool repeat) {
         if (row<clip_top) return;
         if (row>=clip_bottom) {
@@ -1352,7 +1417,7 @@ void blur_character(Surface& out,const Layer& l,int kx,int ky,bool background,bo
         for (int x=clip_left;x<clip_right;++x) {
             const auto pixel=texel(t,x,row);
             auto& col=columns[static_cast<std::size_t>(x-clip_left)];
-            const int alpha=background?1:pixel[3];
+            const int alpha=pixel[3];
             for (std::size_t c=0;c<3;++c) col[c]+=pixel[c]*alpha*direction;
             col[3]+=alpha*direction;
         }
@@ -1374,17 +1439,10 @@ void blur_character(Surface& out,const Layer& l,int kx,int ky,bool background,bo
         for (int x=left;x<right;++x) {
             if (sum[3]>0) {
                 const auto di=(static_cast<std::size_t>(y)*out.width+static_cast<unsigned>(x))*3;
-                const int reciprocal=background ? blur_reciprocals[static_cast<std::size_t>(sum[3])] : 0;
+                const int alpha=(((((sum[3]>>1)*div)>>16)<<1)+1);
                 for (std::size_t c=0;c<3;++c) {
-                    int pixel;
-                    if (background) {
-                        pixel=std::clamp(((sum[c]>>1)*reciprocal)>>14,0,255);
-                    } else {
-                        const int scaled=(sum[c]>>16)*div+(((((sum[c]&65535)>>1)*div)>>16)<<1);
-                        const int alpha=(((((sum[3]>>1)*div)>>16)<<1)+1);
-                        pixel=std::clamp((scaled+out.rgb[di+c]*(255-alpha))>>8,0,255);
-                    }
-                    out.rgb[di+c]=static_cast<Byte>(pixel);
+                    const int scaled=(sum[c]>>16)*div+(((((sum[c]&65535)>>1)*div)>>16)<<1);
+                    out.rgb[di+c]=static_cast<Byte>(std::clamp((scaled+out.rgb[di+c]*(255-alpha))>>8,0,255));
                 }
             }
             const int sx=clamp_int(static_cast<std::int64_t>(x)-dst.x);
@@ -1393,11 +1451,6 @@ void blur_character(Surface& out,const Layer& l,int kx,int ky,bool background,bo
         }
         update(sy-yt,-1,repeat_bottom);
         update(sy+yb,1,repeat_bottom);
-    }
-    if (cacheable) try {
-        l.effect_state->background_blur=std::make_shared<BlurredBackground>(BlurredBackground{l.texture,dst,kx,ky,out});
-    } catch (const std::bad_alloc&) {
-        l.effect_state->background_blur.reset();
     }
 }
 void lamp_visibility(Layer& layer) {
