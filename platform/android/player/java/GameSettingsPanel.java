@@ -25,6 +25,7 @@ final class GameSettingsPanel extends GameUiPanel {
     private ImageView previewWindow,previewNameWindow;
     private boolean[] visibleVoiceThemes;
     private boolean[] characterVoiceChanges;
+    private GameRunner.SettingsCharacterArt[] characterArt;
     private int page,backgroundPage=-1;
     private boolean writingPreferences,watchingPreferences;
     private final ArrayList<TextView> sampleRows=new ArrayList<>();
@@ -72,7 +73,15 @@ final class GameSettingsPanel extends GameUiPanel {
     private OriginalSettingsModel settingsModel(){return assets.settingsModel(canvasWidth,canvasHeight);}
     @Override protected void onAttachedToWindow(){super.onAttachedToWindow();
         if(!watchingPreferences){preferences.registerOnSharedPreferenceChangeListener(preferenceListener);watchingPreferences=true;}
-        characterVoiceChanges=runner.settingsCharacterVoiceChanges(model.characters);
+        characterArt=null;
+        characterVoiceChanges=runner.settingsCharacters(model.characters,art->post(()->{
+            if(!isAttachedToWindow())return;
+            characterArt=art;
+            if(page+1==model.page("voicePrintPage",1)){
+                removeCallbacks(refresh);
+                post(refresh);
+            }
+        }));
         showPage(page);
         if(model.systemVoices.size()>1)runner.settingsVoiceRoles(assets.config,model.systemVoices.size(),visible->post(()->{
             if(!isAttachedToWindow())return;
@@ -86,6 +95,10 @@ final class GameSettingsPanel extends GameUiPanel {
     @Override protected void onDetachedFromWindow(){
         removeCallbacks(typeSample);removeCallbacks(refresh);
         if(watchingPreferences){preferences.unregisterOnSharedPreferenceChangeListener(preferenceListener);watchingPreferences=false;}super.onDetachedFromWindow();
+    }
+    @Override protected void dispatchSetPressed(boolean pressed){
+        // A blank tap belongs to this panel. Controls handle their own press.
+        if(!pressed)super.dispatchSetPressed(false);
     }
     private void write(Runnable change){writingPreferences=true;try{change.run();}finally{writingPreferences=false;}}
     private void writeInt(String key,int value){write(()->preferences.edit().putInt(key,value).apply());}
@@ -166,12 +179,14 @@ final class GameSettingsPanel extends GameUiPanel {
         bar.setEnabled(enabled);put(bar,s.x,s.y-10,s.width,s.height+20);
     }
     private void character(OriginalSettingsModel.CharacterControl c){
+        GameRunner.SettingsCharacterArt art=characterArt==null?null:characterArt[c.index];
+        if(art==null&&(c.requiresHeardVoice||!c.imageVariable.isEmpty()))return;
         if(c.ids.length==0)return;boolean enabled=true;for(int id:c.ids)enabled&=preferences.getBoolean("character."+id+".enabled",true);
         final boolean next=!enabled;
         ButtonArt.Setup setup=c.button.state(enabled);
         GameButton button=drawButton(c.button,enabled,"角色组 "+(c.index+1)+(enabled?"：语音开":"：语音关"),()->{
             write(()->{SharedPreferences.Editor edit=preferences.edit();for(int id:c.ids)edit.putBoolean("character."+id+".enabled",next);edit.apply();});showPage(page);
-        },()->playCharacter(c,!next,ButtonArt.SoundEvent.CLICK));
+        },()->playCharacter(c,!next,ButtonArt.SoundEvent.CLICK),art==null?null:art.image(enabled));
         if(c.soundChange!=null)button.feedback(event->{
             if(!controlsBusy()&&activeFrameReady())playCharacter(c,!next,event);
         },setup.enterWait,setup.exitWait);
@@ -344,9 +359,12 @@ final class GameSettingsPanel extends GameUiPanel {
         return drawButton(b,state,label,action,()->play(b.state(state),false,false));
     }
     private GameButton drawButton(OriginalSettingsModel.Button b,boolean state,String label,Runnable action,Runnable cue){
+        return drawButton(b,state,label,action,cue,null);
+    }
+    private GameButton drawButton(OriginalSettingsModel.Button b,boolean state,String label,Runnable action,Runnable cue,Bitmap alternateImage){
         ButtonArt.Setup setup=b.state(state);
         GameButton.Spec spec=new GameButton.Spec(setup);
-        GameButton button=animatedButton(spec,assets.image(spec.image),label,cue,
+        GameButton button=animatedButton(spec,alternateImage==null?assets.image(spec.image):alternateImage,label,cue,
             action,b.x(state),b.y(state),setup.width,setup.height);
         button.setSelected(state);
         return button;
