@@ -43,6 +43,8 @@ public final class PlayerActivity extends Activity implements GameRunner.Listene
     private GameRunner runner;
     private FrameLayout root,stage;
     private TextureView screen;
+    private ImageView transitionView;
+    private long transitionToken,transitionTimestamp;
     private Surface storySurface;
     private Button panelActionButton;
     private TextView status;
@@ -90,6 +92,7 @@ public final class PlayerActivity extends Activity implements GameRunner.Listene
     private String fullBody="";
     private GameRunner.Frame currentFrame;
     private GameRunner.Frame drawnStoryFrame;
+    private Bitmap overlapPlane;
     private GameRunner.Modal visibleModal,modeUnderPanel;
     private Bitmap optionalGalleryPrevious;
     private boolean openGalleryAfterTitle;
@@ -102,7 +105,7 @@ public final class PlayerActivity extends Activity implements GameRunner.Listene
     private boolean savingSlots;
     private boolean syncingRuntime;
     private int[] pendingDisplay,pendingAuxiliary;
-    private int mouseVariant=Integer.MIN_VALUE;
+    private int mouseVariant=Integer.MIN_VALUE,scriptMouse,ctrlKeys;
     private final SharedPreferences.OnSharedPreferenceChangeListener settingsListener=(p,key) -> {
         if(syncingRuntime||p!=preferences)return;
         settings=PlayerSettings.read(p,userPreferences);
@@ -350,6 +353,11 @@ public final class PlayerActivity extends Activity implements GameRunner.Listene
         root.addOnLayoutChangeListener((v,l,t,r,b,ol,ot,or,ob) -> layoutStage());
         screen=new TextureView(this); screen.setContentDescription("游戏画面");screen.setSoundEffectsEnabled(false);
         stage.addView(screen,new FrameLayout.LayoutParams(-1,-1));
+        transitionView=new ImageView(this);
+        transitionView.setScaleType(ImageView.ScaleType.FIT_XY);
+        transitionView.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        transitionView.setVisibility(View.GONE);
+        stage.addView(transitionView,new FrameLayout.LayoutParams(-1,-1));
         screen.setOnTouchListener((view,event) -> {
             if (event.getActionMasked()==MotionEvent.ACTION_UP) {advance();view.performClick();}
             return true;
@@ -393,6 +401,7 @@ public final class PlayerActivity extends Activity implements GameRunner.Listene
                 if(attached!=null)surfaceOwner.surface(attached);
             }
             @Override public boolean onSurfaceTextureDestroyed(SurfaceTexture texture){
+                clearTransitionView();
                 Surface old=attached;
                 attached=null;
                 if(storySurface==old)storySurface=null;
@@ -405,7 +414,9 @@ public final class PlayerActivity extends Activity implements GameRunner.Listene
                 });
                 return false;
             }
-            @Override public void onSurfaceTextureUpdated(SurfaceTexture texture){}
+            @Override public void onSurfaceTextureUpdated(SurfaceTexture texture){
+                if(transitionTimestamp>0&&texture.getTimestamp()>=transitionTimestamp)clearTransitionView();
+            }
         });
         if (foreground) runner.active(true);
         layoutStage();
@@ -429,6 +440,18 @@ public final class PlayerActivity extends Activity implements GameRunner.Listene
         if(availableWidth<=0||availableHeight<=0)return;
         float scale=Math.min((float)availableWidth/width,(float)availableHeight/height);
         int w=Math.max(1,Math.round(width*scale)),h=Math.max(1,Math.round(height*scale));
+        if(dialoguePanel!=null){
+            // The live message and the script's wipe source use the same logical glyph layout.
+            FrameLayout.LayoutParams message=(FrameLayout.LayoutParams)dialoguePanel.getLayoutParams();
+            if(message.width!=width||message.height!=height){
+                message.width=width;message.height=height;
+                dialoguePanel.setLayoutParams(message);
+            }
+            dialoguePanel.setPivotX(0);
+            dialoguePanel.setPivotY(0);
+            dialoguePanel.setScaleX(w/(float)width);
+            dialoguePanel.setScaleY(h/(float)height);
+        }
         int left=(availableWidth-w)/2;
         int top=(availableHeight-h)/2;
         FrameLayout.LayoutParams params=(FrameLayout.LayoutParams)stage.getLayoutParams();
@@ -440,57 +463,93 @@ public final class PlayerActivity extends Activity implements GameRunner.Listene
     }
     @Override public void loaded() {runOnUiThread(() -> {refreshAfterLoad=true;modeUnderPanel=null;});}
     @Override public void frame(GameRunner.Frame frame,int initialVisible) {
-        runOnUiThread(() -> {
-            if (isDestroyed() || stage==null) return;
-            if (titlePanel!=null) {stage.removeView(titlePanel); titlePanel=null; titleModel=null;}
-            clearStartupForStory();
-            if (frame.width>0&&frame.height>0&&(width!=frame.width || height!=frame.height)) {width=frame.width;height=frame.height;layoutStage();}
-            if(frame.wait==NativeGame.MODAL){
-                currentFrame=frame;
-                // Preserve the last story composition until the modal has captured it.
-                if(gamePanel==null&&preparingPanel==null)showScriptModal(null);
-                return;
-            }
-            modeUnderPanel=null;
-            boolean changed=refreshAfterLoad || currentFrame==null || currentFrame.wait!=frame.wait || currentFrame.line!=frame.line ||
-                currentFrame.word!=frame.word || !currentFrame.script.equals(frame.script) ||
-                !currentFrame.body.equals(frame.body) || !currentFrame.speaker.equals(frame.speaker) ||
-                currentFrame.nameWindow!=frame.nameWindow || currentFrame.decorations!=frame.decorations;
-            currentFrame=drawnStoryFrame=frame;
-            if(slotPreview!=null&&slotPreview.frame!=frame)slotPreview=null;
-            dialoguePanel.scriptCursorVariant(frame.scriptCursor);
-            dialoguePanel.storyBody(frame.hasDialogueText());
-            dialoguePanel.passive(frame.wait==NativeGame.DRAW);
-            dialoguePanel.decorations(frame.decorations,frame.frameMs,refreshAfterLoad);
-            selectDialogueVariant();
-            if (changed) {
-                refreshAfterLoad=false;
-                typing=false; fullBody=frame.displayBody.text;
-                dialoguePanel.speaker(frame.speaker,frame.nameWindow);dialoguePanel.read(frame.alreadyRead);
-                if(choices!=null){stage.removeView(choices);choices=null;}
-                boolean dialogue=frame.wait==NativeGame.DIALOGUE;
-                typing=dialogue&&initialVisible<frame.displayBody.glyphCount;
-                revealed=dialogue?fullBody.offsetByCodePoints(0,initialVisible):fullBody.length();
-                dialoguePanel.message(frame.displayBody,revealed);
-                if(frame.wait==NativeGame.CHOICE&&uiAssets!=null){
-                    choices=new GameChoicePanel(this,uiAssets,frame,preferences.getBoolean("changeSelectColor",false),
-                        ()->{
-                            if(runner==null||controls!=null&&controls.clicking())return false;
-                            runner.choicePressed(frame.word);
-                            return true;
-                        },
-                        number->{if(runner!=null)runner.input(lastX,lastY,number);});
-                    choices.sound((se,voice)->{if(runner!=null)runner.playClick(se,voice);});
-                    stage.addView(choices,stage.indexOfChild(storyScreen),new FrameLayout.LayoutParams(-1,-1));
-                }
-                if(frame.wait==NativeGame.END){
-                    String end="本段已结束 · 打开菜单可读档或返回标题";
-                    dialoguePanel.speaker("",false);dialoguePanel.message(end,end.length());
-                }
-            }
-            updateVisibility(); updateStatus();
-            if(frame.wait==NativeGame.PLACE&&gamePanel==null&&preparingPanel==null)showPlace(null);
+        runOnUiThread(()->applyFrame(frame,initialVisible));
+    }
+    @Override public void afterStoryDraw(Runnable ready){
+        runOnUiThread(()->{
+            if(stage==null||!stage.isAttachedToWindow()||!stage.isShown())ready.run();
+            // Later frame changes posted by the worker run after this traversal.
+            else stage.postOnAnimation(ready);
         });
+    }
+    @Override public void transitionFrame(GameRunner.Frame frame,int initialVisible,Bitmap scene,long token,Runnable ready){
+        runOnUiThread(()->{
+            try{
+                if(isDestroyed()||transitionView==null)return;
+                // Show the new base and the matching message plane in one Android draw.
+                transitionToken=token;
+                transitionTimestamp=0;
+                transitionView.setImageBitmap(scene);
+                transitionView.setVisibility(View.VISIBLE);
+                applyFrame(frame,initialVisible);
+            }finally{ready.run();}
+        });
+    }
+    @Override public void transitionQueued(long token,long timestamp){
+        runOnUiThread(()->{
+            if(token!=transitionToken)return;
+            transitionTimestamp=timestamp;
+            SurfaceTexture texture=screen==null?null:screen.getSurfaceTexture();
+            if(timestamp==0||texture==null||texture.getTimestamp()>=timestamp)clearTransitionView();
+        });
+    }
+    private void clearTransitionView(){
+        transitionToken=transitionTimestamp=0;
+        if(transitionView!=null){
+            transitionView.setImageDrawable(null);
+            transitionView.setVisibility(View.GONE);
+        }
+    }
+    private void applyFrame(GameRunner.Frame frame,int initialVisible){
+        if (isDestroyed() || stage==null) return;
+        if (titlePanel!=null) {stage.removeView(titlePanel); titlePanel=null; titleModel=null;}
+        clearStartupForStory();
+        if (frame.width>0&&frame.height>0&&(width!=frame.width || height!=frame.height)) {width=frame.width;height=frame.height;layoutStage();}
+        if(frame.wait==NativeGame.MODAL){
+            currentFrame=frame;
+            // Preserve the last story composition until the modal has captured it.
+            if(gamePanel==null&&preparingPanel==null)showScriptModal(null);
+            return;
+        }
+        modeUnderPanel=null;
+        boolean changed=refreshAfterLoad || currentFrame==null || currentFrame.wait!=frame.wait || currentFrame.line!=frame.line ||
+            currentFrame.word!=frame.word || !currentFrame.script.equals(frame.script) ||
+            !currentFrame.body.equals(frame.body) || !currentFrame.speaker.equals(frame.speaker) ||
+            currentFrame.nameWindow!=frame.nameWindow || currentFrame.decorations!=frame.decorations;
+        currentFrame=drawnStoryFrame=frame;
+        if(slotPreview!=null&&slotPreview.frame!=frame)slotPreview=null;
+        dialoguePanel.scriptCursorVariant(frame.scriptCursor);
+        dialoguePanel.storyBody(frame.hasDialogueText());
+        dialoguePanel.passive(frame.wait==NativeGame.DRAW);
+        dialoguePanel.decorations(frame.decorations,frame.frameMs,refreshAfterLoad);
+        selectDialogueVariant();
+        if (changed) {
+            refreshAfterLoad=false;
+            typing=false; fullBody=frame.displayBody.text;
+            dialoguePanel.speaker(frame.speaker,frame.nameWindow);dialoguePanel.read(frame.alreadyRead);
+            if(choices!=null){stage.removeView(choices);choices=null;}
+            boolean dialogue=frame.wait==NativeGame.DIALOGUE;
+            typing=dialogue&&initialVisible<frame.displayBody.glyphCount;
+            revealed=dialogue?frame.displayBody.offsetForGlyphs(initialVisible):fullBody.length();
+            dialoguePanel.message(frame.displayBody,revealed);
+            if(frame.wait==NativeGame.CHOICE&&uiAssets!=null){
+                choices=new GameChoicePanel(this,uiAssets,frame,preferences.getBoolean("changeSelectColor",false),
+                    ()->{
+                        if(runner==null||controls!=null&&controls.clicking())return false;
+                        runner.choicePressed(frame.word);
+                        return true;
+                    },
+                    number->{if(runner!=null)runner.input(lastX,lastY,number);});
+                choices.sound((se,voice)->{if(runner!=null)runner.playClick(se,voice);});
+                stage.addView(choices,stage.indexOfChild(storyScreen),new FrameLayout.LayoutParams(-1,-1));
+            }
+            if(frame.wait==NativeGame.END){
+                String end="本段已结束 · 打开菜单可读档或返回标题";
+                dialoguePanel.speaker("",false);dialoguePanel.message(end,end.length());
+            }
+        }
+        updateVisibility(); updateStatus();
+        if(frame.wait==NativeGame.PLACE&&gamePanel==null&&preparingPanel==null)showPlace(null);
     }
     @Override public void screenLayerChanged(){
         StoryScreen view=storyScreen;
@@ -515,6 +574,7 @@ public final class PlayerActivity extends Activity implements GameRunner.Listene
     }
     @Override public void panels(GameUiAssets assets) {runOnUiThread(() -> {
         uiAssets=assets;if(isDestroyed()||stage==null)return;
+        updatePointerIcon();
         longPrintBackdrop.invalidate();
         dialoguePanel.cursorAssets(assets);
         if(controls!=null)stage.removeView(controls);
@@ -535,6 +595,7 @@ public final class PlayerActivity extends Activity implements GameRunner.Listene
                 case QUICK_LOAD:runner.quickLoad();break;
                 case AUTO:runner.auto(target);break;
                 case SKIP:runner.skip(target);break;
+                case FILM_SKIP:runner.skipFilm();break;
                 case HIDE:hideUi();break;
                 }
                 if(panelsOpen==0&&preparingPanel==null)runner.menu(false);
@@ -554,11 +615,12 @@ public final class PlayerActivity extends Activity implements GameRunner.Listene
         autoMode=automatic;skipMode=skipping;
         updateVisibility();updateStatus();
     });}
-    @Override public void text(GameRunner.Frame frame,int visible,int total){runOnUiThread(()->{
+    @Override public void text(GameRunner.Frame frame,int visible,int total,int effect,int progress){runOnUiThread(()->{
         if(currentFrame==null||currentFrame.line!=frame.line||currentFrame.word!=frame.word||!currentFrame.script.equals(frame.script))return;
         int count=Math.min(Math.max(0,visible),fullBody.codePointCount(0,fullBody.length()));
-        revealed=fullBody.offsetByCodePoints(0,count);typing=count<total;dialoguePanel.reveal(revealed);
-        updateVisibility();
+        revealed=frame.displayBody.offsetForGlyphs(count);dialoguePanel.reveal(revealed,effect,progress);
+        boolean printing=count<total;
+        if(typing!=printing){typing=printing;updateVisibility();}
     });}
     @Override public void parameters(int[] raw,int[] display,int[] auxiliary){runOnUiThread(()->{
         pendingDisplay=display;pendingAuxiliary=auxiliary;ui.removeCallbacks(syncRuntimeDisplay);ui.post(syncRuntimeDisplay);
@@ -577,12 +639,19 @@ public final class PlayerActivity extends Activity implements GameRunner.Listene
             settings=PlayerSettings.read(preferences,userPreferences);if(dialoguePanel!=null)dialoguePanel.settings(settings);
             if(aux!=null&&aux.length>=36){
                 if(dialoguePanel!=null)dialoguePanel.cursorVariant(aux[34]);
-                if(stage!=null&&mouseVariant!=aux[35]){mouseVariant=aux[35];stage.setPointerIcon(uiAssets.pointer(mouseVariant));}
+                if(mouseVariant!=aux[35]){mouseVariant=aux[35];updatePointerIcon();}
             }
             if(choices!=null)choices.changeColor(preferences.getBoolean("changeSelectColor",false));
             selectDialogueVariant();immersive();updateStatus();
         }finally{syncingRuntime=false;}
     }};
+    @Override public void scriptMouse(int variant){runOnUiThread(()->{
+        if(scriptMouse!=variant){scriptMouse=variant;updatePointerIcon();}
+    });}
+    private void updatePointerIcon(){
+        if(!isDestroyed()&&stage!=null&&uiAssets!=null&&mouseVariant!=Integer.MIN_VALUE)
+            stage.setPointerIcon(uiAssets.pointer(mouseVariant,scriptMouse));
+    }
     private void advance() {
         if(runner==null || launchingGame || panelsOpen>0)return;
         if(autoMode)runner.auto(false);
@@ -621,7 +690,8 @@ public final class PlayerActivity extends Activity implements GameRunner.Listene
         boolean showBackdrop=inGame&&line&&currentFrame.layoutCommand==0x22220002&&uiAssets!=null&&
             uiAssets.longPrintImage!=null&&(!uiHidden||!uiAssets.longPrintImageOffWithWindow);
         longPrintBackdrop.setVisibility(showBackdrop?View.VISIBLE:View.GONE);
-        boolean hasDialogue=currentFrame!=null&&(currentFrame.showsDialogue()&&(!line||!fullBody.isEmpty())||currentFrame.wait==NativeGame.END);
+        boolean hasDialogue=currentFrame!=null&&(currentFrame.showsDialogue()&&(!line||currentFrame.windowVisible||!fullBody.isEmpty())||
+            currentFrame.wait==NativeGame.END);
         dialoguePanel.setVisibility(inGame&&!uiHidden&&hasDialogue?View.VISIBLE:View.GONE);
         dialoguePanel.waiting(inGame&&!uiHidden&&hasDialogue&&!typing&&!skipMode&&currentFrame.wait==NativeGame.DIALOGUE,
             autoMode,currentFrame==null?0:currentFrame.layoutCommand,currentFrame==null?20:currentFrame.frameMs);
@@ -877,6 +947,7 @@ public final class PlayerActivity extends Activity implements GameRunner.Listene
             try{startActivity(new Intent(Intent.ACTION_VIEW,Uri.parse(titleModel.website)));}
             catch(android.content.ActivityNotFoundException e){notice("未找到浏览器");}break;
         case MODE:openMenuMode(item.mode,GameRunner.Modal.TITLE);break;
+        case MINIGAME:openMiniGame(item.mode,false);break;
         default:break;
         }
     }
@@ -889,6 +960,7 @@ public final class PlayerActivity extends Activity implements GameRunner.Listene
     private final GameGalleryPanel.Actions galleryActions=new GameGalleryPanel.Actions() {
         public void open(GalleryCatalog.Screen screen,int group,int page,int index) { openGallery(screen,group,page,index); }
         public void mode(int mode) {openMenuMode(mode,GameRunner.Modal.OMAKE);}
+        public void miniGame(int index) {openMiniGame(index,true);}
         public void back() { galleryBack(); }
         public void replay(int group,int index) {
             if (runner!=null) { replayReturn=galleryPage; runner.replayGallery(group,index); }
@@ -905,6 +977,18 @@ public final class PlayerActivity extends Activity implements GameRunner.Listene
             owner.requestCgFrame(page,frame,bitmap->runOnUiThread(()->done.accept(owner==runner?bitmap:null)));
         }
     };
+    private void openMiniGame(int index,boolean omake){
+        GameRunner owner=runner;
+        if(owner==null||uiAssets==null)return;
+        GameUiPanel previous=gamePanel;
+        owner.requestMiniGame(index,game->runOnUiThread(()->{
+            if(game==null||runner!=owner||isDestroyed()||isFinishing()||gamePanel!=previous)return;
+            Runnable back=omake?()->openGallery(GalleryCatalog.Screen.OMAKE,0,0,-1):()->leaveOriginalPanel(game.config);
+            GameMiniGamePanel panel=new GameMiniGamePanel(this,uiAssets,game,width,height,
+                sound->owner.playClick(sound,-1),()->owner.completeMiniGame(index),back);
+            showOriginalPanel(panel,back);
+        }));
+    }
     @Override public void gallery(GalleryCatalog.Page page,long request) {
         runOnUiThread(() -> {
             if (request!=galleryRequest || isDestroyed() || isFinishing() || titlePanel==null || uiAssets==null) return;
@@ -946,14 +1030,14 @@ public final class PlayerActivity extends Activity implements GameRunner.Listene
             closeOriginalPanel();
         });
     }
-    @Override public void movie(File file,int volume,boolean canSkip,boolean startup){runOnUiThread(()->{
+    @Override public void movie(File file,float gain,boolean canSkip,boolean startup){runOnUiThread(()->{
         if(isFinishing()||isDestroyed()||stage==null||runner==null)return;
         GameRunner owner=runner;
         if(!startup)clearStartupForStory();
         if(gamePanel!=null)gamePanel.uiActive(false);
         for(int i=0;i<stage.getChildCount();i++)
             stage.getChildAt(i).setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
-        moviePlayback=new MoviePlayback(this,file,volume,canSkip,(source,outcome,failure)->{
+        moviePlayback=new MoviePlayback(this,file,gain,canSkip,(source,outcome,failure)->{
             if(owner!=runner||source!=moviePlayback)return;
             moviePlayback=null;
             if(startup)stage.setForeground(new ColorDrawable(Color.BLACK));
@@ -1138,6 +1222,30 @@ public final class PlayerActivity extends Activity implements GameRunner.Listene
         if(independentMode==4&&independentStatus!=null&&independentStatus.getVisibility()==View.VISIBLE)
             independentStatus.draw(canvas);
     }
+    @Override public Bitmap captureOverlapSource(GameRunner.Frame frame,int w,int h){
+        // Keep capture on the UI thread and off the normal frame path. This
+        // draws only the story overlay; the native scene stays in the renderer.
+        java.util.concurrent.FutureTask<Bitmap> capture=new java.util.concurrent.FutureTask<>(()->{
+            if(isDestroyed()||frame!=drawnStoryFrame||panelsOpen!=0||moviePlayback!=null||
+                stage==null||stage.getWidth()<=0||stage.getHeight()<=0||
+                storyScreen.getVisibility()!=View.VISIBLE)return null;
+            boolean withUi=dialoguePanel.getVisibility()==View.VISIBLE||
+                choices!=null&&choices.getVisibility()==View.VISIBLE;
+            if(!withUi&&longPrintBackdrop.getVisibility()!=View.VISIBLE&&storyScreen.layer==0)return null;
+            if(overlapPlane==null||overlapPlane.getWidth()!=w||overlapPlane.getHeight()!=h)
+                overlapPlane=Bitmap.createBitmap(w,h,Bitmap.Config.ARGB_8888);
+            else overlapPlane.eraseColor(Color.TRANSPARENT);
+            UiOpening.drawOnto(stage,overlapPlane,canvas->drawStorySnapshot(canvas,withUi,false));
+            return overlapPlane;
+        });
+        runOnUiThread(capture);
+        try{return capture.get(25,java.util.concurrent.TimeUnit.MILLISECONDS);}
+        catch(InterruptedException e){Thread.currentThread().interrupt();}
+        catch(java.util.concurrent.ExecutionException e){Log.w("SystemNNN","Unable to capture story transition",e.getCause());}
+        catch(java.util.concurrent.TimeoutException ignored){}
+        capture.cancel(false);
+        return null;
+    }
     private Bitmap snapshotStory(GameRunner.Capture picture,boolean withUi){
         return UiOpening.snapshot(stage,picture.bitmap(),canvas->drawStorySnapshot(canvas,withUi,true));
     }
@@ -1177,7 +1285,7 @@ public final class PlayerActivity extends Activity implements GameRunner.Listene
             View child=stage.getChildAt(i);
             if(child==dialoguePanel&&!withFloatingUi){
                 // The PC removes the wait cursor and quick buttons before capturing the menu background.
-                if(!screenComposited&&withUi)dialoguePanel.drawMessagePlane(canvas);
+                if(!screenComposited&&withUi)drawStageChild(canvas,dialoguePanel,dialoguePanel::drawMessagePlane);
             }else if(child==longPrintBackdrop||child==dialoguePanel||child==choices){
                 if(!screenComposited&&(withUi||child==longPrintBackdrop))drawStageChild(canvas,child);
             }else if(withUi&&withFloatingUi&&(child==controls||child==status||child==quickNoticeView||child==independentStatus)){
@@ -1186,13 +1294,16 @@ public final class PlayerActivity extends Activity implements GameRunner.Listene
         }
     }
     private static void drawStageChild(Canvas canvas,View child){
+        if(child!=null)drawStageChild(canvas,child,child::draw);
+    }
+    private static void drawStageChild(Canvas canvas,View child,java.util.function.Consumer<Canvas> draw){
         if(child==null||child.getVisibility()!=View.VISIBLE||child.getAlpha()<=0)return;
         int saved=canvas.save();
         canvas.translate(child.getLeft(),child.getTop());
         canvas.concat(child.getMatrix());
         canvas.clipRect(0,0,child.getWidth(),child.getHeight());
         if(child.getAlpha()<1)canvas.saveLayerAlpha(0,0,child.getWidth(),child.getHeight(),Math.round(child.getAlpha()*255));
-        child.draw(canvas);
+        draw.accept(canvas);
         canvas.restoreToCount(saved);
     }
 
@@ -1258,7 +1369,7 @@ public final class PlayerActivity extends Activity implements GameRunner.Listene
                     messagePlane.scale(width/(float)getWidth(),height/(float)getHeight());
                     drawStageChild(messagePlane,longPrintBackdrop);
                     if(withUi){
-                        dialoguePanel.drawMessagePlane(messagePlane);
+                        drawStageChild(messagePlane,dialoguePanel,dialoguePanel::drawMessagePlane);
                         if(choices!=null)choices.drawOptions(messagePlane);
                     }
                     messagePlane.restoreToCount(saved);
@@ -1274,7 +1385,7 @@ public final class PlayerActivity extends Activity implements GameRunner.Listene
                 canvas.drawBitmap(image,null,destination,paint);
                 if(withUi){
                     if(choices!=null)choices.drawTimer(canvas);
-                    if(withFloatingUi)dialoguePanel.drawMessageCursor(canvas);
+                    if(withFloatingUi)drawStageChild(canvas,dialoguePanel,dialoguePanel::drawMessageCursor);
                 }
                 return true;
             }catch(RuntimeException|OutOfMemoryError e){
@@ -1875,7 +1986,7 @@ public final class PlayerActivity extends Activity implements GameRunner.Listene
         if(focus){
             immersive();
             retryAudioFocus();
-        }
+        }else clearCtrlSkip();
     }
     @Override public void onUserInteraction(){
         super.onUserInteraction();
@@ -1903,6 +2014,26 @@ public final class PlayerActivity extends Activity implements GameRunner.Listene
         }
         if(action==MotionEvent.ACTION_CANCEL)storyDrag=false;
         return super.dispatchTouchEvent(event);
+    }
+    @Override public boolean dispatchKeyEvent(KeyEvent event){
+        int key=event.getKeyCode();
+        int bit=key==KeyEvent.KEYCODE_CTRL_LEFT?1:key==KeyEvent.KEYCODE_CTRL_RIGHT?2:0;
+        if(bit!=0&&event.getAction()==KeyEvent.ACTION_DOWN&&storyPointerActive()){
+            if(ctrlKeys==0)runner.ctrlSkip(true);
+            ctrlKeys|=bit;
+            return true;
+        }
+        if(bit!=0&&event.getAction()==KeyEvent.ACTION_UP&&(ctrlKeys&bit)!=0){
+            ctrlKeys&=~bit;
+            if(ctrlKeys==0&&runner!=null)runner.ctrlSkip(false);
+            return true;
+        }
+        return super.dispatchKeyEvent(event);
+    }
+    private void clearCtrlSkip(){
+        if(ctrlKeys==0)return;
+        ctrlKeys=0;
+        if(runner!=null)runner.ctrlSkip(false);
     }
     @Override public boolean dispatchGenericMotionEvent(MotionEvent event){
         if(event.getActionMasked()==MotionEvent.ACTION_HOVER_MOVE&&storyPointerActive())storyPointer(event);
@@ -1953,7 +2084,7 @@ public final class PlayerActivity extends Activity implements GameRunner.Listene
         if(runner!=null) runner.active(true);
         if(moviePlayback!=null)moviePlayback.resume();
     }
-    @Override protected void onPause() {foreground=false;if(gamePanel!=null)gamePanel.uiActive(false);statusActive(false); if(runner!=null) runner.active(false);
+    @Override protected void onPause() {foreground=false;clearCtrlSkip();if(gamePanel!=null)gamePanel.uiActive(false);statusActive(false); if(runner!=null) runner.active(false);
         if(moviePlayback!=null)moviePlayback.pause();super.onPause();}
     @Override protected void onDestroy() {
         cancelGameCopy=true;

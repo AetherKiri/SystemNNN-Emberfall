@@ -23,6 +23,7 @@ struct RuntimeParameterRouting {
     Value sound_voice_volume_not_use = 1;
     bool total_volume_use = false;
     bool separate_script_se = true;
+    bool use_xaudio2 = false;
 };
 
 // These select the original CCommonSystemFile filenames, not game names.
@@ -51,6 +52,7 @@ struct InitialRuntimeParameters {
     Value system_voice_selection = 0;
     Value message_window = 0;
     Value message_cursor = 0, mouse_cursor = 0;
+    bool no_skip_frame = false;
     Word message_cursor_parameter = 0, mouse_cursor_parameter = 0;
     SystemVariables system_variables{};
     ScriptProgress script_progress{};
@@ -198,7 +200,9 @@ inline void decode(const std::vector<Byte>& bytes, InitialRuntimeParameters& ini
             }
             candidate.message_window = signed_word(bytes, offset + 480U * 4U);
             candidate.message_cursor = signed_word(bytes, offset + 481U * 4U);
+            candidate.no_skip_frame = signed_word(bytes, offset + 38U * 4U) != 0;
             candidate.mouse_cursor = signed_word(bytes, offset + 482U * 4U);
+            candidate.routing.use_xaudio2 = (word(bytes, offset + 495U * 4U) & 2U) != 0;
             candidate.runtime_text.surname=text_field(bytes,offset+56U*4U,16U,runtime_name_bytes);
             candidate.runtime_text.given_name=text_field(bytes,offset+60U*4U,16U,runtime_name_bytes);
         } else if (code == 6U) {

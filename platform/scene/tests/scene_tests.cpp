@@ -1777,6 +1777,7 @@ int main(){
             "enabling analysis unexpectedly replaced the config in init");
         const auto refreshed=scene::GameSession::pc_save_configuration(temp.root,true);
         require(refreshed && refreshed->file==plain && refreshed->executable_layout && refreshed->message_width==128 &&
+            refreshed->executable_message_width && refreshed->executable_status_bytes &&
             refreshed->status_bytes==scene::pc::preview_status_bytes && !std::filesystem::exists(preferred),
             "manual regeneration did not update the existing config");
 
@@ -1789,6 +1790,13 @@ int main(){
         const auto inspected=scene::GameSession::pc_save_configuration(temp.root,false);
         require(inspected && inspected->file==plain && inspected->layer_records==32,
             "inspection did not report the same config used at launch");
+
+        temp.write("game.exe",executable_save_fixture(16,16,0,scene::pc::preview_status_bytes));
+        const auto mixed=scene::GameSession::pc_save_configuration(temp.root,true);
+        require(mixed && mixed->executable_layout && !mixed->executable_message_width &&
+            mixed->executable_status_bytes && mixed->message_width==256,
+            "config inspection lost the source of a field missing from the EXE");
+        std::filesystem::remove(temp.root/"game.exe");
 
         std::filesystem::remove(plain);
         scene::GameSession regenerated(temp.root,test_options());
@@ -1913,6 +1921,38 @@ int main(){
         require(entry.set_story_variable("route",1)&&!entry.set_story_variable("missing",1),"scenario variable lookup");
         require(entry.step_frame(0).dialogue.message_id==2&&entry.variable(300)==1,"the scenario value was not visible to the first script");
     });
+    suite.test("MINIGAME completion applies the configured reward and requests a system save",[]{
+        Model m;m.code.end();TempGame temp(m);
+        Bytes vars{'r','e','w','a','r','d','\n'};for(auto& b:vars)b^=0xffU;
+        temp.write("spt/var.fxf",vars);
+        temp.text("init/minigame.xtx","addMiniGame 2\nminiGame1 6\nminiGame2 10\n"
+            "setVarName1 reward\nsetVarType1 2\nsetVarName2 reward\nsetVarType2 3\n");
+        scene::GameSession game(temp.root,test_options());
+        game.take_system_save_request();
+        require(!game.complete_minigame(2) && !game.take_system_save_request(),"unknown game awarded a reward");
+        require(game.complete_minigame(0) && game.variable(0)==1 && game.take_system_save_request(),"count reward");
+        require(game.complete_minigame(1) && game.variable(0)==3 && game.take_system_save_request(),"bit reward");
+    });
+    suite.test("script mouse variants are independent of the configured pointer and survive both saves",[]{
+        Model m;m.message=true;m.code.print(1);
+        m.code.number(0x33330055U,{2});m.code.print(2);
+        m.code.number(0x33330055U,{0});m.code.print(3);m.code.end();
+        TempGame temp(m);scene::GameSession game(temp.root,test_options());
+        game.runtime()->set_pc_display_options(false,3);
+        const auto initial=game.step_frame(0);
+        require(initial.script_mouse==0 && initial.script_cursor==0,"initial pointer");
+        scene::InputState advance;advance.advance=true;
+        const auto& changed=game.step_frame(0,advance);
+        require(changed.script_mouse==2 && changed.script_cursor==0 &&
+            game.runtime()->cursor_variants()[1]==3,"MOUSENUMBER changed the configured pointer or message cursor");
+        const auto snapshot=game.snapshot(),pc=game.export_pc_save();
+        require(scene::pc::parse_save(pc).status.mouse_number==2,"PC save lost MOUSENUMBER");
+        require(game.step_frame(0,advance).script_mouse==0,"script mouse did not reset");
+        game.restore_snapshot(snapshot);
+        require(game.state().script_mouse==2,"native snapshot lost MOUSENUMBER");
+        game.restore_pc_save(pc);
+        require(game.state().script_mouse==2 && game.runtime()->cursor_variants()[1]==3,"PC load lost a pointer variant");
+    });
     suite.test("frame pacing repays a bounded number of frames",[]{
         Model m;m.code.present(30);m.code.end();TempGame temp(m);
         temp.text("init/game.xtx","frameTime 20\nmaxSkipFrame 2\nskipAdjustFrame 30\n");
@@ -1920,12 +1960,78 @@ int main(){
         require(game.step_frame(0).wait==scene::Wait::Draw,"draw not reached");
         std::vector<unsigned> steady;
         for(int i=0;i<6;++i)steady.push_back(game.pace(20));
-        require(steady==std::vector<unsigned>{20,40,0,20,40,0},"on-time frames differ from the PC schedule");
+        require(steady==std::vector<unsigned>{20,20,20,20,20,20},"on-time updates skipped or repeated animation frames");
+        require(game.pace(19)==0&&game.pace(1)==20,"pacing borrowed time from the next frame");
+        game.reset_frame_pacing();
         require(game.pace(500)==20&&game.pace(20)==40&&game.pace(20)==40,"a late frame exceeded maxSkipFrame");
         Model brief;brief.code.present(1);brief.code.end();TempGame other(brief);
         scene::GameSession last(other.root,test_options());
         require(last.step_frame(0).wait==scene::Wait::Draw&&last.pace(20)==20&&last.pace(20)==20,
             "pacing ran past the remaining DRAW frames");
+        auto original=system_template_fixture(1);
+        le32(original,64+38*4,1);
+        temp.write("sav/sysfile.org",original);
+        scene::GameSession capped(temp.root,test_options());
+        require(capped.runtime()->no_skip_frame()&&capped.step_frame(0).wait==scene::Wait::Draw&&
+            capped.pace(500)==20&&capped.pace(20)==20&&capped.pace(20)==20,
+            "PC SYSTEM DATA noSkipFrame did not cap frame repayment");
+    });
+    suite.test("a late frame expires a timed choice on the elapsed clock",[]{
+        Model m;m.message=true;
+        m.code.add({11,command,0x22220006U,1,0,0,3,0,2,250,0});
+        m.code.add({4,control,0x55560008U,1});
+        m.code.add({4,control,0x55560008U,2});
+        m.code.print(77);m.code.end();TempGame temp(m);
+        temp.text("init/game.xtx","frameTime 20\nmaxSkipFrame 2\n");
+        scene::GameSession game(temp.root,test_options());
+        require(game.step_frame(0).choice_remaining_ms==250,"timed choice not reached");
+        const auto animation=game.pace(500);
+        require(animation==20,"choice animations should run one update");
+        const auto& after=game.step_frame({500,animation});
+        require(after.wait==scene::Wait::Dialogue && after.choice_timed_out,"animation time delayed the timeout");
+    });
+    suite.test("RENAMELAYER picks the configured tag and persists the bit mask",[]{
+        Model m;m.code.number(0x33330062U,{0,1});m.code.number(0x33330060U,{1});
+        m.code.image(0);m.code.number(effect,{0,2});m.code.present();
+        m.code.image(0);m.code.number(effect,{0,2});m.code.present();m.code.end();
+        TempGame temp(m);
+        Bytes vars{'v','a','r','i','a','n','t','\n'};for(auto& b:vars)b^=0xffU;
+        temp.write("spt/var.fxf",vars);
+        temp.text("init/game.xtx","renameLayerVar variant\nrenameTagNumber 2\nrenameTag1 _green\n");
+        temp.write("dwq/red.dwq",asset("tiny_red"));
+        temp.write("dwq/red_green.dwq",asset("tiny_green"));
+        scene::GameSession game(temp.root,test_options());
+        require(game.step_frame(0).wait==scene::Wait::Draw && game.surface().rgb[1]>0,"tagged layer was not loaded");
+        const auto snapshot=game.snapshot();
+        scene::GameSession restored(temp.root,test_options());restored.restore_snapshot(snapshot);
+        require(restored.step_frame(20).wait==scene::Wait::Draw && restored.surface().rgb[1]>0,
+            "rename mask was lost when resuming a checkpoint");
+    });
+    suite.test("MESSAGEEFFECT applies once and survives a native checkpoint",[]{
+        Model m;m.message=true;m.code.number(0x3333006eU,{11});
+        m.code.print(1);m.code.print(2);m.code.end();TempGame temp(m);
+        scene::GameSession game(temp.root,test_options());
+        require(game.step_frame(0).dialogue.effect_type==11,"first message effect");
+        const auto snapshot=game.snapshot();
+        game.restore_snapshot(snapshot);
+        require(game.state().dialogue.effect_type==11,"restored message effect");
+        scene::InputState advance;advance.advance=true;
+        require(game.step_frame(0,advance).dialogue.effect_type==0,"message effect leaked to the following message");
+    });
+    suite.test("FILMENDENABLE skips waits and resumes commands after ENDFILM",[]{
+        Model m;m.message=true;m.code.number(0x3333005dU,{1});m.code.print(1);
+        m.code.number(nnn::audio::music,{UINT32_MAX});m.code.present(40);m.code.print(2);
+        m.code.add({3,control,0x5556000cU});m.code.number(nnn::audio::music,{UINT32_MAX});
+        m.code.print(3);m.code.end();TempGame temp(m);
+        temp.text("init/game.xtx","skipFilmButtonCreateFlag 1\n");
+        scene::GameSession game(temp.root,test_options());
+        require(game.step_frame(0).dialogue.message_id==1 && game.film_skip_available(),"film skip not enabled");
+        const auto snapshot=game.snapshot();game.restore_snapshot(snapshot);
+        require(game.request_film_skip() && !game.film_skip_available(),"film skip did not consume permission");
+        const auto& after=game.step_frame(0);
+        require(after.wait==scene::Wait::Dialogue && after.dialogue.message_id==3,"skipped past the film boundary");
+        const auto log=game.audio().stats().log;
+        require(log.size()==2 && log[0].action=="music.skipped" && log[1].action=="music.stop","film skip audio gate");
     });
     suite.test("background script runs one segment per frame",[]{
         Model m;m.code.end();TempGame temp(m);
@@ -1941,6 +2047,46 @@ int main(){
             waits.push_back(preview->step_ui_background({},false).wait);
         require(waits==std::vector<Wait>{Wait::Draw,Wait::Draw,Wait::Running,Wait::Draw,Wait::Draw,Wait::Running,
             Wait::Draw,Wait::Draw,Wait::Running,Wait::Running,Wait::Ended},"ENDKOMA or ENDFILM did not end the frame");
+    });
+    suite.test("a late decorative frame preserves ENDIF and DRAW boundaries",[]{
+        Model m;
+        m.code.add({6,control,0x55560002U,0xa0000000U,1,0x90000001U});
+        m.code.add({4,control,0xa000007bU,7});
+        m.code.add({3,control,0xa000007dU});
+        m.code.add({3,control,0x55560013U});
+        m.code.present(2);
+        m.code.present(5);m.code.end();
+        TempGame temp(m);temp.write("spt/back.spt",script(m));
+        scene::GameSession story(temp.root,test_options());
+        require(story.step_frame(0).wait==scene::Wait::Draw,"ENDIF blocked foreground execution");
+        auto options=test_options();options.runtime=story.runtime();
+        auto preview=scene::GameSession::create_ui_preview(temp.root,options);
+        preview->start_ui_background("back",12);
+        require(preview->step_ui_background({},false,4).wait==scene::Wait::Running,
+            "ENDIF did not end the decorative frame");
+        const auto& first=preview->step_ui_background({},false,4);
+        require(first.wait==scene::Wait::Draw&&first.remaining_frames==0,"late frame ran past its first DRAW");
+        story.runtime()->set_pc_display_options(true,0);
+        const auto& second=preview->step_ui_background({},false,4);
+        require(second.wait==scene::Wait::Draw&&second.remaining_frames==4,
+            "noSkipFrame did not cap decorative pacing");
+    });
+    suite.test("live decorative pacing repays frame debt gradually",[]{
+        Model m;m.code.present(20);m.code.end();TempGame temp(m);
+        temp.text("init/game.xtx","frameTime 20\nmaxSkipFrame 5\nmaxSkipFrameBackScript 3\nskipAdjustFrame 2\n");
+        temp.write("spt/back.spt",script(m));
+        auto preview=scene::GameSession::create_ui_preview(temp.root,test_options());
+        preview->start_ui_background("back",12);
+        require(preview->step_ui_background({},false).remaining_frames==19,"first decorative frame");
+        std::vector<unsigned> remaining;
+        for (const auto elapsed : {300U,20U,20U,20U})
+            remaining.push_back(preview->tick_ui_background({},false,elapsed).remaining_frames);
+        require(remaining==std::vector<unsigned>{18,16,13,10},
+            "a late update jumped ahead or lost the debt before the configured limit");
+        preview->reset_frame_pacing();
+        require(preview->tick_ui_background({},false,20).remaining_frames==9,"resuming kept old debt");
+        preview->runtime()->set_pc_display_options(true,0);
+        require(preview->tick_ui_background({},false,200).remaining_frames==8,"noSkipFrame lost its one-tick cap");
     });
     suite.test("message skip runs music commands and gallery unlocks",[]{
         Model m;m.code.number(0x3333001cU,{UINT32_MAX});m.code.number(nnn::audio::music,{1});
@@ -2294,10 +2440,55 @@ int main(){
         const auto log=game.audio().stats().log;require(log.size()==1&&log[0].action!="voice.skipped"&&!log[0].error.empty(),"restricted voice was skipped");
         require(game.step_frame(200).wait==scene::Wait::Dialogue,"region dialogue");game.set_text_length(5);
         require(!game.request_advance()&&game.visible_text()==0,"restricted text was completed");
+        require(game.text_characters(0)==0&&!game.text_complete(),"CANNOTSKIP revealed the full line");
         game.text_characters(10000);require(game.text_complete()&&game.request_advance(),"completed restricted text");
         scene::InputState input;input.advance=true;require(game.step_frame(0,input).wait==scene::Wait::Draw,"post-region draw");
         r=game.script_restrictions();require(r.cannot_click==0&&r.cannot_skip==0&&game.request_advance(),"restrictions not cleared");
         require(game.skip_effective()==!kill,"raw skip not restored");
+    });
+    suite.test("skip reveals a read line before the next script step",[]{
+        Model m;m.message=true;m.code.print(1);m.code.print(2);m.code.end();TempGame temp(m);
+        scene::GameSession game(temp.root,test_options());
+        game.set_system_parameter(nnn::NNNPARAM_SKIPMODE,nnn::NNNSKIPMODE_NORMAL);
+        const auto& first=game.step_frame(0);
+        require(first.wait==scene::Wait::Dialogue,"first dialogue");
+        const auto word=first.word;
+        game.runtime()->mark_read(first.dialogue.message_id);
+        game.set_text_length(8);
+        game.set_skip_active(true);
+        require(game.skip_effective()&&game.text_characters(0)==8&&game.text_complete(),"skip left partial text");
+        require(game.state().word==word,"revealing skipped text advanced the script");
+        scene::InputState input;input.advance=true;
+        require(game.step_frame(0,input).wait==scene::Wait::Dialogue&&game.state().word!=word,"next dialogue");
+        game.set_text_length(8);
+        require(!game.skip_effective()&&game.text_characters(0)==0&&!game.text_complete(),"read-only skip passed an unread line");
+    });
+    suite.test("Ctrl gates speech during CANNOTSKIP without advancing the text",[]{
+        Model m;m.message=true;m.code.number(0x33330059U,{1});m.code.voice();
+        m.code.print(1);m.code.number(0x3333001bU,{2});m.code.voice();m.code.print(2);m.code.end();
+        TempGame temp(m);
+        temp.write("cdvaw/aa/aa_voice.vaw",pcm_vaw(1,44100,8,{188,198,208,218}));
+        scene::InputState advance;advance.advance=true;
+        for (const auto mode : {nnn::NNNSKIPMODE_NORMAL,nnn::NNNSKIPMODE_ALL}) {
+            scene::GameSession game(temp.root,test_options());
+            game.set_system_parameter(nnn::NNNPARAM_SKIPMODE,mode);game.set_ctrl_skip(true);
+            require(game.step_frame(0).wait==scene::Wait::Dialogue&&!game.skip_effective(),
+                "Ctrl bypassed CANNOTSKIP");
+            const auto log=game.audio().stats().log;
+            require(log.size()==1&&log[0].error.empty()&&
+                (log[0].action=="voice.skipped")== (mode==nnn::NNNSKIPMODE_ALL),
+                "Ctrl ignored the selected read-only or all-lines voice policy");
+            if (mode==nnn::NNNSKIPMODE_ALL) game.set_ctrl_skip(false);
+            require(game.step_frame(0,advance).wait==scene::Wait::Dialogue,"manual dialogue advance failed");
+            const auto released=game.audio().stats().log;
+            require(released.size()==2&&released[1].error.empty()&&released[1].action!="voice.skipped",
+                "Ctrl release or the next unread STARTMESSAGE left speech gated");
+        }
+        temp.text("init/game.xtx","cannotSkipCheckKillShift 1\n");
+        scene::GameSession game(temp.root,test_options());
+        game.set_system_parameter(nnn::NNNPARAM_SKIPMODE,nnn::NNNSKIPMODE_ALL);game.set_ctrl_skip(true);
+        require(game.step_frame(0).wait==scene::Wait::Dialogue&&game.audio().stats().log.front().action!="voice.skipped",
+            "CANNOTSKIP's kill-shift option did not clear the PC skip flag");
     });
     suite.test("script AUTOMESSAGE gates input and controls timer",[]{
         Model m;m.message=true;m.code.number(0x33330057U,{1});m.code.print(1);
@@ -2353,6 +2544,18 @@ int main(){
         require(behavior.text_characters(40)==0U&&!behavior.auto_ready(40,false)&&behavior.auto_remaining_ms()==60,"first completed-at-entry frame timing");
         require(behavior.text_characters(59)==0U&&!behavior.auto_ready(59,false)&&behavior.auto_remaining_ms()==1,"Auto completed early");
         require(behavior.text_characters(1)==0U&&behavior.auto_ready(1,false)&&behavior.auto_remaining_ms()==0,"Auto did not complete at the exact source wait");
+    });
+    suite.test("unset PC Auto slider keeps gradual text reveal",[]{
+        BehaviorConfig config;nnn::RuntimeParameters parameters;
+        parameters.set(nnn::NNNPARAM_MESSAGESPEED,1);
+        parameters.set(nnn::NNNPARAM_AUTOMODE,1);
+        nnn::PlayerBehavior behavior(parameters,config.root);
+        behavior.begin_line(false,0);behavior.set_text_length(40);
+        require(parameters.get(nnn::NNNPARAM_AUTOSPEEDSLIDER)==50,"Auto modified the PC setting");
+        require(behavior.text_characters(20)==2U&&behavior.visible_text()==2U&&!behavior.text_complete(),
+            "the unset Auto slider selected instant reveal");
+        parameters.set(nnn::NNNPARAM_AUTOSPEEDSLIDER,4);
+        require(behavior.text_characters(20)==200U&&behavior.text_complete(),"explicit fastest Auto setting did not apply");
     });
     suite.test("Classic uses the Auto slider for wait and message speed for reveal",[]{
         BehaviorConfig config;
@@ -2507,6 +2710,9 @@ int main(){
         const auto slot_without_replacements=old.export_pc_save();
         require(scene::pc::parse_save(slot_without_replacements).extensions.empty(),
             "32 layer slots cannot imply a text-replacement extension when the PC table ends at face");
+        const auto exe_disabled=scene::GameSession::pc_save_configuration(temp.root,false);
+        require(exe_disabled && exe_disabled->executable_okikae && !exe_disabled->okikae,
+            "EXE evidence of an unused replacement table was reported as file analysis");
         auto without_analysis=test_options();
         without_analysis.analyze_executable=false;
         std::filesystem::remove(cache);
@@ -2514,11 +2720,17 @@ int main(){
         file_only.restore_pc_save(slot_without_replacements);
         require(scene::pc::parse_save(file_only.export_pc_save()).extensions.size()==1,
             "an imported slot changed the default registration of the replacement table");
+        const auto file_enabled=scene::GameSession::pc_save_configuration(temp.root,false);
+        require(file_enabled && !file_enabled->executable_okikae && file_enabled->okikae,
+            "file-based replacement table selection was reported as executable analysis");
         std::filesystem::remove(cache);
         scene::GameSession newer(temp.root,test_options());
         require(newer.step_frame(0).wait==scene::Wait::Dialogue &&
             scene::pc::parse_save(newer.export_pc_save()).extensions.size()==1,
             "the registered replacement table is saved even when the game has never edited it");
+        const auto exe_enabled=scene::GameSession::pc_save_configuration(temp.root,false);
+        require(exe_enabled && exe_enabled->executable_okikae && exe_enabled->okikae,
+            "EXE evidence of a registered replacement table was lost");
 
         temp.text("init/game.xtx","autoExtDataSub1 okikae\n");
         temp.write("spt/var.fxf",{0x8e,0xf5});

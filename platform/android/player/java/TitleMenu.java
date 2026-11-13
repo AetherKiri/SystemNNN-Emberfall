@@ -13,7 +13,7 @@ import java.util.Map;
 final class TitleMenu {
     enum Action {
         START("新游戏"), LOAD("读取存档"), SETTINGS("设置"), EXTRAS("鉴赏"), EXIT("退出"),
-        CONTINUE("继续游戏"), LAST_LOAD("读取上次存档"), WEBSITE("官方网站"), MODE("扩展"), SCENARIO("剧情");
+        CONTINUE("继续游戏"), LAST_LOAD("读取上次存档"), WEBSITE("官方网站"), MODE("扩展"), SCENARIO("剧情"), MINIGAME("小游戏");
         final String label;
         Action(String label) { this.label=label; }
     }
@@ -80,6 +80,10 @@ final class TitleMenu {
         }else{
             int continueIndex=!items.isEmpty()&&items.get(0).action==Action.START?1:0;
             items.add(continueIndex,new Item(Action.CONTINUE,0,0,0,0,resume));
+        }
+        for(GameMiniGames.Entry entry:GameMiniGames.entries(root,config,handle,"title")){
+            Item item=new Item(Action.MINIGAME,entry.x,entry.y,entry.w,entry.h,true,entry.index,0,Action.MINIGAME.label);
+            item.spec=entry.spec;item.image=entry.image;items.add(item);
         }
     }
     int musicNumber() { return number("bgmNumber",1); }

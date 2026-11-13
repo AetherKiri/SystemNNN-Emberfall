@@ -332,7 +332,7 @@ Status CExecScript::Choose(Word option,bool timeout) {
     } catch (const Failure& e) { return last_status_=e.status; }
 }
 
-ExecResult CExecScript::Exec(std::uint64_t work_budget) {
+ExecResult CExecScript::Exec(std::uint64_t work_budget, bool yield_on_endif) {
     using namespace detail;
     std::uint64_t used=0;
     const auto finish = [&](Status s,Word code=0) {
@@ -362,7 +362,11 @@ ExecResult CExecScript::Exec(std::uint64_t work_budget) {
                 case control_end: case control_next: return finish({},r.code);
                 case control_exit: case control_endkoma: case control_endfilm:
                     pc_=next; return finish({},r.code);
-                case control_nop: case control_open: case control_close: case control_endif:
+                case control_endif:
+                    pc_=next;
+                    if (yield_on_endif) return finish({},r.code);
+                    continue;
+                case control_nop: case control_open: case control_close:
                     pc_=next; continue;
                 case control_if: case control_elsif: case control_while: {
                     if (r.code==control_elsif && pc_!=conditional_entry_) {

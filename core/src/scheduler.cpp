@@ -417,11 +417,11 @@ Status ScriptScheduler::prepare_child(ScriptMode caller, Word code, const std::s
     return {};
 }
 
-SchedulerResult ScriptScheduler::step(std::uint64_t work_budget) {
+SchedulerResult ScriptScheduler::step(std::uint64_t work_budget, bool yield_on_endif) {
     pending_child_.reset();
     const auto executed = mode_;
     const auto index = index_of(executed);
-    auto result = slots_[index]->Exec(work_budget);
+    auto result = slots_[index]->Exec(work_budget, yield_on_endif);
     SchedulerResult output{std::move(result.status), result.return_code, executed, mode_, result.pc, result.work_used, 0};
     if (!output.status) {
         pending_child_.reset();
@@ -475,7 +475,7 @@ Status ScriptScheduler::SeekFilm(Word zero_based_film) {
     return {};
 }
 
-SchedulerResult ScriptScheduler::Step(std::uint64_t work_budget) {
+SchedulerResult ScriptScheduler::Step(std::uint64_t work_budget, bool yield_on_endif) {
     if (busy_) {
         auto result = reject(ErrorCode::Busy, "Scheduler operation already active");
         last_status_ = result.status;
@@ -483,7 +483,7 @@ SchedulerResult ScriptScheduler::Step(std::uint64_t work_budget) {
     }
     OwnerGuard guard(busy_);
     try {
-        auto result = step(work_budget);
+        auto result = step(work_budget, yield_on_endif);
         last_status_ = result.status;
         return result;
     } catch (const std::exception& error) {

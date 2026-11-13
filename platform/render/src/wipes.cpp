@@ -494,11 +494,16 @@ void mosaic(Wipe wipe) {
     const auto limit=[&](int size){return static_cast<unsigned>(size%block==0?block:size%block);};
     const int dx=static_cast<int>(next_random(seed)%limit(wipe.width));
     const int dy=static_cast<int>(next_random(seed)%limit(wipe.height));
-    for (int y=0;y<wipe.height;++y) {
-        for (int x=0;x<wipe.width;++x) {
-            const auto src=wipe.offset(x/block*block+dx,y/block*block+dy),dst=wipe.offset(x,y);
-            std::memcpy(wipe.output.rgb.data()+dst,wipe.before->rgb.data()+src,3);
+    const auto stride=static_cast<std::size_t>(wipe.width)*3;
+    for (int y=0;y<wipe.height;y+=block) {
+        auto* first=wipe.output.rgb.data()+wipe.offset(0,y);
+        for (int x=0;x<wipe.width;x+=block) {
+            const auto* sample=wipe.before->rgb.data()+wipe.offset(x+dx,y+dy);
+            auto* dst=first+static_cast<std::size_t>(x)*3;
+            for (int i=0;i<std::min(block,wipe.width-x);++i,dst+=3) std::memcpy(dst,sample,3);
         }
+        for (int row=1;row<std::min(block,wipe.height-y);++row)
+            std::memcpy(first+static_cast<std::size_t>(row)*stride,first,stride);
     }
 }
 

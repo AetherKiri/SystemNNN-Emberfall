@@ -41,6 +41,10 @@ public final class DialogueMarkupTest {
         check(supplementary.glyphCount==2&&supplementary.annotations.get(0).end==3,"visible UTF-16 offsets retain supplementary characters");
         DialogueMarkup crossed=DialogueMarkup.parse("甲\n乙#［２かな］",false,true);
         check(crossed.text.equals("甲\n乙")&&crossed.annotations.isEmpty(),"annotation cannot attach across a script newline");
+        DialogueMarkup rows=DialogueMarkup.plain("甲\r\n𠀀\n乙\n").withoutFinalLineBreak();
+        check(rows.text.equals("甲\r\n𠀀\n乙")&&rows.glyphCount==3,"script line separators do not consume reveal time");
+        check(rows.offsetForGlyphs(1)==3&&rows.offsetForGlyphs(2)==6&&rows.offsetForGlyphs(3)==7,
+            "reveal offsets preserve line breaks and supplementary characters");
         String literal="A # link #［xbroken #強no\nend］";
         check(DialogueMarkup.parse(literal,false,true).text.equals(literal),"malformed or unrecognized commands remain literal");
         check(DialogueMarkup.parse("A#[1a]",false,true).text.equals("A#[1a]"),"one-byte markers are gated by game codeByte");

@@ -380,6 +380,15 @@ public:
     std::array<Value,2> cursor_variants() const {
         std::lock_guard<std::mutex> lock(mutex_);return {{initial_.message_cursor,initial_.mouse_cursor}};
     }
+    bool no_skip_frame() const {
+        std::lock_guard<std::mutex> lock(mutex_); return initial_.no_skip_frame;
+    }
+    void set_pc_display_options(bool no_skip_frame,Value mouse_cursor) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        initial_.no_skip_frame=no_skip_frame;
+        initial_.mouse_cursor=mouse_cursor;
+        ++revision_;
+    }
     std::array<Word,32> voice_off() const {
         std::lock_guard<std::mutex> lock(mutex_); return initial_.voice_off;
     }

@@ -17,12 +17,13 @@ final class GameUiBackground extends TextureView implements TextureView.SurfaceT
     private final UiPreviewPool pool;
     private final Handler tasks;
     private final Handler main=new Handler(Looper.getMainLooper());
-    private final int frameMs,maxSteps;
+    private int frameMs;
     private final ChartBackdrop chart;
     private UiPreviewPool.Lease lease;
     private volatile SurfaceTexture requestedTexture;
     private SurfaceTexture connectedTexture;
-    private long deadline;
+    private long deadline,lastTickAt;
+    private boolean resetClock;
     private volatile boolean closed,active=true,frameReady;
     private boolean held=true,pageHeld;
     private Runnable pagePresented;
@@ -33,12 +34,12 @@ final class GameUiBackground extends TextureView implements TextureView.SurfaceT
     private boolean pointerHeld,clicked;
 
     GameUiBackground(Context context,UiPreviewPool pool,UiPreviewPool.Request request,UiPreviewPool.Warmup warmup,
-                     int frameMs,int maxSteps,int[] saved,int savedWidth,int savedHeight){
-        this(context,pool,request,warmup,frameMs,maxSteps,saved,savedWidth,savedHeight,null);
+                     int frameMs,int[] saved,int savedWidth,int savedHeight){
+        this(context,pool,request,warmup,frameMs,saved,savedWidth,savedHeight,null);
     }
     GameUiBackground(Context context,UiPreviewPool pool,UiPreviewPool.Request request,UiPreviewPool.Warmup warmup,
-                     int frameMs,int maxSteps,int[] saved,int savedWidth,int savedHeight,ChartBackdrop chart){
-        super(context);this.pool=pool;tasks=pool.tasks;this.frameMs=frameMs;this.maxSteps=maxSteps;
+                     int frameMs,int[] saved,int savedWidth,int savedHeight,ChartBackdrop chart){
+        super(context);this.pool=pool;tasks=pool.tasks;this.frameMs=frameMs;
         this.chart=chart;
         setOpaque(false);setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_NO);
         if(chart==null)setSurfaceTextureListener(this);else setAlpha(0);
@@ -181,7 +182,10 @@ final class GameUiBackground extends TextureView implements TextureView.SurfaceT
         boolean connected=connectedTexture!=null&&connectedTexture==requestedTexture;
         boolean usable=active&&!pageHeld&&handle()!=0&&(chart!=null||connected);
         if(usable&&!held&&(chart!=null||frameReady)){
-            deadline=SystemClock.uptimeMillis();tasks.post(ticker);
+            lastTickAt=SystemClock.uptimeMillis();
+            deadline=lastTickAt+frameMs;
+            resetClock=true;
+            tasks.postAtTime(ticker,deadline);
         }else{
             clicked=false;pointerHeld=false;
             if(usable&&connected&&!frameReady)tasks.postDelayed(retryFirstFrame,FIRST_FRAME_RETRY_MS);
@@ -222,11 +226,13 @@ final class GameUiBackground extends TextureView implements TextureView.SurfaceT
         if(handle==0||!active||held||pageHeld||chart==null&&
             (!frameReady||connectedTexture==null||connectedTexture!=requestedTexture))return;
         long now=SystemClock.uptimeMillis(),late=Math.max(0,now-deadline);
-        int steps=(int)Math.min(maxSteps,1+late/frameMs);
-        // Discard debt beyond the game's catch-up limit. A later pause starts a new clock.
-        deadline=now-late%frameMs+frameMs;
+        int elapsed=(int)Math.min(Integer.MAX_VALUE,Math.max(0,now-lastTickAt));
+        lastTickAt=now;
         try{
-            NativeUiPreview.tick(handle,mouseX,mouseY,clicked,pointerHeld,steps);
+            int nextPeriod=NativeUiPreview.tick(handle,mouseX,mouseY,clicked,pointerHeld,elapsed,resetClock);
+            resetClock=false;
+            deadline=nextPeriod==frameMs?now-late%frameMs+frameMs:now+nextPeriod;
+            frameMs=nextPeriod;
             if(chart!=null)publishChart();
             clicked=false;
             tasks.postAtTime(this,deadline);

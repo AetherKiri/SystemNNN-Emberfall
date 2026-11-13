@@ -7,8 +7,8 @@ import java.nio.ByteBuffer;
 final class NativeGame {
     static { System.loadLibrary("systemnnn"); }
     static final int RUNNING=0, DRAW=1, OVERLAP=2, DIALOGUE=3, CHOICE=4, END=5, TITLE=6, MOVIE=7, PLACE=8, MODAL=9;
-    static final int META_SIZE=13, CLOCK_DATE=7, CLOCK_MILLISECONDS=8, SCRIPT_CURSOR=9, DRAW_MESSAGE=10,
-        TITLE_BACKGROUND_ENDED=11, PACED_MS=12;
+    static final int META_SIZE=15, CLOCK_DATE=7, CLOCK_MILLISECONDS=8, SCRIPT_CURSOR=9, DRAW_MESSAGE=10,
+        TITLE_BACKGROUND_ENDED=11, PACED_MS=12, FILM_SKIP_ENABLED=13, SCRIPT_MOUSE=14;
     static final int SELECT_PLACE_MODE=22,SELECT_PLACE2_MODE=35;
     static native long open(byte[] path, int sampleRate);
     static native long openWithRuntime(byte[] path,int sampleRate,long contextToken);
@@ -25,7 +25,8 @@ final class NativeGame {
     static native void presentSurface(long handle);
     static native boolean configureMenuBackground(long handle,int mode,byte[] script,byte[] background,boolean repeat);
     // A zero result signals script end. A positive result is the current engine frame period.
-    static native int advanceOpening(long handle,int frames);
+    static native int advanceOpening(long handle,int elapsedMs);
+    static native void resetFramePacing(long handle);
     static native void restartTitle(long handle);
     static native int[] titleSprite(long handle,byte[] name);
     static native int[] gallerySprite(long handle,byte[] name);
@@ -41,8 +42,11 @@ final class NativeGame {
     static native boolean restoreSnapshot(long handle,byte[] data,int wait,int word,int line,byte[][] content,int[] meta,
                                           boolean keepMusicPosition,boolean migrateLegacySystemVariables,boolean restartMusic);
     // meta = wait, word, dialogue sequence, logical width/height, frame time and remaining wait frames.
-    // A live tick converts ms to whole frames within the game's maxSkipFrame and reports it in PACED_MS.
+    // A live tick uses ms for real-time waits and reports the animation budget in PACED_MS.
     static native void tick(long handle, int ms, int x, int y, boolean advance, int choice, boolean replay, int[] meta);
+    static native boolean tickStory(long handle, int ms, int x, int y, boolean advance, int choice, int[] meta, GameRunner host);
+    static native void copyStoryFrame(long handle,Bitmap image);
+    static native long presentStoryFrame(long handle);
     static native byte[][] content(long handle);
     static native void frameInfo(long handle,int[] meta);
     static native int runtimeMode(long handle);
@@ -117,7 +121,9 @@ final class NativeGame {
     static native int[] parameters(long handle);
     static native int[] displayParameters(long handle);
     static native int[] auxiliaryState(long handle);
+    static native void setPcDisplayOptions(long handle,boolean noSkipFrame,int mouseCursor);
     static native boolean legacyVolumeDefaults(long handle);
+    static native boolean usesXAudio2(long handle);
     // DTO indices 0=theme, 1=window, 2..33=voice-off, 34..35=cursor variants (read-only).
     static native void setAuxiliaryState(long handle,int[] indexValuePairs);
     static native byte[] appendPrefix(long handle);
@@ -125,6 +131,8 @@ final class NativeGame {
     static native int[] textState(long handle);
     static native int[] settingsTextRates(long handle);
     static native boolean requestAdvance(long handle);
+    static native boolean requestFilmSkip(long handle);
+    static native boolean completeMiniGame(long handle,int number);
     static native int textCharacters(long handle,int elapsedMs);
     static native boolean autoReady(long handle,int elapsedMs,boolean textComplete);
     static native void playButtonVoice(long handle,int zeroBasedId);
@@ -132,6 +140,7 @@ final class NativeGame {
     static native void playConfigFeedback(long handle,int slider,int position,int steps);
     static native void playSystemSe(long handle,int id);
     static native void setSkip(long handle,boolean skip);
+    static native void setCtrlSkip(long handle,boolean enabled);
     static native boolean skipActive(long handle);
     static native boolean skipEffective(long handle);
     static native int[] readState(long handle);
@@ -141,6 +150,7 @@ final class NativeGame {
     static native long galleryRevision(long handle);
     static native int movieNumber(long handle);
     static native int movieVolume(long handle);
+    static native float movieGain(long handle);
     static native int[] choiceInfo(long handle);
     static native boolean choiceTimedOut(long handle);
     static native byte[][] choiceMessages(long handle);

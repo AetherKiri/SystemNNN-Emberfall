@@ -119,7 +119,14 @@ std::size_t wrapper_offset(const Bytes& b,bool music_file) {
     const std::string header(b.begin(),b.begin()+64);
     std::size_t at=64;
     if (music_file) {
-        if (header.find("PACKTYPE=6")==std::string::npos || header.find("OGG")==std::string::npos)
+        if (b[57]=='2') {
+            // Older WGQ streams start after the fixed 20-byte WAVE prefix
+            // and the additional bytes counted by its fmt chunk.
+            if (b.size()<84) throw AudioError("Truncated WGQ PACKTYPE=2 header");
+            const auto extra=le32(b.data()+80);
+            if (extra>b.size()-84U) throw AudioError("Invalid WGQ PACKTYPE=2 offset");
+            at=84U+static_cast<std::size_t>(extra);
+        } else if (header.find("PACKTYPE=6")==std::string::npos || header.find("OGG")==std::string::npos)
             throw AudioError("Invalid WGQ PACKTYPE=6 header");
     } else {
         if (b[57]!='0' && b[57]!='2') throw AudioError("Unsupported VAW PACKTYPE="+std::string(1,static_cast<char>(b[57])));

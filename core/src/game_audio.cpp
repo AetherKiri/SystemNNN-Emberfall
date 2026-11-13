@@ -12,6 +12,18 @@
 namespace nnn::audio {
 namespace {
 int percent(std::int64_t v) { return static_cast<int>(std::clamp<std::int64_t>(v,0,100)); }
+double volume_amplitude(double volume,bool directsound) {
+    if (!directsound) return volume/100.0;
+    // DirectSound applies the PC volume in dB. Keep fades smooth without pow in the mixer loop.
+    static const auto gains=[] {
+        std::array<double,101> table{};
+        for (int level=1;level<=100;++level) table[level]=map_voice_volume(level).directsound_gain;
+        return table;
+    }();
+    const auto level=static_cast<std::size_t>(volume);
+    if (level>=100) return gains.back();
+    return gains[level]+(gains[level+1]-gains[level])*(volume-static_cast<double>(level));
+}
 int level(int base,int delta,std::int64_t adjustment=0) {
     return delta==-101 ? 1 : percent(std::int64_t{base}+delta+adjustment);
 }
@@ -163,7 +175,7 @@ struct Track {
             cross_boundaries(rate,changes,loops);
         }
     }
-    std::array<double,2> sample(unsigned rate,std::uint64_t& changes,std::uint64_t& loops) {
+    std::array<double,2> sample(unsigned rate,std::uint64_t& changes,std::uint64_t& loops,bool directsound) {
         if (!active) return {};
         const Clip& c=*program->parts[part];
         const auto i=phase/rate;
@@ -174,7 +186,8 @@ struct Track {
             if (next<program->parts.size()) { other=program->parts[next].get(); j=0; }
             else j=i;
         }
-        const double amp=gain.now()/100.0,balance=pan.now();
+        const double volume=gain.now(),balance=pan.now();
+        const double amp=volume_amplitude(volume,directsound);
         std::array<double,2> out{};
         for (unsigned k=0;k<2;++k) {
             const auto a=c.pcm[static_cast<std::size_t>(i)*c.info.channels+std::min(k,c.info.channels-1)];
@@ -195,7 +208,7 @@ struct Meter {
     int peak=0;
 };
 enum class SampleOrigin {
-    Script, PcVoice, SystemSound, SystemSoundAtVoiceVolume, ButtonVoice,
+    Script, PcVoice, PcMusic, SystemSound, SystemSoundAtVoiceVolume, ButtonVoice,
     ConfigSound, ConfigVoice, ConfigMovieSound, BacklogVoice, MenuVoice
 };
 struct VoicePreview { bool ignore_switch=false,ignore_role=false; };
@@ -232,11 +245,13 @@ struct GameAudio::Impl {
     struct ConfigCue { int number=0,divisions=0; bool voice=false; };
     std::array<ConfigCue,10> config_cues{};
     bool config_themed=false,config_uses_button_voice=false,config_voice_same_buffer=false;
-    bool system_voice_role_gain=false;
+    bool system_voice_role_gain=false,movie_on=true;
     int system_sound_channel=0,movie_volume=100;
     bool music_on=true,total_on=true,system_se_on=true,script_se_on=true,voice_on=true,effect_voice_on=true;
     bool continue_voice=false,must_play_se_in_skip=false,not_play_same_music=false;
+    bool keep_effect_voice_during_skip=false,skip_looping_effect_voice=false,skip_nonlooping_effect_voice=false;
     std::optional<std::pair<int,int>> last_music; // Original table number and loop count, not script gain/fade overrides.
+    std::optional<int> muted_music_volume;
     int fade_se=0,fade_voice=0;
     std::optional<int> next_music;
     mutable std::mutex commands,mixer;
@@ -255,6 +270,9 @@ struct GameAudio::Impl {
         if (settings.default_music_fade_in<0) settings.default_music_fade_in=std::max(0,config_number(game,"defaultMusicFadeInTime",0));
         if (settings.default_music_fade_out<0) settings.default_music_fade_out=std::max(0,config_number(game,"defaultMusicFadeOutTime",5));
         must_play_se_in_skip=config_number(game,"mustPlayScriptSEInSkip",0)!=0;
+        keep_effect_voice_during_skip=config_number(game,"seVoiceDontStopFlag",0)!=0;
+        skip_looping_effect_voice=config_number(game,"enableLoopVoiceOffInSkip",0)!=0;
+        skip_nonlooping_effect_voice=config_number(game,"enableLoopVoiceOnInSkip",0)!=0;
         not_play_same_music=config_number(game,"notPlaySameMusic",0)!=0;
         std::istringstream lines(game);
         for (std::string line;std::getline(lines,line);) {
@@ -264,8 +282,8 @@ struct GameAudio::Impl {
             }
         }
         characters.slider_delta=config_number(game,"charaVoiceVolumeDelta",settings.character_volume_step);
-        // The portable mixer uses the source's linear/XAudio gain scale.
-        characters.slider_delta=config_number(game,"charaVoiceVolumeDeltaXAudio2",characters.slider_delta);
+        if (!settings.directsound_gain)
+            characters.slider_delta=config_number(game,"charaVoiceVolumeDeltaXAudio2",characters.slider_delta);
         characters.config_present=true; // Default character button table maps the first named role to slider zero.
         const auto& rows=files.characters();
         for (std::size_t i=0;i<rows.size();++i) {
@@ -376,12 +394,14 @@ struct GameAudio::Impl {
         target.start(std::move(program),saved->second,gain_curve(volume-settings.music_volume,0,true),
                      settings.music_volume,fade(settings.default_music_fade_in));
     }
-    void bgm(const SystemEvent& e,EventInfo& info,AudioGate gate) {
+    void bgm(const SystemEvent& e,EventInfo& info,AudioGate gate,bool script_command=true) {
         if (e.parameters.empty()) throw AudioError("MUSIC missing track number");
         const auto& a=e.parameters; int id=a[0];
         if (id>0) {
             if (!files.has_bgm(id)) throw AudioError("Invalid MUSIC number");
-            if (not_play_same_music && last_music && last_music->first==id) { info.action="music.same"; return; }
+            if (script_command && not_play_same_music && last_music && last_music->first==id) {
+                info.action="music.same"; return;
+            }
             last_music=std::make_pair(id,parameter(a,1));
         }
         if (gate.effect) { info.action="music.skipped"; return; }
@@ -389,26 +409,36 @@ struct GameAudio::Impl {
             std::lock_guard<std::mutex> lock(mixer);
             if (id==-1) {
                 last_music.reset();
+                muted_music_volume.reset();
                 song_paused=false;
                 const int units=parameter(a,1,-1);
                 if (music_on) song.stop(fade(units<0 ? next_music.value_or(settings.default_music_fade_out) : units));
                 info.action="music.stop";
             } else {
-                if (a.size()>1) song.volume(gain_curve(a[1],0,true),fade(next_music.value_or(0)));
+                if (a.size()>1) {
+                    if (!music_on || !total_on)
+                        muted_music_volume=std::max(1,percent(std::int64_t{settings.music_volume}+a[1]));
+                    song.volume(gain_curve(a[1],0,true),fade(next_music.value_or(0)));
+                }
                 info.action="music.gain";
             }
             next_music.reset(); return;
         }
         if (id<=0) throw AudioError("Invalid MUSIC number");
-        if (!music_on || !total_on) { info.action="music.disabled"; next_music.reset(); return; }
+        const int delta=parameter(a,2,-9999);
+        if (!music_on || !total_on) {
+            if (!script_command && delta!=-9999)
+                muted_music_volume=std::max(1,percent(std::int64_t{settings.music_volume}+delta));
+            info.action="music.disabled"; next_music.reset(); return;
+        }
         auto p=std::make_shared<Program>(files.bgm(id));
         info.action="music.play";
         for (const auto& c:p->parts) info.clips.push_back(c->info);
-        const int delta=parameter(a,2,-9999);
         const auto vol=gain_curve(delta==-9999 ? 0 : delta,0,true,0,false,delta!=-9999);
         const int in=parameter(a,3,-1),out=parameter(a,4,-1);
         std::lock_guard<std::mutex> lock(mixer);
         song_paused=false;
+        muted_music_volume.reset();
         outgoing=std::move(song);
         outgoing.stop(fade(out<0 ? next_music.value_or(settings.default_music_fade_out) : out));
         song.start(std::move(p),parameter(a,1),vol,settings.music_volume,fade(in<0 ? next_music.value_or(settings.default_music_fade_in) : in));
@@ -422,7 +452,6 @@ struct GameAudio::Impl {
     void sample_event(const SystemEvent& e,EventInfo& info,AudioGate gate,SampleOrigin origin,VoicePreview preview) {
         const auto& a=e.parameters;
         const bool speech=e.opcode==voice;
-        const bool skipping=(gate.command || gate.message) && (speech || !must_play_se_in_skip);
         const bool pc_voice=origin==SampleOrigin::PcVoice;
         const bool system=origin!=SampleOrigin::Script && !pc_voice;
         const bool button_voice=origin==SampleOrigin::ButtonVoice;
@@ -440,6 +469,12 @@ struct GameAudio::Impl {
         // Validate the requested bus before gates, as for ordinary script events.
         Track& tr=button_voice ? button_voices[next_button_voice] : replay ? backlog_voice :
             speech ? channel(voices,ch) : system ? channel(system_sounds,ch) : channel(sounds,ch);
+        bool ctrl=gate.ctrl;
+        if (ctrl && speech && !system && ch>=2 && keep_effect_voice_during_skip) {
+            std::lock_guard<std::mutex> lock(mixer);
+            ctrl=tr.active && tr.remaining==0 ? skip_looping_effect_voice : skip_nonlooping_effect_voice;
+        }
+        const bool skipping=(gate.command || gate.message || ctrl) && (speech || !must_play_se_in_skip);
         auto& pending=speech ? fade_voice : fade_se;
         const auto duration=system ? 0U : fade(pending);
         if (!system) pending=0;
@@ -532,7 +567,7 @@ struct GameAudio::Impl {
         try {
             const auto& a=e.parameters;
             if (a.empty()) throw AudioError("Audio command has no arguments");
-            if (e.opcode==music) bgm(e,info,gate);
+            if (e.opcode==music) bgm(e,info,gate,origin!=SampleOrigin::PcMusic);
             else if (e.opcode==voice || e.opcode==sound) sample_event(e,info,gate,origin,preview);
             else if (e.opcode==volume_voice || e.opcode==volume_se) {
                 if (a.size()<2) throw AudioError("Volume command missing channel or gain");
@@ -592,7 +627,7 @@ struct GameAudio::Impl {
             for (std::size_t j=0;j<active;++j) {
                 const auto s=sources[j];
                 const auto v=s.track->sample(settings.sample_rate,s.bus==0 ? meter.changes : unused_changes,
-                                             s.bus==0 ? meter.loops : unused_loops);
+                                             s.bus==0 ? meter.loops : unused_loops,settings.directsound_gain);
                 left+=v[0]; right+=v[1];
                 if (std::abs(v[0])>=0.5 || std::abs(v[1])>=0.5) audible[s.bus]=true;
             }
@@ -754,7 +789,7 @@ PcAudioState GameAudio::pc_state() const {
     if (impl_->last_music) {
         state.music_number=impl_->last_music->first-1;
         state.music_plays=impl_->last_music->second;
-        state.music_volume=impl_->loaded_music_volume(impl_->song);
+        state.music_volume=impl_->muted_music_volume.value_or(impl_->loaded_music_volume(impl_->song));
     }
     const auto sample=[&](const Track& track,std::array<Value,16>& work) {
         work[0]=track.remaining==0?1:0;
@@ -947,6 +982,7 @@ void GameAudio::read_snapshot(snapshot::Reader& in,bool keep_music_position,
         impl_->script_audio_suspended=false;
         impl_->backlog_voice.stop(0);
         impl_->last_music=last_music;impl_->next_music=next_music;impl_->fade_se=se_fade;impl_->fade_voice=voice_fade;
+        impl_->muted_music_volume.reset();
         impl_->voice_flags.swap(voice_flags);
     }
 }
@@ -956,6 +992,10 @@ std::string GameAudio::submit(const SystemEvent& e,const std::string& script,Wor
 std::string GameAudio::submit_pc_voice(const SystemEvent& e,const std::string& script,Word word) {
     if (e.opcode!=voice) throw std::invalid_argument("PC voice state requires a VOICE event");
     return impl_->submit(e,script,word,{},SampleOrigin::PcVoice);
+}
+std::string GameAudio::submit_pc_music(const SystemEvent& e,const std::string& script,Word word) {
+    if (e.opcode!=music) throw std::invalid_argument("PC music state requires a MUSIC event");
+    return impl_->submit(e,script,word,{},SampleOrigin::PcMusic);
 }
 void GameAudio::pull(std::int16_t* stereo,std::size_t frames) {
     if (!stereo && frames) throw std::invalid_argument("Missing stereo PCM output");
@@ -1025,10 +1065,13 @@ void GameAudio::apply_runtime_parameters(const RuntimeParameters& p) {
     {
         std::lock_guard<std::mutex> lock(impl_->mixer);
         auto& s=impl_->settings;
-        s.music_volume=percent(p.get(NNNPARAM_MUSICVOLUME)); s.master_volume=percent(p.get(NNNPARAM_TOTALVOLUME));
+        const int music_volume=percent(p.get(NNNPARAM_MUSICVOLUME));
+        if (impl_->muted_music_volume && s.music_volume!=music_volume) impl_->muted_music_volume=music_volume;
+        s.music_volume=music_volume; s.master_volume=percent(p.get(NNNPARAM_TOTALVOLUME));
         s.sound_volume=percent(p.get(NNNPARAM_SCRIPTSEVOLUME)); s.system_sound_volume=percent(p.get(NNNPARAM_SOUNDVOLUME));
         s.voice_volume=percent(p.get(NNNPARAM_VOICEVOLUME)); s.effect_voice_volume=percent(p.get(NNNPARAM_SOUNDVOICEVOLUME));
         impl_->movie_volume=percent(p.get(NNNPARAM_MOVIEVOLUME));
+        impl_->movie_on=p.get(NNNPARAM_MOVIESWITCH)!=0;
         impl_->song.set_base(s.music_volume); impl_->outgoing.set_base(s.music_volume);
         for (std::size_t i=0;i<impl_->voices.size();++i)
             impl_->voices[i].set_base(i<2 ? s.voice_volume : s.effect_voice_volume);
@@ -1045,7 +1088,10 @@ void GameAudio::apply_runtime_parameters(const RuntimeParameters& p) {
             for (auto& t:impl_->system_sounds) if (t.character==static_cast<int>(i)) t.set_role(steps);
             if (impl_->backlog_voice.character==static_cast<int>(i)) impl_->backlog_voice.set_role(steps);
         }
-        if (stop_music) impl_->song.stop(impl_->fade(s.default_music_fade_out));
+        if (stop_music) {
+            impl_->muted_music_volume=impl_->loaded_music_volume(impl_->song);
+            impl_->song.stop(impl_->fade(s.default_music_fade_out));
+        }
     }
     if (replay_music && impl_->last_music) {
         SystemEvent event; event.opcode=music; event.parameters={impl_->last_music->first,impl_->last_music->second};
@@ -1053,7 +1099,7 @@ void GameAudio::apply_runtime_parameters(const RuntimeParameters& p) {
         // Switch playback uses PlayMusic(number,loop)'s defaults, never a pending
         // script fade or the prior command's delta/fade arguments.
         const auto pending=impl_->next_music; impl_->next_music.reset();
-        try { impl_->bgm(event,info,{}); }
+        try { impl_->bgm(event,info,{},false); }
         catch (const AudioError& error) {
             if (error.missing) ++impl_->totals.missing; else ++impl_->totals.errors;
             info.error=error.what();
@@ -1065,6 +1111,12 @@ void GameAudio::apply_runtime_parameters(const RuntimeParameters& p) {
             impl_->totals.log.push_back(std::move(info));
         }
     }
+}
+float GameAudio::movie_gain() const {
+    std::lock_guard<std::mutex> lock(impl_->mixer);
+    if (!impl_->movie_on) return 0;
+    const auto& s=impl_->settings;
+    return static_cast<float>(volume_amplitude(impl_->movie_volume,s.directsound_gain)*s.master_volume/100.0);
 }
 void GameAudio::set_master_volume(int volume) {
     std::lock_guard<std::mutex> command_lock(impl_->commands);

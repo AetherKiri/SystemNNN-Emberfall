@@ -63,7 +63,7 @@ public:
         if (!append) { text_remainder_=0; visible_=0; text_length_=0; }
         length_known_=false; auto_frame_eligible_=false;
         const auto selected=script_speed_ ? static_cast<std::size_t>(script_speed_-1)
-                                         : index(use_auto_wait_ ? NNNPARAM_AUTOSPEEDSLIDER : NNNPARAM_MESSAGESPEED);
+                                          : (use_auto_wait_ ? auto_speed_index() : index(NNNPARAM_MESSAGESPEED));
         const auto& waits=has_voice_ ? (use_auto_wait_ ? auto_voice_wait_ : voice_wait_)
                                     : (use_auto_wait_ ? auto_silent_wait_ : silent_wait_);
         auto_remaining_ms_=(has_voice_ ? static_cast<std::int64_t>(voice_length_ms) : 0)+waits[selected];
@@ -90,6 +90,7 @@ public:
         auto_frame_eligible_=text_complete();
     }
     std::uint32_t visible_text() const noexcept { return visible_; }
+    unsigned text_fraction() const noexcept { return static_cast<unsigned>(text_remainder_); }
     std::uint32_t text_length() const noexcept { return text_length_; }
     bool text_complete() const noexcept { return length_known_ && visible_==text_length_; }
     bool request_advance() noexcept {
@@ -102,8 +103,14 @@ public:
         // (CalcuFrameMoji1410-1420), unlike the ordinary setting branch.
         if (script_speed_) return auto_rates_[static_cast<std::size_t>(script_speed_-1)];
         const bool automatic=parameters_->get(NNNPARAM_AUTOMODE)!=0;
-        const auto selected=index(automatic && use_auto_slider_for_text_ ? NNNPARAM_AUTOSPEEDSLIDER : NNNPARAM_MESSAGESPEED);
+        const auto selected=automatic && use_auto_slider_for_text_ ? auto_speed_index() : index(NNNPARAM_MESSAGESPEED);
         return (automatic ? auto_rates_ : text_rates_)[selected];
+    }
+    std::size_t auto_speed_index() const noexcept {
+        const auto speed=parameters_->get(NNNPARAM_AUTOSPEEDSLIDER);
+        // CreateInitData can leave 50 in SYSTEM DATA before a five-step slider is used.
+        if (speed<0 || speed>=static_cast<Value>(auto_rates_.size())) return index(NNNPARAM_MESSAGESPEED);
+        return static_cast<std::size_t>(speed);
     }
     std::uint32_t settings_text_rate(int index,bool automatic) const noexcept {
         return (automatic ? auto_rates_ : text_rates_)[static_cast<std::size_t>(std::clamp(index,0,4))];

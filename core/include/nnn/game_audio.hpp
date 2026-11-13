@@ -23,6 +23,7 @@ struct Settings {
     std::size_t cache_bytes=64U*1024U*1024U;
     int master_volume=100, system_sound_volume=-1; // -1 initially follows sound_volume.
     bool enabled=true; // Decorative sessions can skip all audio resource loading.
+    bool directsound_gain=false;
 };
 struct ClipInfo {
     std::string name, source;
@@ -63,9 +64,9 @@ struct PcAudioState {
     std::array<std::string,4> voice_names;
 };
 // command and effect follow the PC's F4, F5 and skip-to-film-end flags.
-// message is the player's Skip (Ctrl, Shift or the Skip button) outside AUTOMESSAGE.
+// Ctrl is evaluated separately so CANNOTSKIP can block text while audio sees the key.
 struct AudioGate {
-    bool command=false, effect=false, message=false;
+    bool command=false, effect=false, message=false, ctrl=false;
 };
 
 // Submit from the game thread. Pull interleaved stereo PCM16 from one audio consumer.
@@ -80,6 +81,8 @@ public:
                        bool* voice_started=nullptr);
     // A PC slot already includes the saved role correction in its VOICE delta.
     std::string submit_pc_voice(const SystemEvent& event,const std::string& script={},Word word=0);
+    // A PC load is allowed to start the same BGM again, independently of script de-duplication.
+    std::string submit_pc_music(const SystemEvent& event,const std::string& script={},Word word=0);
     void pull(std::int16_t* stereo,std::size_t frames);
     // Advance sources without generating output while reconstructing a saved session.
     void skip_frames(std::uint64_t frames);
@@ -100,6 +103,7 @@ public:
     // GetSystemParam's effective snapshot (including configuration aliases).
     // Volumes update live; only music/total switch transitions stop/replay BGM.
     void apply_runtime_parameters(const RuntimeParameters& parameters);
+    float movie_gain() const;
     void set_system_voice_selection(unsigned index);
     void set_next_music_fade(int tenths);
     std::string play_system_se(unsigned zero_based_id,unsigned channel=0,bool voice_volume=false);

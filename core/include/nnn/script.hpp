@@ -207,7 +207,7 @@ public:
     Status LoadBytes(const std::vector<Byte>& bytes, std::string identity = "memory", DecodeParameters parameters = {},
                      const FunctionRegistry* registry = nullptr,
                      ScriptControlProfile profile = ScriptControlProfile::Closed);
-    ExecResult Exec(std::uint64_t work_budget = 10000);
+    ExecResult Exec(std::uint64_t work_budget = 10000, bool yield_on_endif = false);
     const ScriptSelection* PendingSelection() const noexcept;
     Status Choose(Word one_based_option,bool timeout=false);
     bool GetString(Word index, std::string& out) const;
