@@ -205,9 +205,17 @@ public final class PcSaveInteropTest {
             check(gdExt!=null&&gdExt.year==2024&&gdExt.month==2&&gdExt.day==29&&gdExt.week==4,
                 "extended 2224-slot GAMEVAR extracts leap-day Thursday (4)");
 
-            byte[] badHeader=save1024.clone();
-            badHeader[16]='X';
-            check(PcStorySave.readGameDate(badHeader,classic)==null,"wrong block-0 SAVEDATA name rejected");
+            byte[] customHeader=save1024.clone();
+            customHeader[16]='X';
+            PcStorySave.GameDate gdCustom=PcStorySave.readGameDate(customHeader,classic);
+            check(gdCustom!=null&&gdCustom.year==2026&&gdCustom.date==1113,
+                "custom block-0 saveHeaderName accepted when code==0 and size==32");
+            byte[] emptyHeader=save1024.clone();
+            emptyHeader[16]=0;
+            check(PcStorySave.readGameDate(emptyHeader,classic)==null,"empty block-0 header name rejected");
+            byte[] badCodeHeader=save1024.clone();
+            badCodeHeader[4]=1;
+            check(PcStorySave.readGameDate(badCodeHeader,classic)==null,"non-zero block-0 code rejected");
             check(PcStorySave.readGameDate(Arrays.copyOf(save1024,save1024.length-1),classic)==null,
                 "truncated block rejected");
             ByteArrayOutputStream badVarSize=new ByteArrayOutputStream();

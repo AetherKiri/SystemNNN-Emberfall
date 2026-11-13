@@ -32,6 +32,8 @@ REVIEWED = {
     ("game", "maxskipframe"): ("SUPPORTED", "Bounded frame repayment test"),
     ("game", "maxskipframebackscript"): ("SUPPORTED", "Decorative pacing test"),
     ("game", "skipadjustframe"): ("SUPPORTED", "Decorative pacing test"),
+    ("game", "adjustloadbgmflag"): ("SUPPORTED", "Post-load BGM remap enable flag in GameSession"),
+    ("game", "adjustloadbgmvarname"): ("SUPPORTED", "Post-load BGM remap gate variable in GameSession"),
     ("config", "extseflag"): ("SUPPORTED", "Themed configuration feedback test"),
     ("config", "useconfigsevoice"): ("SUPPORTED", "Themed configuration feedback test"),
     ("config", "voicesamebufferflag"): ("SUPPORTED", "Themed configuration feedback test"),
@@ -167,6 +169,20 @@ REVIEWED = {
 }
 
 KAZARI_GATED_STEMS = frozenset(("printmessage", "datafile", "selectscenechara"))
+REVIEWED_PATTERNS = (
+    ("game", re.compile(r"adjustloadbgmnumber[0-9]+"), (
+        "SUPPORTED", "Post-load BGM remap target track entry in GameSession"
+    )),
+)
+
+
+def reviewed_behavior(stem, key):
+    if (stem, key) in REVIEWED:
+        return REVIEWED[(stem, key)]
+    for pattern_stem, pattern, result in REVIEWED_PATTERNS:
+        if stem == pattern_stem and pattern.fullmatch(key):
+            return result
+    return None
 
 
 def inactive_behavior(stem, key, fields):
@@ -295,8 +311,9 @@ def game_report(root, lookup):
         for key, (spelling, line, value) in fields.items():
             evidence = lookup(key)
             inactive = inactive_behavior(stem, key, fields)
-            if (stem, key) in REVIEWED:
-                status, behavior = REVIEWED[(stem, key)]
+            reviewed = reviewed_behavior(stem, key)
+            if reviewed is not None:
+                status, behavior = reviewed
             elif inactive is not None:
                 status, behavior = "INACTIVE_IN_GAME", inactive
             else:

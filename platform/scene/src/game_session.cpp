@@ -486,6 +486,10 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
     unsigned game_version=0,layer_limit=16,render_layer_count=32;
     const std::shared_ptr<const pc::DirectorySaveLayout> save_layout;
     std::size_t loaded_save_message_width=0;
+    std::optional<std::uint32_t> loaded_save_extension_code_base;
+    bool adjust_load_bgm_enabled=false;
+    unsigned adjust_load_bgm_var=variable_count;
+    std::vector<int> adjust_load_bgm_table;
     std::vector<nnn::Word> replay_films;
     std::size_t replay_film=0;
     std::uint32_t hidden_layers=0;
@@ -755,6 +759,23 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         if (config_int(init,"specialNumberForSaveSetFlag",0)) {
             constexpr auto default_slot_art_var="\x8e\x63\x82\xe8\x93\xfa\x90\x94"; // 残り日数 (CP932)
             save_slot_art_var=variable_id(config_text(init,"specialNumberForSaveVarName",default_slot_art_var));
+        }
+        adjust_load_bgm_enabled=config_int(init,"adjustLoadBGMFlag",0)!=0;
+        if (const auto gate=config_text(init,"adjustLoadBGMVarName","");!gate.empty())
+            adjust_load_bgm_var=variable_id(gate);
+        if (adjust_load_bgm_enabled && config_int(init,"noBGMFlag",0)==0) {
+            const auto bgm_list=nnn::game_config::read(root,"spt","bgmlist.xtx");
+            std::size_t bgm_tokens=0,bgm_cursor=0;
+            while (nnn::game_config::name_token(bgm_list,bgm_cursor)) ++bgm_tokens;
+            const auto bgm_count=std::min<std::size_t>(4096U,bgm_tokens/2U);
+            adjust_load_bgm_table.assign(bgm_count,-1);
+            const nnn::game_config::NameListSetup init_setup(init);
+            for (std::size_t i=0;i<bgm_count;++i) {
+                if (const auto raw=init_setup.field("adjustLoadBGMNumber"+std::to_string(i+1))) {
+                    const int target=number(std::string(*raw));
+                    adjust_load_bgm_table[i]=target>=1 ? target-1 : -1;
+                }
+            }
         }
         load_variable_defaults(vars,&legacy_system_seed);
         for (const auto& group:{std::make_pair("expmode",nnn::NNNPARAM_EXPMODE),std::make_pair("expcheck",nnn::NNNPARAM_EXPCHECK)})
@@ -3669,10 +3690,16 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         if (status.bgm_number>=0) {
             if (status.bgm_number==INT32_MAX || status.bgm_plays<0 || status.bgm_volume<0 || status.bgm_volume>100)
                 throw std::runtime_error("Invalid PC save BGM");
+            int bgm_number=status.bgm_number;
+            if (adjust_load_bgm_enabled && static_cast<std::size_t>(bgm_number)<adjust_load_bgm_table.size()) {
+                const int mapped=adjust_load_bgm_table[static_cast<std::size_t>(bgm_number)];
+                if (mapped>=0 && (adjust_load_bgm_var==variable_count || GetVarData(static_cast<nnn::Word>(adjust_load_bgm_var))!=0))
+                    bgm_number=mapped;
+            }
             const auto volume=std::clamp(shared_runtime->get_system_parameter(nnn::NNNPARAM_MUSICVOLUME),0,100);
             nnn::SystemEvent cue;
             cue.opcode=nnn::audio::music;
-            cue.parameters={status.bgm_number+1,status.bgm_plays,status.bgm_volume-volume,0,0};
+            cue.parameters={bgm_number+1,status.bgm_plays,status.bgm_volume-volume,0,0};
             submit(cue);
         } else {
             nnn::SystemEvent cue;
@@ -3996,6 +4023,7 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
     void load_pc_save(const std::vector<nnn::Byte>& bytes) {
         const auto saved=pc::parse_save(bytes,pc_save_header);
         loaded_save_message_width=saved.message_width;
+        loaded_save_extension_code_base=saved.extension_code_base;
         if (saved.log) { pc_log_layout=saved.log->layout;pc_log_voices=saved.log->voice_count; }
         if (!saved.unsupported_blocks.empty())
             throw std::runtime_error("Unsupported PC save block "+std::to_string(saved.unsupported_blocks.front().header.code));
@@ -4198,6 +4226,14 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         saved.layer_records=layout.layer_records;
         saved.message_width=layout.message_width;
         saved.status_bytes=save_layout->status_bytes();
+        if (loaded_save_extension_code_base &&
+            (*loaded_save_extension_code_base==pc::first_extension_code ||
+             (*loaded_save_extension_code_base==pc::legacy_extension_code && !saved.cutin && !pc_save_log) ||
+             (*loaded_save_extension_code_base==pc::min_legacy_extension_code && !saved.omake && !saved.cutin && !pc_save_log))) {
+            saved.extension_code_base=*loaded_save_extension_code_base;
+        } else if (saved.status_bytes==pc::legacy_status_bytes && !saved.cutin && !pc_save_log) {
+            saved.extension_code_base=pc::legacy_extension_code;
+        }
         auto& status=saved.status;
         if (place) {
             const auto mode=shared_runtime->mode();
@@ -4256,8 +4292,11 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
             }
         }
         std::move(rows.begin(),rows.end(),saved.messages.begin());
-        saved.vars.assign(vars.begin(),vars.begin()+(system_variable_end==1200?2224:1024));
-        std::fill(saved.vars.begin()+first_system_variable,saved.vars.begin()+system_variable_end,0);
+        const bool extended_vars=system_variable_end==1200;
+        const std::size_t var_capacity=extended_vars ? 2224U : 1024U;
+        const std::size_t local_end=extended_vars ? 2200U : 1000U;
+        saved.vars.assign(var_capacity,0);
+        for (std::size_t i=0;i<local_end;++i) saved.vars[i]=variable_value(static_cast<nnn::Word>(i));
         for (unsigned i=0;i<layer_limit;++i) {
             const auto& layer=renderer->slots()[i];
             if (!layer.enabled && i>=saved.layer_records) continue;

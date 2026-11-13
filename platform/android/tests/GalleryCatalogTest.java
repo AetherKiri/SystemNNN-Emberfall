@@ -97,6 +97,30 @@ public final class GalleryCatalogTest {
             check(data.imageNames().contains("sys/cur_over"),
                 "fileNameOverwriteCursor is discovered for GameUiAssets preloading");
 
+            GameUiAssets.Config emptyData=GameUiAssets.readConfig(temp.toFile(),"missingData",codec);
+            check(Arrays.equals(GameSlotsPanel.CursorAnime.cursorCandidates(emptyData,1,true,true),
+                new String[]{"ta_sl_font","ta_sl_font","ta_sl_font"})&&
+                Arrays.equals(GameSlotsPanel.CursorAnime.cursorCandidates(emptyData,2,false,true),
+                new String[]{"","","ta_sl_font"}),
+                "omitted cursor keys inherit fileNameSelectPic default ta_sl_font");
+            writeText(temp.resolve("init/baseOff.xtx"),"filenameLoadBase base_load\nfilenameSaveBase base_save\n");
+            check(GameSlotsPanel.baseImageName(GameUiAssets.readConfig(temp.toFile(),"baseOff",codec),false,false).isEmpty(),
+                "omitted basePrintFlag defaults to 0 and suppresses slot base image");
+            writeText(temp.resolve("init/baseOn.xtx"),
+                "basePrintFlag 1\nfilenameLoadBase base_load\nfilenameSaveBase base_save\n");
+            GameUiAssets.Config baseOn=GameUiAssets.readConfig(temp.toFile(),"baseOn",codec);
+            check(GameSlotsPanel.baseImageName(baseOn,false,false).equals("base_load")&&
+                GameSlotsPanel.baseImageName(baseOn,true,false).equals("base_save")&&
+                GameSlotsPanel.baseImageName(baseOn,true,true).equals("base_save"),
+                "baseChangeLoadSave defaults to 1 and quick slot inherits normal base without fabricating ta_quk_slot01");
+            writeText(temp.resolve("init/baseShared.xtx"),
+                "basePrintFlag 1\nbaseChangeLoadSave 0\nfilenameLoadBase base_load\nfilenameSaveBase base_save\n"
+                +"filenameQuickLoadBase base_qload\n");
+            GameUiAssets.Config baseShared=GameUiAssets.readConfig(temp.toFile(),"baseShared",codec);
+            check(GameSlotsPanel.baseImageName(baseShared,true,false).equals("base_load")&&
+                GameSlotsPanel.baseImageName(baseShared,true,true).equals("base_qload"),
+                "baseChangeLoadSave 0 reuses load base and explicit quick-load base when saving");
+
             GameSlotsPanel.CursorAnime saveHover=GameSlotsPanel.CursorAnime.read(data,true,false,false);
             GameSlotsPanel.CursorAnime saveClick=GameSlotsPanel.CursorAnime.read(data,true,false,true);
             check(saveHover.pattern==3&&saveHover.type==1&&saveHover.speed==4&&

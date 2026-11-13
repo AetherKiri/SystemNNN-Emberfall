@@ -3313,5 +3313,222 @@ int main(){
         require(opaque_game.step_frame(2*opaque_game.frame_ms()).wait==scene::Wait::Running,"opaque game did not reach OVERLAP endpoint");
         require(opaque_game.surface().rgb!=Bytes{0,0,0},"WINDOWPERCENT=0 did not paint an opaque message window");
     });
+    suite.test("PC legacy 5024-byte GAMESTATUS, code-9 EXT1, scheduled EXE layout, and game-extension rejection",[]{
+        Model model;model.message=true;model.message_text="LegacyRow1\r\nLegacyRow2";
+        model.code.print(1);model.code.end();
+        TempGame temp(model);
+        temp.text("init/game.xtx","codeByte 1\nuseDefaultOkikae 1\nlayerExpand 16\nsaveLog 0\n");
+        temp.text("nya/okikae.xtx","0,Hero\n");
+        temp.write("spt/var.fxf",{0x8e,0xf5});
+        // Build a synthetic PE whose GAMESTATUS MakeHeader call uses MSVC-scheduled instructions:
+        // PUSH "GAMESTATUS"; AND edx,0xffff; PUSH 2; MOV [esi+0x94],ecx; INC eax; PUSH 5024; PUSH ebx; MOV ecx,esi; CALL rel32
+        auto exe=executable_save_fixture(16,16,8224,0);
+        const std::string_view status_name("GAMESTATUS\0",11);
+        std::copy(status_name.begin(),status_name.end(),exe.begin()+0x400+48);
+        const Word status_va=0x402000U+48U;
+        Bytes scheduled{
+            0x68,0,0,0,0,
+            0x81,0xe2,0xff,0xff,0x00,0x00,
+            0x6a,0x02,
+            0x89,0x8e,0x94,0x00,0x00,0x00,
+            0x40,
+            0x68,0xa0,0x13,0x00,0x00,
+            0x53,
+            0x8b,0xce,
+            0xe8,0x10,0x00,0x00,0x00
+        };
+        le32(scheduled,1,status_va);
+        std::copy(scheduled.begin(),scheduled.end(),exe.begin()+0x200+256);
+        system_save_names(exe,1);
+        std::vector<std::string> okikae_names(scene::pc::okikae_count);
+        okikae_names[0]="Hero";
+        // Register okikae in CAutoSaveDataList ("dummy", "face", "okikae", "").
+        std::copy_n("dummy",5,reinterpret_cast<char*>(exe.data()+0x560));
+        std::copy_n("face",4,reinterpret_cast<char*>(exe.data()+0x580));
+        std::copy_n("okikae",6,reinterpret_cast<char*>(exe.data()+0x5a0));
+        temp.write("legacy.exe",exe);
+
+        const auto detected=scene::pc::executable_save_layout(temp.root);
+        require(detected.layer_records==16U && detected.message_width==128U &&
+            detected.status_bytes==scene::pc::legacy_status_bytes &&
+            detected.registers_okikae==true,
+            "scheduled MakeHeader PE did not detect 5024-byte GAMESTATUS layout");
+        const auto cfg=scene::GameSession::pc_save_configuration(temp.root,true);
+        require(cfg && cfg->status_bytes==scene::pc::legacy_status_bytes && cfg->executable_status_bytes,
+            "save_layout cache rejected 5024-byte status_bytes");
+        const auto cached_cfg=scene::GameSession::pc_save_configuration(temp.root,false);
+        require(cached_cfg && cached_cfg->status_bytes==scene::pc::legacy_status_bytes,
+            "emberfall-system.cfg did not round-trip 5024-byte status_bytes");
+
+        scene::GameSession game(temp.root,test_options());
+        require(game.step_frame(0).wait==scene::Wait::Dialogue,"legacy fixture did not reach dialogue");
+        const auto exported=game.export_pc_save();
+        const auto parsed=scene::pc::parse_save(exported);
+        require(parsed.status_bytes==scene::pc::legacy_status_bytes &&
+            parsed.extension_code_base==scene::pc::legacy_extension_code &&
+            parsed.extensions.size()==1 &&
+            scene::pc::read_okikae(parsed.extensions[0]).at(0)=="Hero",
+            "legacy 5024-byte GameSession export did not write code=9 EXT1 okikae");
+        const auto preview=scene::GameSession::inspect_pc_save(exported,64*1024);
+        require(preview.summary=="LegacyRow1" && preview.vars.size()==1024U && preview.width>0,
+            "inspect_pc_save failed on 5024-byte GAMESTATUS + code=9 EXT1 save");
+        scene::GameSession restored(temp.root,test_options());
+        restored.restore_pc_save(exported);
+        require(restored.state().dialogue.display_bytes==model.message_text,
+            "restore_pc_save failed on 5024-byte GAMESTATUS + code=9 EXT1 save");
+
+        auto code8=parsed;
+        code8.omake.reset();
+        code8.extension_code_base=scene::pc::min_legacy_extension_code;
+        const auto code8_bytes=scene::pc::write_save(code8);
+        const auto code8_parsed=scene::pc::parse_save(code8_bytes);
+        require(code8_parsed.extension_code_base==scene::pc::min_legacy_extension_code &&
+            code8_parsed.extensions==code8.extensions,
+            "code=8 EXT1 round-trip failed");
+
+        // Verify game-defined PC extensions (extSaveDataNumber > 0) are still strictly rejected.
+        TempGame ext_game_dir(model);
+        ext_game_dir.text("init/game.xtx","layerExpand 16\nsaveLog 0\nextSaveDataNumber 1\n");
+        ext_game_dir.write("spt/var.fxf",{0x8e,0xf5});
+        scene::GameSession ext_game(ext_game_dir.root,test_options());
+        require(ext_game.step_frame(0).wait==scene::Wait::Dialogue,"extSaveDataNumber fixture did not reach dialogue");
+        bool export_rejected=false,load_rejected=false;
+        try { (void)ext_game.export_pc_save(); }
+        catch (const std::runtime_error& e) {
+            export_rejected=std::string_view(e.what()).find("Unsupported game-defined PC extension")!=std::string_view::npos;
+        }
+        auto fake_ext_save=parsed;
+        fake_ext_save.extensions={Bytes(64,0)};
+        const auto fake_ext_bytes=scene::pc::write_save(fake_ext_save);
+        try { ext_game.restore_pc_save(fake_ext_bytes); }
+        catch (const std::runtime_error& e) {
+            load_rejected=std::string_view(e.what()).find("Unsupported game-defined PC extension")!=std::string_view::npos;
+        }
+        require(export_rejected && load_rejected,
+            "PcExtension::Game must continue to throw Unsupported game-defined PC extension");
+
+        const std::filesystem::path local_mushiai="/mnt/c/Users/a7188/Desktop/\xe8\x99\xab\xe7\x88\xb1\xe5\xb0\x91\xe5\xa5\xb3 Ver1.10";
+        const auto local_sav=local_mushiai/"sav/data0.sav";
+        std::error_code ec;
+        if (std::filesystem::is_regular_file(local_sav,ec)) {
+            const auto raw_sav=read_file(local_sav);
+            const auto real_parsed=scene::pc::parse_save(raw_sav);
+            require(real_parsed.status_bytes==scene::pc::legacy_status_bytes &&
+                real_parsed.extension_code_base==scene::pc::legacy_extension_code &&
+                real_parsed.extensions.size()==1,
+                "real mushiai data0.sav did not parse as 5024-byte GAMESTATUS + code=9 EXT1");
+            const auto rewritten=scene::pc::parse_save(scene::pc::write_save(real_parsed));
+            require(rewritten.status_bytes==scene::pc::legacy_status_bytes &&
+                rewritten.extension_code_base==scene::pc::legacy_extension_code &&
+                rewritten.extensions==real_parsed.extensions,
+                "real mushiai data0.sav lost extension_code_base or payload on write_save round-trip");
+            const auto slot_preview=scene::GameSession::inspect_pc_save(raw_sav,256*1024);
+            require(slot_preview.time[0]>=2000 && slot_preview.vars.size()==1024U,
+                "inspect_pc_save failed on real mushiai data0.sav");
+            const auto real_exe_layout=scene::pc::executable_save_layout(local_mushiai);
+            require(real_exe_layout.status_bytes==scene::pc::legacy_status_bytes &&
+                real_exe_layout.layer_records==16U && real_exe_layout.message_width==128U,
+                "executable_save_layout failed to detect 5024-byte GAMESTATUS on real mushiai EXE");
+        }
+    });
+    suite.test("PC GAMEVAR exports live system variables via GetVarForSave while SetVarByLoad preserves runtime system variables",[]{
+        for (const bool extended:{false,true}) {
+            Model model;model.message=true;
+            // Assign story var[5] = 42, system var[205] = 777, upper story var[305 or 1205] = 888.
+            const Word upper_var=extended ? 1205U : 305U;
+            const Word high_sys_var=extended ? 1199U : 299U;
+            model.code.add({8,0x66660005U,0,0xa0000000U,3,0x80000005U,0x9000002aU,0xa000003dU});
+            model.code.add({8,0x66660005U,0,0xa0000000U,3,0x800000cdU,0x90000309U,0xa000003dU});
+            model.code.add({8,0x66660005U,0,0xa0000000U,3,0x80000000U|high_sys_var,0x900001bcU,0xa000003dU});
+            model.code.add({8,0x66660005U,0,0xa0000000U,3,0x80000000U|upper_var,0x90000378U,0xa000003dU});
+            model.code.print(1);model.code.end();
+            TempGame temp(model);
+            const std::string var_names="v0\nv1\n";
+            Bytes encrypted(var_names.begin(),var_names.end());
+            for (auto& byte:encrypted) byte^=0xffU;
+            temp.write(extended ? "spt/var2.fxf" : "spt/var.fxf",encrypted);
+            temp.text("init/game.xtx",extended ? "varType 1\n" : "varType 0\n");
+            auto options=test_options();
+            options.runtime=std::make_shared<nnn::RuntimeContext>(temp.root);
+            scene::GameSession game(temp.root,options);
+            require(game.step_frame(0).wait==scene::Wait::Dialogue,"GAMEVAR fixture did not reach dialogue");
+            const auto raw=game.export_pc_save();
+            const auto saved=scene::pc::parse_save(raw);
+            const auto preview=scene::GameSession::inspect_pc_save(raw,0);
+            require(saved.vars.size()==(extended ? 2224U : 1024U) &&
+                saved.vars[5]==42 && saved.vars[205]==777 && saved.vars[high_sys_var]==444 &&
+                saved.vars[upper_var]==888 &&
+                preview.vars[205]==777 && preview.vars[high_sys_var]==444,
+                "export_pc_save did not export live system variables in GAMEVAR");
+            // Mutate system variable 205 in shared_runtime after saving; SetVarByLoad must keep 999!
+            options.runtime->set_system_variable(5,999);
+            scene::GameSession loaded(temp.root,options);
+            loaded.restore_pc_save(raw);
+            require(loaded.variable(5)==42 && loaded.variable(upper_var)==888 &&
+                loaded.variable(205)==999 && loaded.variable(high_sys_var)==444,
+                "restore_pc_save overwrote live shared_runtime system variables or missed story variables");
+        }
+    });
+    suite.test("AdjustLoadBGM remaps loaded BGM unconditionally or gated by adjustLoadBGMVarName",[]{
+        Model model;model.message=true;
+        model.code.number(nnn::audio::music,{1,0,0,0,0});
+        model.code.print(1);model.code.end();
+        TempGame temp(model);
+        temp.text("spt/bgmlist.xtx","first,First\nsecond,Second\nthird,Third\n");
+        const auto tone1=read_file(fixtures/"assets/tone_first.wgq");
+        const auto tone2=read_file(fixtures/"assets/tone_second.wgq");
+        temp.write("wgq/first.wgq",tone1);
+        temp.write("wgq/second.wgq",tone2);
+        temp.write("wgq/third.wgq",tone2);
+        const std::string var_names="v0\nv1\nv2\nv3\nclear_story\n";
+        Bytes encrypted(var_names.begin(),var_names.end());
+        for (auto& byte:encrypted) byte^=0xffU;
+        temp.write("spt/var.fxf",encrypted);
+        temp.text("init/game.xtx","varType 0\nadjustLoadBGMFlag 1\nadjustLoadBGMNumber1 2\n");
+
+        auto options=test_options();
+        options.audio.default_music_fade_out=0;
+        scene::GameSession base_game(temp.root,options);
+        require(base_game.step_frame(0).wait==scene::Wait::Dialogue &&
+            base_game.audio().pc_state().music_number==0,
+            "AdjustLoadBGM fixture did not play track 1");
+        const auto save_track0=base_game.export_pc_save();
+
+        // 1) Unconditional remap when adjustLoadBGMVarName is omitted: 0 -> 1 ("second").
+        scene::GameSession uncond(temp.root,options);
+        uncond.restore_pc_save(save_track0);
+        require(uncond.audio().pc_state().music_number==1 &&
+            uncond.audio().state().bgm.name=="second",
+            "unconditional AdjustLoadBGM did not remap track 0 -> 1");
+
+        // Unmapped track (2 -> "third") and stopped BGM (-1) stay unchanged.
+        auto parsed_unmapped=scene::pc::parse_save(save_track0);
+        parsed_unmapped.status.bgm_number=2;
+        uncond.restore_pc_save(scene::pc::write_save(parsed_unmapped));
+        require(uncond.audio().pc_state().music_number==2 &&
+            uncond.audio().state().bgm.name=="third",
+            "AdjustLoadBGM altered an unmapped BGM track");
+        parsed_unmapped.status.bgm_number=-1;
+        uncond.restore_pc_save(scene::pc::write_save(parsed_unmapped));
+        require(uncond.audio().pc_state().music_number==-1,
+            "AdjustLoadBGM started music when saved bgm_number was -1");
+
+        // 2) Conditional remap gated by adjustLoadBGMVarName (evaluated AFTER SetVarByLoad).
+        temp.text("init/game.xtx",
+            "varType 0\nadjustLoadBGMFlag 1\nadjustLoadBGMVarName clear_story\nadjustLoadBGMNumber1 2\n");
+        auto gate_off=scene::pc::parse_save(save_track0);
+        gate_off.vars[4]=0;
+        scene::GameSession gated(temp.root,options);
+        gated.restore_pc_save(scene::pc::write_save(gate_off));
+        require(gated.audio().pc_state().music_number==0 &&
+            gated.audio().state().bgm.name=="first",
+            "AdjustLoadBGM remapped when adjustLoadBGMVarName was 0");
+        auto gate_on=gate_off;
+        gate_on.vars[4]=1;
+        gated.restore_pc_save(scene::pc::write_save(gate_on));
+        require(gated.audio().pc_state().music_number==1 &&
+            gated.audio().state().bgm.name=="second",
+            "AdjustLoadBGM did not remap after SetVarByLoad restored non-zero gate variable");
+    });
     std::cout<<"SCENE RESULT "<<suite.passed<<" passed, "<<suite.failed<<" failed\n";return suite.failed==0?0:1;
 }

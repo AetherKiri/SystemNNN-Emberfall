@@ -72,17 +72,88 @@ std::vector<Section> sections(const Bytes& bytes) {
     return result;
 }
 
+std::size_t modrm_length(const Bytes& bytes,const Section& code,std::size_t at) {
+    if (!code.includes(at,1)) return 0;
+    const unsigned modrm=bytes[at],mod=modrm>>6U,rm=modrm&7U;
+    if (mod==3U) return 1;
+    const std::size_t sib=rm==4U ? 1U : 0U;
+    const std::size_t disp=(mod==0U && rm==5U) || mod==2U ? 4U : (mod==1U ? 1U : 0U);
+    return code.includes(at,1+sib+disp) ? 1+sib+disp : 0;
+}
+
+// Early MSVC builds (e.g. MSVC 6/7.1) schedule basic-block ALU/MOV instructions
+// between the four MakeHeader stack pushes (name, type, size, header) and CALL.
+std::optional<std::uint32_t> scheduled_header_size(const Bytes& bytes,const Section& code,
+                                                  std::size_t reference,unsigned type) {
+    if (reference<=code.offset || !code.includes(reference,10) || bytes[reference-1]!=0x68) return {};
+    std::size_t at=reference+4;
+    bool seen_type=false,seen_dest=false;
+    std::optional<std::uint32_t> pushed_size;
+    for (unsigned step=0;step<32;++step) {
+        if (!code.includes(at,1)) return {};
+        const unsigned op=bytes[at];
+        if (op==0xe8) return code.includes(at,5) && seen_type && pushed_size && seen_dest ? pushed_size : std::nullopt;
+        if (op==0x6a) {
+            if (!code.includes(at,2) || seen_type || bytes[at+1]!=type) return {};
+            seen_type=true;at+=2;continue;
+        }
+        if (op==0x68) {
+            if (!code.includes(at,5) || !seen_type || pushed_size) return {};
+            pushed_size=word(bytes,at+1);at+=5;continue;
+        }
+        if (op>=0x50 && op<=0x57) {
+            if (!seen_type || !pushed_size || seen_dest) return {};
+            seen_dest=true;++at;continue;
+        }
+        if (op>=0x40 && op<=0x4f) { ++at;continue; }
+        if (op==0x0d || op==0x25 || op==0x35) {
+            if (!code.includes(at,5)) return {};
+            at+=5;continue;
+        }
+        if (op==0x31 || op==0x33 || op==0x89 || op==0x8b || op==0x8d) {
+            const auto len=modrm_length(bytes,code,at+1);
+            if (!len) return {};
+            at+=1+len;continue;
+        }
+        if (op==0x81 || op==0xc7) {
+            const auto len=modrm_length(bytes,code,at+1);
+            if (!len || !code.includes(at,1+len+4)) return {};
+            at+=1+len+4;continue;
+        }
+        if (op==0x83) {
+            const auto len=modrm_length(bytes,code,at+1);
+            if (!len || !code.includes(at,1+len+1)) return {};
+            at+=1+len+1;continue;
+        }
+        if (op==0x0f && code.includes(at,2) &&
+            (bytes[at+1]==0xb6 || bytes[at+1]==0xb7 || bytes[at+1]==0xbe || bytes[at+1]==0xbf)) {
+            const auto len=modrm_length(bytes,code,at+2);
+            if (!len) return {};
+            at+=2+len;continue;
+        }
+        if (op==0x66 && code.includes(at,2) && (bytes[at+1]==0x89 || bytes[at+1]==0x8b)) {
+            const auto len=modrm_length(bytes,code,at+2);
+            if (!len) return {};
+            at+=2+len;continue;
+        }
+        return {};
+    }
+    return {};
+}
+
 // Older MSVC builds pass name, type and sizeof(block) to MakeHeader.
 std::optional<std::uint32_t> called_header_size(const Bytes& bytes,const Section& code,
                                                std::size_t reference,unsigned type) {
-    if (reference<=code.offset || !code.includes(reference,10) || bytes[reference-1]!=0x68 ||
-        bytes[reference+4]!=0x6a || bytes[reference+5]!=type) return {};
+    if (reference<=code.offset || !code.includes(reference,10) || bytes[reference-1]!=0x68) return {};
+    if (bytes[reference+4]!=0x6a || bytes[reference+5]!=type)
+        return scheduled_header_size(bytes,code,reference,type);
     const auto argument=reference+6;
     if (code.includes(argument,13) && bytes[argument]==0x68 &&
         bytes[argument+5]>=0x50 && bytes[argument+5]<=0x57 && bytes[argument+8]==0xe8) return word(bytes,argument+1);
     if (bytes[argument]!=0x8b || (bytes[argument+1]&0xc7U)!=0x45U ||
         bytes[argument+3]!=0x50U+((bytes[argument+1]>>3U)&7U) ||
-        !code.includes(argument,22) || bytes[argument+17]!=0xe8) return {};
+        !code.includes(argument,22) || bytes[argument+17]!=0xe8)
+        return scheduled_header_size(bytes,code,reference,type);
     const auto local=bytes[argument+2];
     const auto begin=reference-code.offset>64 ? reference-64 : code.offset;
     std::optional<std::uint32_t> size;

@@ -39,7 +39,9 @@ bool valid_layers(int layers) { return layers==classic_layer_count || layers==la
 bool valid_width(int width) {
     return width==legacy_message_width || width==classic_message_width || width==expanded_message_width;
 }
-bool valid_status(int size) { return size==classic_status_bytes || size==preview_status_bytes; }
+bool valid_status(int size) {
+    return size==legacy_status_bytes || size==classic_status_bytes || size==preview_status_bytes;
+}
 
 std::optional<CachedLayout> read_layout(const fs::path& file) {
     std::error_code error;
