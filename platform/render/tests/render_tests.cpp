@@ -1385,6 +1385,24 @@ int main() {
         layers.advance(2);
         require(layers.surface().rgb==std::vector<Byte>({0,64,0}));
     }
+    for (const unsigned layer_count : {16U,32U}) {
+        Layers layers(1,1,layer_count);
+        const auto last=layer_count-1;
+        require(layers.effect(last,54,{0,64,0,0}));
+        const auto displayed=layers.surface().rgb;
+        require(displayed==std::vector<Byte>({64,0,0}));
+        require(layers.effect(last,54,{0,0,64,0}));
+
+        // A decorative script has no host capture callback. Its pending layer
+        // changes must still appear only in the destination of the wipe.
+        layers.prepare_overlap();
+        require(layers.start_overlap(2));
+        require(layers.surface().rgb==displayed);
+        layers.advance(1);
+        require(layers.surface().rgb==std::vector<Byte>({32,32,0}));
+        layers.advance(1);
+        require(layers.surface().rgb==std::vector<Byte>({0,64,0}));
+    }
     screen_effects();character_colors();movement_effects();composition_effects();blur_effects();easing_tests();mask_presence_tests();rain4_tests();rain2_tests();suna_tests();firefly_tests();chara_noise_tests();rain_tests();old_firefly_tests();chara_ghost_tests();zoom_tests();mask_appear_tests();zantetsu_tests();water_tests();kagerou_tests();raster_tests();old_film_tests();old_lamp_tests();mask_wipe_tests();perspective_tests();shard_tests();
     screen_layer_over_messages(16);screen_layer_over_messages(32);native_background_slots();wipe_tests();
     geometry_effects();animation_effects();condensation_effect();
