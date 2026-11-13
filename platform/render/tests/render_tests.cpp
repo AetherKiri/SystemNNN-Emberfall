@@ -1197,6 +1197,14 @@ void blur_effects() {
                 ((sum[c]>>1)*std::min(32767,32768/count))>>14:fill[c]);
         }
         require(l.surface().rgb==expected);
+        // The visible part can sit far into a large canvas while its pixels
+        // occupy just a few columns. Index the rolling window relative to that crop.
+        auto distant=std::make_shared<Texture>(*cropped);
+        distant->canvas_width=2053;distant->canvas_height=2052;distant->content={2049,2049,3,2};
+        const Rect distant_dst{-2049,-2048,2052,2052};
+        l.bind(1,distant,false);
+        l.rectangle(1,distant_dst,distant_dst);
+        require(l.surface().rgb==expected);
     }
     {
         Layers cached(4,4),reference(4,4);

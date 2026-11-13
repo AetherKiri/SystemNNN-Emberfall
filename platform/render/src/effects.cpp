@@ -1342,7 +1342,7 @@ void blur_background(Surface& out,const Texture& texture,Rect dst,Rect clip,Rect
         if (height) {
             auto* dest=out.rgb.data()+(static_cast<std::size_t>(visible.y+row)*out.width+
                 static_cast<unsigned>(visible.x))*3;
-            const auto* left=columns+first_x-clip.x-xl;
+            const auto* left=columns+(first_x-clip.x-xl);
             const auto* right=left+kx;
             std::uint64_t sum=0;
             for (auto* col=left;col!=right;++col) sum+=*col;
