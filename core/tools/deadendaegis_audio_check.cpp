@@ -326,6 +326,36 @@ void source_switches(const Path& root) {
     check(!mix.state().voices[0].active && mix.voice_duration_ms(0)>0,"Disabled voice gate did not preserve source load/duration semantics");
     std::cout<<"Native runtime switches: music/total stop+default replay; raw0 follows source arithmetic and keeps clock; voice/SE gate future playback\n";
 }
+void common_menu_music(const Path& root) {
+    Settings settings; settings.default_music_fade_out=0;
+    GameAudio audio(root,settings);
+    check(audio.play_menu_music(2,0,0,0,false).empty(),"Could not start the menu BGM");
+    tick(audio,4096);
+    const auto before=audio.state().bgm;
+    check(before.active && before.source_frame>0,"The initial menu BGM did not advance");
+    check(audio.play_menu_music(2,1,-20,5,false).empty(),"Could not retain the menu BGM");
+    const auto retained=audio.state().bgm;
+    check(retained.source_frame==before.source_frame && retained.volume==before.volume && retained.looping==before.looping,
+          "Entering a menu changed the same BGM without bgmRestartFlag");
+
+    // A skipped script request sets the last requested number without changing the current BGM.
+    SystemEvent skipped; skipped.opcode=music; skipped.parameters={11,0};
+    check(audio.submit(skipped,"",0,{true,true}).empty(),"Skipped MUSIC request failed");
+    check(audio.play_menu_music(2,0,0,0,false).empty() && audio.state().bgm.source_frame==before.source_frame,
+          "The menu compared against the skipped request instead of the current BGM");
+    check(audio.play_menu_music(11,0,0,0,false).empty() && audio.state().bgm.name!=before.name,
+          "The menu did not start the different BGM");
+
+    tick(audio,4096);
+    check(audio.play_menu_music(11,0,0,0,true).empty() && audio.state().bgm.source_frame==0,
+          "bgmRestartFlag did not restart the current BGM");
+    tick(audio,4096);
+    check(audio.play_menu_music(-1,0,0,0,false).empty() && audio.state().bgm.source_frame>0,
+          "A menu without a BGM request interrupted playback");
+    check(audio.play_menu_music(-1,0,0,0,true).empty() && !audio.state().bgm.active,
+          "bgmRestartFlag without a replacement failed to stop the current BGM");
+    std::cout<<"Common menu BGM: same cue retains position, new cue plays, explicit restart or stop still applies\n";
+}
 }
 int main(int argc,char** argv) {
     try {
@@ -339,6 +369,7 @@ int main(int argc,char** argv) {
         live_fades(root);
         runtime_settings(root);
         source_switches(root);
+        common_menu_music(root);
         playlist(root,2,{"mgw_bgm01_1","mgw_bgm01_2"},1);
         playlist(root,11,{"mgw_bgm10_a1","mgw_bgm10_a2","mgw_bgm10_a3"},1);
         playlist(root,19,{"mgw_bgm17"},0);
