@@ -104,6 +104,24 @@ public final class PcSystemSaveTest {
                 check(audioReloaded.audioTheme()==4&&pair(audioReloaded.audioParameters(),109)==83&&
                     pair(audioReloaded.audioParameters(),209)==1,"version 3 theme and script SE survive reload");
             }
+            int[] nonAudio={2,1,4,0,6,1,105,2,106,35,107,75,300,2,315,1,400,1,415,0};
+            check(save.writeSystemSettings(nonAudio,new int[]{1,2},3,1),"write non-audio PC system settings");
+            PcSystemSave.Initial sysReloaded=save.load();
+            for(int i=0;i<nonAudio.length;i+=2)check(pair(sysReloaded.audioParameters(),nonAudio[i])==nonAudio[i+1],
+                "non-audio parameter "+nonAudio[i]+" survives PC archive reload");
+            check(pair(sysReloaded.audioOwners(),1)==2&&sysReloaded.messageCursor()==3&&sysReloaded.mouseCursor()==1,
+                "messageWindow owner, messageCursor and mouseCursor survive PC archive reload");
+            if(version==3){
+                int[] flag2Checks={210,1,211,0,212,1,213,1,214,0};
+                check(save.writeSystemSettings(flag2Checks,new int[0],Integer.MIN_VALUE,Integer.MIN_VALUE),
+                    "write PC version 3 SYSTEMFLAG2 check flags");
+                PcSystemSave.Initial flag2Reloaded=save.load();
+                for(int i=0;i<flag2Checks.length;i+=2)
+                    check(pair(flag2Reloaded.audioParameters(),flag2Checks[i])==flag2Checks[i+1],
+                        "SYSTEMFLAG2 check "+flag2Checks[i]+" survives PC archive reload");
+                check(flag2Reloaded.messageCursor()==3&&flag2Reloaded.mouseCursor()==1,
+                    "MIN_VALUE cursor sentinels preserve existing messageCursor and mouseCursor");
+            }
             PcSystemSave restarted=PcSystemSave.open(root,directory.toFile(),game,null,
                 new int[]{version,archiveName.startsWith("t")?1:0});
             check(pair(restarted.load().audioParameters(),200)==0,"BGM mute survives a new session");

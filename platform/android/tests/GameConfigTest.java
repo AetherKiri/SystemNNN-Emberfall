@@ -234,6 +234,7 @@ public final class GameConfigTest {
             try{GameUiAssets.readConfig(root,"printmessage");throw new AssertionError("Oversize config accepted");}catch(IOException expected){checks++;}
             verifyGameDateLayout(root);
             verifySharedConfigSnapshot(new File(root,"shared-cfg"));
+            verifyWave25ConfigAlignment(new File(root,"wave25-cfg"));
         }finally{remove(root);}
         if(args.length>0){
             root=new File(args[0]);GameUiAssets.Config title=GameUiAssets.readConfig(root,"title");
@@ -435,5 +436,38 @@ public final class GameConfigTest {
             fb.windowPercentRaw==0&&fb.windowOpacityPercent==100&&fb.titleBgmNumber==4&&
             fb.yearVarIndex==3&&fb.dateVarIndex==1,
             "SharedConfig pure-Java fallback computes exesetup/game/printmessage/title/var2 defaults when native handle is absent");
+    }
+
+    private static void verifyWave25ConfigAlignment(File root) throws Exception {
+        write(new File(root,"init/winPercent.xtx"),
+            "volumeNumber 8\nwindowPercentVolumeExistFlag 1\nwindowPercentVolumeDevide 20\n",false);
+        OriginalSettingsModel wpModel=new OriginalSettingsModel(GameUiAssets.readConfig(root,"winPercent"));
+        OriginalSettingsModel.Slider wpSlider=wpModel.sliders.stream()
+            .filter(s->s.index==6).findFirst().orElseThrow(()->new AssertionError("missing windowPercent slider"));
+        check(wpSlider.steps==20&&wpSlider.toPreference(0)==0&&wpSlider.toPreference(35)==35&&
+            wpSlider.toPreference(100)==100&&wpSlider.fromPreference(65)==65&&wpSlider.fromPreference(140)==100,
+            "windowPercent slider preserves raw 0..100 transparency/opacity values without scaling by steps");
+
+        write(new File(root,"init/backlogDefault.xtx"),"",false);
+        write(new File(root,"init/backlogMode2.xtx"),"bgMode 2\nbackMultiR 50\nbackDeltaR -10\n",false);
+        write(new File(root,"init/backlogScript.xtx"),"bgMode 1\nbackScriptFlag 1\n",false);
+        write(new File(root,"init/backlogOutOfRange.xtx"),"bgMode 9\n",false);
+        check(GameBacklogPanel.bgMode(GameUiAssets.readConfig(root,"backlogDefault"))==0&&
+            GameBacklogPanel.bgMode(GameUiAssets.readConfig(root,"backlogMode2"))==2&&
+            GameBacklogPanel.bgMode(GameUiAssets.readConfig(root,"backlogScript"))==3&&
+            GameBacklogPanel.bgMode(GameUiAssets.readConfig(root,"backlogOutOfRange"))==0,
+            "GameBacklogPanel.bgMode honors 0..3, backScriptFlag override, and 0 fallback");
+        check(GameBacklogPanel.colorForTag('C')==0xff00ffff&&
+            GameBacklogPanel.colorForTag((char)0x6c34)==0xff00ffff&&
+            GameBacklogPanel.colorForTag('O')==0xffff8000&&
+            GameBacklogPanel.colorForTag((char)0x6a59)==0xffff8000&&
+            GameBacklogPanel.colorForTag('Z')==0,
+            "GameBacklogPanel.colorForTag maps upstream ASCII and kanji color prefixes");
+
+        int[] pixels={0xffc86432};
+        GameRunner.filter(pixels,GameUiAssets.readConfig(root,"backlogMode2"));
+        // mr = 50 * 256 / 100 = 128; (200*128>>8)-10 = 90, (100*128>>8)-10 = 40, (50*128>>8)-10 = 15
+        check(pixels[0]==(0xff000000|(90<<16)|(40<<8)|15),
+            "GameRunner.filter bgMode==2 cascades backMultiR and backDeltaR across RGB channels");
     }
 }

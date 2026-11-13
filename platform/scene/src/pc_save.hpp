@@ -17,22 +17,25 @@ inline constexpr std::size_t header_size=32;
 inline constexpr std::size_t effect_size=1024, filename_size=256;
 inline constexpr std::size_t classic_layer_count=16;
 inline constexpr std::size_t layer_count=32;
+inline constexpr std::size_t legacy_vm_count=3;
 inline constexpr std::size_t vm_count=4;
 inline constexpr std::size_t message_limit=64;
 inline constexpr std::size_t legacy_message_width=128;
 inline constexpr std::size_t classic_message_width=256;
 inline constexpr std::size_t expanded_message_width=1024;
 inline constexpr std::size_t log_limit=256;
+inline constexpr std::uint32_t min_legacy_extension_code=8;
+inline constexpr std::uint32_t legacy_extension_code=9;
 inline constexpr std::uint32_t first_extension_code=100;
 inline constexpr std::size_t max_extensions=256;
-inline constexpr std::size_t classic_status_bytes=7088, preview_status_bytes=8112;
+inline constexpr std::size_t legacy_status_bytes=5024, classic_status_bytes=7088, preview_status_bytes=8112;
 inline constexpr std::size_t okikae_count=100, okikae_width=64;
 using CutinWords=std::array<nnn::Value,message_limit*4>;
 inline constexpr std::size_t omake_parent_count=100, omake_slots=32;
 using OmakeWords=std::array<nnn::Value,omake_parent_count*omake_slots>;
 
 constexpr bool supported_status_size(std::size_t size) {
-    return size==classic_status_bytes || size==preview_status_bytes;
+    return size==legacy_status_bytes || size==classic_status_bytes || size==preview_status_bytes;
 }
 
 constexpr std::optional<std::size_t> message_width_from_block_size(std::size_t size) {
@@ -187,6 +190,7 @@ struct Save {
     std::size_t layer_records=layer_count;
     std::size_t message_width=expanded_message_width;
     std::size_t status_bytes=classic_status_bytes;
+    std::uint32_t extension_code_base=first_extension_code;
     std::array<Effect,layer_count> effects;
     std::array<std::string,layer_count> filenames;
     std::array<std::string,message_limit> messages;

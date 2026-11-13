@@ -166,6 +166,23 @@ class ConfigAuditTest(unittest.TestCase):
         self.assertNotIn("INACTIVE_IN_GAME", games["on"]["status_counts"])
         self.assertEqual(games["on"]["status_counts"], {"REVIEW": 5, "UNKNOWN": 1})
 
+    def test_wave2_5_adjust_load_bgm_supported(self):
+        self.write(
+            "src/nnnLib/gamecallback.cpp",
+            b'GetInitGameParam(&m_adjustLoadBGMFlag, "adjustLoadBGMFlag");\n'
+            b'GetInitGameString(&adjustBGMVarName, "adjustLoadBGMVarName");\n'
+            b'sprintf_s(name, sizeof(name), "adjustLoadBGMNumber%d", i + 1);\n'
+            b'GetInitGameParam(&target, name);\n',
+        )
+        self.write("game/SPT/sys.spt", b"")
+        self.write(
+            "game/init/game.xtx",
+            b"adjustLoadBGMFlag 1\nadjustLoadBGMVarName clearFlag\n"
+            b"adjustLoadBGMNumber1 3\nadjustLoadBGMNumber2 4\n",
+        )
+        game = audit([self.root / "game"], self.root / "src")["games"][0]
+        self.assertEqual(game["status_counts"], {"SUPPORTED": 4})
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -161,8 +161,9 @@ Info read_info(View view) {
 }
 
 void read_vm_slots(View view,Status& status) {
+    const std::size_t slot_count=view.size()==legacy_status_bytes ? legacy_vm_count : vm_count;
     const std::array<std::size_t,vm_count> script_fields{{100,104,108,124}};
-    for (std::size_t i=0;i<status.vm.size();++i) {
+    for (std::size_t i=0;i<slot_count;++i) {
         auto& slot=status.vm[i];
         slot.script_number=view.i32(script_fields[i]);
         slot.pc=view.i32(1888+i*4);
@@ -182,6 +183,7 @@ void read_vm_slots(View view,Status& status) {
 Status read_status(View view) {
     if (!supported_status_size(view.size()))
         invalid("unsupported GAMESTATUS layout");
+    const std::size_t slot_count=view.size()==legacy_status_bytes ? legacy_vm_count : vm_count;
     Status status;
     status.saved_at={view.i32(32),view.i32(36),view.i32(40),view.i32(44),
                      view.i32(48),view.i32(52),view.i32(56),view.i32(60)};
@@ -190,7 +192,7 @@ Status read_status(View view) {
     status.game_mode=view.i32(80); status.save_count=view.i32(84);
     status.adjust_version=view.i32(88); status.run_mode=view.i32(96);
     if (status.game_mode<0 || status.game_mode>255 || status.adjust_version<0 || status.adjust_version>1 ||
-        status.run_mode<0 || static_cast<std::size_t>(status.run_mode)>=vm_count)
+        status.run_mode<0 || static_cast<std::size_t>(status.run_mode)>=slot_count)
         invalid("unsupported PC save mode or script layout");
     read_vm_slots(view,status);
     status.last_message_id=view.i32(112); status.message_count=view.i32(116);
@@ -238,9 +240,11 @@ Status read_status(View view) {
     status.select_time_limit=view.i32(1920); status.auto_select=view.i32(1924);
     status.select_time_count=view.i32(1928); status.special_flag=view.i32(1932);
     status.auto_message=view.i32(1936); status.cannot_click=view.i32(1940); status.cannot_skip=view.i32(1944);
-    status.large_comment_flag=view.i32(6048);
-    for (std::size_t i=0;i<status.large_comments.size();++i)
-        status.large_comments[i]=view.text(6064+i*256,256,status.large_comment_flag!=0);
+    if (view.size()>=classic_status_bytes) {
+        status.large_comment_flag=view.i32(6048);
+        for (std::size_t i=0;i<status.large_comments.size();++i)
+            status.large_comments[i]=view.text(6064+i*256,256,status.large_comment_flag!=0);
+    }
     if (view.size()==preview_status_bytes) {
         // Old saves predate this preview text. The current PC writer copies
         // its active rows without explicitly writing a terminator.
@@ -250,8 +254,17 @@ Status read_status(View view) {
     return status;
 }
 
-void append_status(std::vector<nnn::Byte>& bytes,const Status& status,bool full) {
-    OutputBlock state(bytes,full?preview_status_bytes:classic_status_bytes,2,"GAMESTATUS");
+void append_status(std::vector<nnn::Byte>& bytes,const Status& status,std::size_t status_bytes) {
+    if (!supported_status_size(status_bytes)) invalid("unsupported GAMESTATUS layout");
+    const std::size_t slot_count=status_bytes==legacy_status_bytes ? legacy_vm_count : vm_count;
+    if (status_bytes==legacy_status_bytes) {
+        if (status.run_mode<0 || static_cast<std::size_t>(status.run_mode)>=legacy_vm_count)
+            invalid("active VM slot exceeds legacy GAMESTATUS layout");
+        const auto& fourth=status.vm[legacy_vm_count];
+        if (fourth.script_number!=0 || fourth.pc!=0 || fourth.stack_pointer!=0)
+            invalid("fourth VM slot exceeds legacy GAMESTATUS layout");
+    }
+    OutputBlock state(bytes,status_bytes,2,"GAMESTATUS");
     const auto& time=status.saved_at;
     state.words(32,std::array<int,8>{time.year,time.month,time.day,time.weekday,time.hour,time.minute,time.second,time.millisecond});
     state.words(64,std::array<int,9>{status.game_month,status.game_day,status.game_hour,status.game_weekday,status.game_mode,
@@ -276,14 +289,16 @@ void append_status(std::vector<nnn::Byte>& bytes,const Status& status,bool full)
     state.words(1904,std::array<int,11>{status.config_mask,status.skip_film,0,0,status.select_time_limit,status.auto_select,
         status.select_time_count,status.special_flag,status.auto_message,status.cannot_click,status.cannot_skip});
     constexpr std::array<std::size_t,vm_count> script_fields{{100,104,108,124}};
-    for (std::size_t i=0;i<vm_count;++i) {
+    for (std::size_t i=0;i<slot_count;++i) {
         const auto& slot=status.vm[i];
         state.i32(script_fields[i],slot.script_number);state.i32(1888+i*4,slot.pc);
         state.i32(1952+i*1024,slot.stack_pointer);state.words(1956+i*1024,slot.call_stack);
     }
-    state.i32(6048,status.large_comment_flag);
-    for (std::size_t i=0;i<status.large_comments.size();++i) state.text(6064+i*256,256,status.large_comments[i]);
-    if (full) {
+    if (status_bytes>=classic_status_bytes) {
+        state.i32(6048,status.large_comment_flag);
+        for (std::size_t i=0;i<status.large_comments.size();++i) state.text(6064+i*256,256,status.large_comments[i]);
+    }
+    if (status_bytes==preview_status_bytes) {
         state.raw(1840,status.guid);
         for (std::size_t i=0;i<status.log_messages.size();++i)
             state.text(classic_status_bytes+i*256,256,status.log_messages[i]);
@@ -378,7 +393,7 @@ Status parse_status_block(const nnn::Byte* bytes,std::size_t size) {
 
 std::vector<nnn::Byte> write_status_block(const Status& status) {
     std::vector<nnn::Byte> bytes;
-    append_status(bytes,status,true);
+    append_status(bytes,status,preview_status_bytes);
     (void)read_status(View(bytes.data(),bytes.size()));
     return bytes;
 }
@@ -429,8 +444,33 @@ Save parse_save(const std::vector<nnn::Byte>& bytes,std::string_view expected_he
         save.messages[i]=messages.text(header_size+i*save.message_width,save.message_width,i<static_cast<std::size_t>(active_messages));
 
     const auto& info=save.info;
-    if ((blocks.count(8)!=0)!=info.has_omake || (blocks.count(9)!=0)!=info.has_cutin ||
-        (blocks.count(10)!=0)!=info.has_log) invalid("optional blocks disagree with INFO");
+    const auto has_named_block=[&](std::uint32_t code,std::string_view name) {
+        const auto found=blocks.find(code);
+        return found!=blocks.end() && found->second.header.name==name;
+    };
+    std::uint32_t ext_base=first_extension_code;
+    if (info.extension_count>0) {
+        if (has_named_block(first_extension_code,"EXT1")) {
+            ext_base=first_extension_code;
+        } else if (!info.has_cutin && has_named_block(legacy_extension_code,"EXT1") &&
+                   (info.extension_count<2 || !info.has_log)) {
+            ext_base=legacy_extension_code;
+        } else if (!info.has_omake && !info.has_cutin && has_named_block(min_legacy_extension_code,"EXT1") &&
+                   (info.extension_count<3 || !info.has_log)) {
+            ext_base=min_legacy_extension_code;
+        } else {
+            invalid("missing or mislabeled EXT1 block");
+        }
+    }
+    save.extension_code_base=ext_base;
+    const auto expected_ext_end=ext_base+static_cast<std::uint32_t>(info.extension_count);
+    const auto is_declared_ext=[&](std::uint32_t code) {
+        return info.extension_count>0 && code>=ext_base && code<expected_ext_end;
+    };
+    if ((!is_declared_ext(8) && (blocks.count(8)!=0)!=info.has_omake) ||
+        (!is_declared_ext(9) && (blocks.count(9)!=0)!=info.has_cutin) ||
+        (!is_declared_ext(10) && (blocks.count(10)!=0)!=info.has_log))
+        invalid("optional blocks disagree with INFO");
     if (info.has_omake) {
         const auto block=required(8,"OMAKECLASS");
         auto& words=save.omake.emplace();
@@ -444,10 +484,9 @@ Save parse_save(const std::vector<nnn::Byte>& bytes,std::string_view expected_he
         block.words(header_size,words);
     }
     if (info.has_log) save.log=read_log(required(10,"LOG"));
-    const auto expected_ext_end=first_extension_code+static_cast<std::uint32_t>(info.extension_count);
     save.extensions.reserve(static_cast<std::size_t>(info.extension_count));
-    for (auto code=first_extension_code;code<expected_ext_end;++code) {
-        const auto block=required(code,"EXT"+std::to_string(code-first_extension_code+1));
+    for (auto code=ext_base;code<expected_ext_end;++code) {
+        const auto block=required(code,"EXT"+std::to_string(code-ext_base+1));
         const auto* first=block.at(header_size,block.size()-header_size);
         save.extensions.emplace_back(first,first+block.size()-header_size);
     }
@@ -459,11 +498,10 @@ Save parse_save(const std::vector<nnn::Byte>& bytes,std::string_view expected_he
     for (const auto& item:blocks) {
         const auto code=item.first;
         const auto& block=item.second;
-        if (code<=10) continue;
-        if (code>=first_extension_code && code<=last_extension_code) {
-            if (code>=expected_ext_end) invalid("undeclared extension block");
-            continue;
-        }
+        if (is_declared_ext(code) || code<=10) continue;
+        if (code>=first_extension_code && code<=last_extension_code) invalid("undeclared extension block");
+        if (ext_base<first_extension_code && code<ext_base+max_extensions &&
+            block.header.name.compare(0,3,"EXT")==0) invalid("undeclared extension block");
         const auto size=block.view.size()-header_size;
         const auto* payload=block.view.at(header_size,size);
         save.unsupported_blocks.push_back({block.header,{payload,payload+size}});
@@ -474,11 +512,14 @@ Save parse_save(const std::vector<nnn::Byte>& bytes,std::string_view expected_he
 std::vector<nnn::Byte> write_save(const Save& save) {
     if (!save.unsupported_blocks.empty())
         invalid("cannot write unresolved PC state");
+    const bool valid_ext_base=save.extension_code_base==first_extension_code ||
+        (save.extension_code_base==legacy_extension_code && !save.cutin && (save.extensions.size()<2 || !save.log)) ||
+        (save.extension_code_base==min_legacy_extension_code && !save.omake && !save.cutin && (save.extensions.size()<3 || !save.log));
     if (save.header.name.empty() || (save.vars.size()!=1024 && save.vars.size()!=2224) ||
         (save.layer_records!=classic_layer_count && save.layer_records!=layer_count) ||
         (save.message_width!=legacy_message_width && save.message_width!=classic_message_width &&
          save.message_width!=expanded_message_width) ||
-        !supported_status_size(save.status_bytes) || save.extensions.size()>max_extensions)
+        !supported_status_size(save.status_bytes) || save.extensions.size()>max_extensions || !valid_ext_base)
         invalid("invalid PC output layout");
     for (std::size_t i=save.layer_records;i<layer_count;++i)
         if (save.effects[i].flag || !save.filenames[i].empty()) invalid("active layer exceeds the PC output layout");
@@ -493,7 +534,7 @@ std::vector<nnn::Byte> write_save(const Save& save) {
     OutputBlock info(bytes,64,1,"INFO");
     const int omake=save.omake?1:0,cutin=save.cutin?1:0;
     info.words(32,std::array<int,6>{8+extensions+omake+cutin,save.info.version,extensions,omake,cutin,save.log?1:0});
-    append_status(bytes,save.status,save.status_bytes==preview_status_bytes);
+    append_status(bytes,save.status,save.status_bytes);
     OutputBlock image(bytes,48+thumb.pixels.size()*4,3,"MINICG");
     image.i32(32,thumb.width);image.i32(36,thumb.height);
     for (std::size_t i=0;i<thumb.pixels.size();++i) image.u32(48+i*4,thumb.pixels[i]);
@@ -550,7 +591,7 @@ std::vector<nnn::Byte> write_save(const Save& save) {
     for (std::size_t i=0;i<save.extensions.size();++i) {
         const auto& payload=save.extensions[i];
         if (payload.size()>max_save_bytes-header_size) invalid("extension exceeds output capacity");
-        OutputBlock extension(bytes,header_size+payload.size(),first_extension_code+static_cast<std::uint32_t>(i),
+        OutputBlock extension(bytes,header_size+payload.size(),save.extension_code_base+static_cast<std::uint32_t>(i),
             "EXT"+std::to_string(i+1));
         std::copy(payload.begin(),payload.end(),bytes.end()-static_cast<std::ptrdiff_t>(payload.size()));
     }
