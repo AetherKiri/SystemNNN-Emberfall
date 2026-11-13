@@ -11,6 +11,7 @@ public final class SaveLayoutConfig {
     public final String path;
     public final int layerRecords, messageWidth, statusBytes, systemSaveVersion;
     public final boolean executableLayout, okikae;
+    public final boolean executableMessageWidth, executableStatusBytes, executableOkikae;
     public final SystemSaveSource systemSaveSource;
 
     private SaveLayoutConfig(String path,int[] fields){
@@ -22,6 +23,9 @@ public final class SaveLayoutConfig {
         executableLayout=fields[4]!=0;
         okikae=fields[5]!=0;
         systemSaveSource=SYSTEM_SAVE_SOURCES[fields[6]];
+        executableMessageWidth=fields[7]!=0;
+        executableStatusBytes=fields[8]!=0;
+        executableOkikae=fields[9]!=0;
     }
 
     static SaveLayoutConfig open(File root,boolean regenerate) throws IOException {
@@ -36,7 +40,7 @@ public final class SaveLayoutConfig {
     }
 
     static SaveLayoutConfig fromFields(String path,int[] fields) throws IOException {
-        if(path==null || path.isEmpty() || fields==null || fields.length!=7 ||
+        if(path==null || path.isEmpty() || fields==null || fields.length!=10 ||
            fields[6]<0 || fields[6]>=SYSTEM_SAVE_SOURCES.length ||
            (fields[6]==0 ? fields[3]!=0 : fields[3]<1 || fields[3]>3))
             throw new IOException("Invalid Emberfall layout response");
@@ -45,6 +49,6 @@ public final class SaveLayoutConfig {
 
     int[] fields(){
         return new int[]{layerRecords,messageWidth,statusBytes,systemSaveVersion,executableLayout?1:0,okikae?1:0,
-            systemSaveSource.ordinal()};
+            systemSaveSource.ordinal(),executableMessageWidth?1:0,executableStatusBytes?1:0,executableOkikae?1:0};
     }
 }

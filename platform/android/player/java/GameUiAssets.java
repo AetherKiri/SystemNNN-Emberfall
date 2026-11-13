@@ -321,7 +321,7 @@ final class GameUiAssets {
         for(Config button:storyButtons.values())names.addAll(button.imageNames());
         for (int i=1;i<=Math.max(9,GameSystemMenuPanel.optionCount(system));++i)
             request(names,system,"Menu1Button"+i+"FileName");
-        request(names,system,"backScreenFileName","filenameMenuBase");
+        request(names,system,"backScreenFileName","filenameMenuBase","systemMenuSceneBackFileName","systemMenuSceneEndFileName");
         common(names,system); common(names,config); common(names,save); common(names,load);
         names.addAll(save.imageNames(field->field.matches("tab[0-9]+button[12]filename")));
         names.addAll(load.imageNames(field->field.matches("tab[0-9]+button[12]filename")));
@@ -335,7 +335,7 @@ final class GameUiAssets {
         request(names,backlog,"backlogBGFileName","titlePicFileName","upArrowFileName","downArrowFileName","filenameVoice","filenameJump");
         Config data=readConfig(root,"dataFile"),notice=readConfig(root,"notice");
         request(names,save,"filenameBG");request(names,load,"filenameBG");
-        request(names,data,"filenameSaveCursor","filenameLoadCursor","fileNameSaveTimeFont",
+        request(names,data,"filenameSaveCursor","filenameLoadCursor","filenameOverwriteCursor","fileNameSaveTimeFont",
             "fileNameSerialNumberFont","filenameSaveBase","filenameLoadBase","filenameQuickSaveBase","filenameQuickLoadBase","filenameLastSave",
             "fileNameError","fileNameBad","fileNameOld");
         if(data.number("addPicPrintFlag",0)!=0)names.add(systemImageKey(data.value("fileNameAddPic","ta_sl_font")));
