@@ -603,6 +603,9 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
     nnn::resource::FilenameEncoder filename_encoder;
     std::optional<ScriptClockSample> sampled_clock;
     std::uint32_t random_state=1,legacy_random_state=1;
+    std::uint32_t choice_sequence=0;
+    bool movie_fill_exit_screen=true;
+    std::array<render::Byte,3> movie_exit_rgb{0,0,0};
     bool seed_from_clock=false;
     std::optional<std::vector<std::size_t>> cg_counts;
     std::optional<std::vector<std::vector<nnn::Word>>> scene_requirements;
@@ -823,7 +826,14 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
                 if (fold_cp932(std::string(*token))==name) return index/2;
             return {};
         };
-        if (movie_count) movie_command=command_id("printmovie");
+        if (movie_count) {
+            movie_command=command_id("printmovie");
+            const auto movie_cfg=nnn::game_config::read(root,"init","printMovie.xtx");
+            movie_fill_exit_screen=config_int(movie_cfg,"fillExitScreenFlag",1)!=0;
+            movie_exit_rgb={static_cast<render::Byte>(std::clamp(config_int(movie_cfg,"exitFadeOutColorR",0),0,255)),
+                static_cast<render::Byte>(std::clamp(config_int(movie_cfg,"exitFadeOutColorG",0),0,255)),
+                static_cast<render::Byte>(std::clamp(config_int(movie_cfg,"exitFadeOutColorB",0),0,255))};
+        }
         if (optional_class_created(init,"selectplace"))
             select_place=configure_places(command_id("selectplace"),nnn::game_config::read(root,"init","selectPlace.xtx"));
         if (optional_class_created(init,"selectplace2"))
@@ -3741,6 +3751,29 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         }
         return positions;
     }
+    std::int32_t choice_plane_id() const noexcept {
+        if (frame.wait!=Wait::Choice || !frame.selection) return 0;
+        const auto& sel=*frame.selection;
+        std::uint32_t h=2166136261U;
+        const auto mix=[&](std::uint32_t v) noexcept {
+            h^=v;
+            h*=16777619U;
+        };
+        const auto mix_bytes=[&](std::string_view s) noexcept {
+            mix(static_cast<std::uint32_t>(s.size()));
+            for (char ch:s) mix(static_cast<unsigned char>(ch));
+        };
+        mix(choice_sequence);
+        mix(static_cast<std::uint32_t>(sel.serial));
+        mix(static_cast<std::uint32_t>(sel.special));
+        mix(static_cast<std::uint32_t>(sel.auto_select));
+        mix(static_cast<std::uint32_t>(sel.messages.size()));
+        for (const auto& m:sel.messages) mix_bytes(m);
+        mix(static_cast<std::uint32_t>(sel.options.size()));
+        for (const auto& o:sel.options) mix_bytes(o);
+        const auto signed_id=static_cast<std::int32_t>(h);
+        return signed_id==0 ? 1 : signed_id;
+    }
     nnn::Value save_slot_art() const {
         return save_slot_art_var<variable_count ? variable_value(static_cast<nnn::Word>(save_slot_art_var)) : pc_save_slot_art;
     }
@@ -4180,6 +4213,7 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
             frame.selection->auto_select=status.auto_select;frame.selection->special=status.special_flag;
             frame.choice_limit_ms=static_cast<unsigned>(std::max(0,status.select_time_limit));
             frame.choice_remaining_ms=static_cast<unsigned>(std::clamp(status.select_time_count,0,status.select_time_limit>0?status.select_time_limit:0));
+            ++choice_sequence;
             frame.wait=Wait::Choice;
         }
         restore_pc_audio(status);
@@ -4781,6 +4815,7 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         if (jumping) playback.load_snapshot(in,keep_music_position,jump_voice_mask,jump_finish_fades);
         else playback.load_snapshot(in,keep_music_position,{},false,restart_music);
         if (next.frame.modal) next.frame.modal->request=new_modal_request();
+        if (next.frame.wait==Wait::Choice) ++choice_sequence;
         frame=std::move(next.frame);vars=next.vars;
         pending_voice_message.reset();
         append_prefix_bytes=0;
@@ -4867,7 +4902,17 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
             commit_place(*setup,static_cast<nnn::Value>(in.choice));
             frame.wait=Wait::Running;
         }
+        const bool had_presented=!renderer->presented_surface().rgb.empty();
+        struct MovieExitScope {
+            render::Layers* layers=nullptr;
+            bool clear_on_exit=false;
+            ~MovieExitScope() { if (clear_on_exit && layers) layers->clear_presented(); }
+        } movie_exit_scope;
         if (resume_movie) {
+            if (movie_fill_exit_screen) {
+                renderer->set_presented_solid(movie_exit_rgb[0],movie_exit_rgb[1],movie_exit_rgb[2]);
+                movie_exit_scope={renderer.get(),!had_presented};
+            }
             frame.wait=Wait::Running; frame.movie=0;
         } else input=in;
         if (ui_mode) {
@@ -4971,6 +5016,7 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
                 frame.choice_remaining_ms=frame.choice_limit_ms;
                 choice_appear_remaining=choice_appear_frames;
                 remember_choice(*frame.selection);
+                ++choice_sequence;
                 frame.wait=Wait::Choice; set_mode(nnn::RuntimeMode::SelectMessage); return frame;
             case draw:
                 if (skip_film_command) break;
@@ -5331,6 +5377,40 @@ void GameSession::trim_replayed_backlog(unsigned keep) {
     data_->trim_backlog(keep);
 }
 const render::Surface& GameSession::surface() { return data_->renderer->surface(); }
+const render::Surface& GameSession::scene_surface() { return data_->renderer->scene_surface(); }
+void GameSession::set_message_plane(std::shared_ptr<const render::MessagePlane> plane) {
+    render::Layers::OverlapDecoration backdrop;
+    const bool long_dialogue=!data_->ui_mode && data_->frame.wait==Wait::Dialogue &&
+        data_->frame.dialogue.layout_command==lprint && !data_->cutins.active();
+    if (data_->long_background_mode && (draw_message()==DrawMessage::LongBackground || long_dialogue))
+        backdrop=[impl=data_.get()](render::Surface& out) { impl->paint_long_background(out); };
+    const bool draw_screen_slot=!(data_->frame.wait==Wait::Choice && !data_->choice_draws_scene);
+    data_->renderer->set_message_plane(std::move(plane),std::move(backdrop),draw_screen_slot);
+}
+void GameSession::clear_message_plane() noexcept { data_->renderer->clear_message_plane(); }
+bool GameSession::needs_message_plane() const noexcept {
+    if (data_->ui_mode) return false;
+    const auto wait=data_->frame.wait;
+    if (wait==Wait::Dialogue || wait==Wait::Choice) return true;
+    return wait==Wait::Draw && draw_message()!=DrawMessage::None;
+}
+GameSession::PlaneKey GameSession::expected_plane_key() const noexcept {
+    if (data_->ui_mode) return {};
+    const auto& f=data_->frame;
+    const auto dm=draw_message();
+    const bool has_dialogue=f.wait==Wait::Dialogue || dm==DrawMessage::RetainedMessage;
+    const bool check_win=f.wait==Wait::Dialogue || f.wait==Wait::Draw;
+    return {{
+        static_cast<std::int32_t>(f.wait),
+        has_dialogue ? static_cast<std::int32_t>(f.dialogue.sequence) : 0,
+        check_win && f.dialogue.window_visible ? 1 : 0,
+        static_cast<std::int32_t>(dm),
+        data_->choice_plane_id(),
+        0
+    }};
+}
+void GameSession::after_present() { data_->renderer->after_present(); }
+const render::Surface& GameSession::presented_surface() const noexcept { return data_->renderer->presented_surface(); }
 bool GameSession::screen_layer_active() const { return data_->renderer->screen_layer_active(); }
 bool GameSession::story_draws_screen_layer() const {
     const auto wait=data_->frame.wait;

@@ -105,6 +105,51 @@ public final class DialogueLayoutTest {
         put(m,"windowNumberConfig",1000);put(m,"windowNumberScript",1000);put(m,"windowNumberFontSizeType",1000);
         check(DialogueLayout.counts(m).size()<=DialogueLayout.MAX_VARIANTS,"bounded window table");
         put(m,"fontSizeTypeNumber",1000);check(DialogueLayout.layouts(m).length==DialogueLayout.MAX_LAYOUTS,"bounded layout table");
+        DialogueLayout.WindowBand[] single=DialogueLayout.windowBands(640,180,0,60);
+        check(single.length==1&&single[0].srcY==0&&single[0].width==640&&single[0].height==180&&single[0].alpha==153,
+            "plain translucent window band");
+        check(DialogueLayout.windowBands(640,180,0,0).length==0,"zero opacity skips translucent window band");
+        DialogueLayout.WindowBand[] borderOnly=DialogueLayout.windowBands(640,180,1,0);
+        check(borderOnly.length==1&&borderOnly[0].srcY==180&&borderOnly[0].alpha==255,
+            "notTransWindowUse=1 keeps opaque border even at 0% window opacity");
+        DialogueLayout.WindowBand[] borderAndBase=DialogueLayout.windowBands(640,180,1,50);
+        check(borderAndBase.length==2&&borderAndBase[0].srcY==0&&borderAndBase[0].alpha==128&&
+            borderAndBase[1].srcY==180&&borderAndBase[1].alpha==255,"notTransWindowUse=1 draws translucent base then opaque border");
+        DialogueLayout.WindowBand[] underlayAndBase=DialogueLayout.windowBands(640,100,2,50);
+        check(underlayAndBase.length==2&&underlayAndBase[0].srcY==100&&underlayAndBase[0].alpha==255&&
+            underlayAndBase[1].srcY==0&&underlayAndBase[1].alpha==128,"notTransNameWindowUse=2 draws opaque underlay at y=h then base");
+        DialogueLayout.WindowBand[] threeBands=DialogueLayout.windowBands(640,180,3,80);
+        check(threeBands.length==3&&threeBands[0].srcY==360&&threeBands[0].alpha==255&&
+            threeBands[1].srcY==0&&threeBands[1].alpha==204&&
+            threeBands[2].srcY==180&&threeBands[2].alpha==255,"notTransWindowUse=3 draws underlay y=2h, base y=0, border y=h");
+        check(DialogueLayout.windowBands(0,180,3,100).length==0,"empty window dimensions emit no bands");
+        int[] baseKey={3,20,1,0,50,0};
+        int[] visibleKey=DialogueLayout.composePlaneKey(baseKey,false,3);
+        check(visibleKey.length==6&&visibleKey[0]==3&&visibleKey[4]==50&&visibleKey[5]==3,"composePlaneKey preserves fields 0..4 and choice page");
+        int[] hiddenKey=DialogueLayout.composePlaneKey(baseKey,true,-5);
+        check((hiddenKey[5]&DialogueLayout.PLANE_UI_HIDDEN)!=0&&(hiddenKey[5]&0xffff)==0,"composePlaneKey sets PLANE_UI_HIDDEN and clamps negative choice page");
+        int[] emptyKey=DialogueLayout.composePlaneKey(null,true,0x12345);
+        check(emptyKey[0]==0&&emptyKey[5]==(DialogueLayout.PLANE_UI_HIDDEN|0x2345),"composePlaneKey handles null source and masks 16-bit choice page");
+        check(DialogueLayout.planeKeyMatches(new int[]{3,20,1,0,50,99},baseKey),"planeKeyMatches ignores choice page in key[5] when visible");
+        check(!DialogueLayout.planeKeyMatches(hiddenKey,baseKey),"planeKeyMatches rejects PLANE_UI_HIDDEN plane");
+        check(!DialogueLayout.planeKeyMatches(new int[]{3,20,1,0,51,0},baseKey),"planeKeyMatches rejects mismatched choice plane id");
+        check(DialogueLayout.evaluatePlaneGate(visibleKey,baseKey,true,true,false,0L)==DialogueLayout.GATE_MATCHED,"R2 gate matches presented plane");
+        check(DialogueLayout.evaluatePlaneGate(hiddenKey,baseKey,true,true,false,100L)==DialogueLayout.GATE_HOLD,"R2 gate holds while UI hidden bit is still presented");
+        check(DialogueLayout.evaluatePlaneGate(new int[]{3,20,1,0,0,0},baseKey,true,true,false,249L)==DialogueLayout.GATE_HOLD,"R2 gate holds before 250ms timeout");
+        check(DialogueLayout.evaluatePlaneGate(new int[]{3,20,1,0,0,0},baseKey,true,true,false,250L)==DialogueLayout.GATE_TIMED_OUT,"R2 gate falls back at 250ms timeout");
+        check(DialogueLayout.evaluatePlaneGate(null,new int[]{1,20,1,1,0,0},true,true,false,0L)==DialogueLayout.GATE_MATCHED,"R2 gate never holds non-DIALOGUE/CHOICE waits");
+        check(DialogueLayout.evaluatePlaneGate(null,baseKey,false,true,false,0L)==DialogueLayout.GATE_BYPASSED,"R2 gate bypasses when surface is detached");
+        check(DialogueLayout.evaluatePlaneGate(null,baseKey,true,false,false,0L)==DialogueLayout.GATE_BYPASSED,"R2 gate bypasses when activity is paused");
+        check(DialogueLayout.evaluatePlaneGate(null,baseKey,true,true,true,0L)==DialogueLayout.GATE_BYPASSED,"R2 gate bypasses when menu is open");
+        check(DialogueLayout.choiceSetId(null)==0&&DialogueLayout.choiceSetId(new int[]{4,0,0,0})==0,"choiceSetId safely handles null and short keys");
+        check(DialogueLayout.choiceSetId(new int[]{4,0,0,0,0x12345678,0})!=DialogueLayout.choiceSetId(new int[]{4,0,0,0,0x12345679,0}),
+            "choiceSetId distinguishes repeated SELECT loops at identical script coordinates");
+        check(DialogueLayout.portraitMoving(0,true,4,false,12),"blinking primary portrait stays active across wait cycles");
+        check(DialogueLayout.portraitMoving(0,true,4,true,0),"finite one-shot portrait animates before end frame");
+        check(!DialogueLayout.portraitMoving(0,true,4,false,0),"finite one-shot portrait converges once finished");
+        check(!DialogueLayout.portraitMoving(1,true,4,true,12),"secondary composite portrait layer fixed at frame 0 never loops");
+        check(!DialogueLayout.portraitMoving(0,false,4,true,12)&&!DialogueLayout.portraitMoving(0,true,1,true,12),
+            "missing or single-frame portrait never animates");
         if(args.length>0){
             Path root=Paths.get(args[0]);Map<String,String> real=read(root.resolve("init/printmessage.xtx"));
             DialogueLayout.Text[] actual=DialogueLayout.layouts(real);
