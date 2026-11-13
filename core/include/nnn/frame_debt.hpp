@@ -17,19 +17,27 @@ public:
     void set_frame(int frame_ms) noexcept { frame_=std::max(1,frame_ms); }
     void clear() noexcept { debt_=0; planned_=0; }
     int max_frames() const noexcept { return max_; }
-    // Frames to run now, at most wanted.
-    int repay(std::uint32_t elapsed_ms,int wanted) noexcept {
+    void begin_frame(std::uint32_t elapsed_ms,bool no_skip_frame=false) noexcept {
         debt_+=elapsed_ms;
         if (debt_<frame_) planned_=0;
         else {
             const std::int64_t span=std::int64_t{window_}*frame_;
             if (planned_*span<debt_+span) ++planned_;
             if (planned_>1 && (planned_-1)*span>debt_+span) --planned_;
-            planned_=std::min(planned_,max_);
+            // A scheduled Android update can only present the final step.
+            // Repay whole frames already due so an on-time tick never skips a frame.
+            const int limit=no_skip_frame ? 1 : max_;
+            planned_=static_cast<int>(std::min<std::int64_t>({planned_,limit,debt_/frame_}));
         }
+    }
+    int repay_frames(int wanted) noexcept {
         const int frames=std::min(planned_,std::max(0,wanted));
         debt_=std::max<std::int64_t>(debt_-std::int64_t{frames}*frame_,-std::int64_t{frame_});
         return frames;
+    }
+    int repay(std::uint32_t elapsed_ms,int wanted,bool no_skip_frame=false) noexcept {
+        begin_frame(elapsed_ms,no_skip_frame);
+        return repay_frames(wanted);
     }
 
 private:

@@ -36,6 +36,7 @@ struct Player {
     SurfaceRef surface;
     unsigned width=0,height=0;
     bool repaint=true,window_geometry_pending=true;
+    bool overlap_endpoint=false;
     std::uint64_t remainder=0;
     bool title=false,loop_title=false;
     std::shared_ptr<emberfall::render::ScreenLayerFrame> screen_layer;
@@ -142,11 +143,21 @@ void flush_screen_capture(Player& p) {
     if (sample.rgb.empty()) sample=screen->frame->capture_without_ui();
     p.game->commit_screen_capture(std::move(sample));
 }
-void present(Player& p) {
+void copy_scene_rgba(const emberfall::render::Surface& src,std::uint8_t* row,std::size_t stride) {
+    const auto* rgb=src.rgb.data();
+    for (unsigned y=0;y<src.height;++y,row+=stride) {
+        auto* pixel=row;
+        for (unsigned x=0;x<src.width;++x,pixel+=4,rgb+=3) {
+            pixel[0]=rgb[0]; pixel[1]=rgb[1]; pixel[2]=rgb[2]; pixel[3]=255;
+        }
+    }
+}
+jlong present(Player& p) {
     const bool visible=has_surface(p);
     p.game->capture_screen_layer(visible && draws_story_ui(p));
-    if (!visible || (!p.repaint && !p.game->needs_redraw())) return;
+    if (!visible || (!p.repaint && !p.game->needs_redraw())) return 0;
     const auto& src=p.static_title.rgb.empty() ? p.game->surface() : p.static_title;
+    jlong queued_at=0;
     p.surface->submit([&](ANativeWindow* window) {
         if (p.window_geometry_pending) {
             if (ANativeWindow_setBuffersGeometry(window,static_cast<int>(p.width),static_cast<int>(p.height),WINDOW_FORMAT_RGBA_8888)!=0)
@@ -156,18 +167,15 @@ void present(Player& p) {
         ANativeWindow_Buffer dst{};
         if (ANativeWindow_lock(window,&dst,nullptr)!=0) { p.repaint=true; return; }
         if (dst.width==static_cast<int>(src.width) && dst.height==static_cast<int>(src.height) && dst.format==WINDOW_FORMAT_RGBA_8888) {
-            auto* row=static_cast<std::uint8_t*>(dst.bits);
-            const auto* rgb=src.rgb.data();
-            for (unsigned y=0;y<src.height;++y,row+=static_cast<std::size_t>(dst.stride)*4) {
-                auto* pixel=row;
-                for (unsigned x=0;x<src.width;++x,pixel+=4,rgb+=3) {
-                    pixel[0]=rgb[0]; pixel[1]=rgb[1]; pixel[2]=rgb[2]; pixel[3]=255;
-                }
-            }
+            copy_scene_rgba(src,static_cast<std::uint8_t*>(dst.bits),static_cast<std::size_t>(dst.stride)*4);
             p.repaint=false;
         } else p.repaint=true;
+        // The SurfaceTexture receives the native producer's monotonic timestamp.
+        const auto now=std::chrono::steady_clock::now().time_since_epoch();
         if (ANativeWindow_unlockAndPost(window)!=0) p.repaint=true;
+        if (!p.repaint) queued_at=std::chrono::duration_cast<std::chrono::nanoseconds>(now).count();
     });
+    return queued_at;
 }
 void frame_meta(JNIEnv* env,Player& p,jintArray meta) {
     const auto& f=p.game->state();
@@ -183,11 +191,20 @@ void frame_meta(JNIEnv* env,Player& p,jintArray meta) {
         const jint message=static_cast<jint>(p.game->draw_message());
         env->SetIntArrayRegion(meta,10,1,&message);
     }
+    if (env->GetArrayLength(meta)>=14) {
+        const jint film_skip=p.game->film_skip_available()?1:0;
+        env->SetIntArrayRegion(meta,13,1,&film_skip);
+    }
+    if (env->GetArrayLength(meta)>=15) {
+        const jint mouse=f.script_mouse;
+        env->SetIntArrayRegion(meta,14,1,&mouse);
+    }
 }
-emberfall::scene::Wait step_title(Player& p) {
+emberfall::scene::Wait step_title(Player& p,std::optional<unsigned> elapsed_ms={}) {
     emberfall::scene::InputState input;
     input.mouse_x=input.mouse_y=-1;
-    const auto& state=p.game->step_ui_background(input,p.loop_title);
+    const auto& state=elapsed_ms ? p.game->tick_ui_background(input,p.loop_title,*elapsed_ms)
+                                 : p.game->step_ui_background(input,p.loop_title);
     if(state.wait==emberfall::scene::Wait::Error)throw std::runtime_error(state.error);
     return state.wait;
 }
@@ -348,23 +365,23 @@ API jboolean JNICALL FN(configureMenuBackground)(JNIEnv* env,jclass,jlong handle
         return !p.back_script.empty() || !p.static_title.rgb.empty();
     } catch (const std::exception& e) { fail(env,e.what()); return JNI_FALSE; }
 }
-API jint JNICALL FN(advanceOpening)(JNIEnv* env,jclass,jlong handle,jint frames) {
+API jint JNICALL FN(advanceOpening)(JNIEnv* env,jclass,jlong handle,jint elapsed_ms) {
     try {
+        if (elapsed_ms<0) throw std::invalid_argument("Invalid opening elapsed time");
         auto& p=player(handle);
         const auto period=p.game->frame_ms();
         if (p.back_script.empty()) return static_cast<jint>(period);
-        bool ended=false;
-        for (int i=0;i<std::clamp(frames,1,64);++i) {
-            using emberfall::scene::Wait;
-            const auto wait=step_title(p);
-            if (wait==Wait::Ended) { ended=true; break; }
-            if (wait!=Wait::Running && wait!=Wait::Draw && wait!=Wait::Overlap)
-                throw std::runtime_error("Opening background waits for unsupported input");
-            if (p.game->frame_ms()!=period) break;
-        }
+        using emberfall::scene::Wait;
+        const auto wait=elapsed_ms ? step_title(p,static_cast<unsigned>(elapsed_ms)) : p.game->state().wait;
+        if (wait!=Wait::Ended && wait!=Wait::Running && wait!=Wait::Draw && wait!=Wait::Overlap)
+            throw std::runtime_error("Opening background waits for unsupported input");
         present(p);
-        return ended?0:static_cast<jint>(p.game->frame_ms());
+        return wait==Wait::Ended?0:static_cast<jint>(p.game->frame_ms());
     } catch (const std::exception& e) { fail(env,e.what()); return 0; }
+}
+API void JNICALL FN(resetFramePacing)(JNIEnv* env,jclass,jlong handle) {
+    try { player(handle).game->reset_frame_pacing(); }
+    catch (const std::exception& e) { fail(env,e.what()); }
 }
 API void JNICALL FN(restartTitle)(JNIEnv* env,jclass,jlong handle) {
     try {
@@ -411,7 +428,39 @@ API jintArray JNICALL FN(gallerySprite)(JNIEnv* env,jclass,jlong handle,jbyteArr
 API jintArray JNICALL FN(keyedSprite)(JNIEnv* env,jclass,jlong handle,jbyteArray raw) {
     return ui_sprite(env,handle,raw,6*1024*1024,true);
 }
-API void JNICALL FN(tick)(JNIEnv* env,jclass,jlong handle,jint ms,jint x,jint y,jboolean advance,jint choice,jboolean replay,jintArray meta) {
+namespace {
+bool capture_overlap_ui(JNIEnv* env,jobject host,emberfall::render::Surface& scene) {
+    const auto host_type=env->GetObjectClass(host);
+    if (!host_type) return false;
+    const auto callback=env->GetMethodID(host_type,"captureOverlapSource","(II)Landroid/graphics/Bitmap;");
+    env->DeleteLocalRef(host_type);
+    if (!callback) return false;
+    const auto bitmap=env->CallObjectMethod(host,callback,static_cast<jint>(scene.width),static_cast<jint>(scene.height));
+    if (!bitmap || env->ExceptionCheck()) return false;
+    bool drawn=false;
+    try {
+        emberfall::android::LockedBitmap overlay(env,bitmap);
+        if (overlay.info.width==scene.width && overlay.info.height==scene.height) {
+            auto* pixel=scene.rgb.data();
+            for (unsigned y=0;y<scene.height;++y) {
+                const auto* src=overlay.row(y);
+                for (unsigned x=0;x<scene.width;++x,src+=4,pixel+=3) {
+                    if (!src[3]) continue;
+                    const unsigned remaining=255-src[3];
+                    for (unsigned c=0;c<3;++c)
+                        pixel[c]=static_cast<std::uint8_t>(src[c]+(pixel[c]*remaining+127)/255);
+                }
+            }
+            drawn=true;
+        }
+    } catch (const std::exception& e) {
+        __android_log_print(ANDROID_LOG_WARN,"SystemNNN","story transition: %s",e.what());
+    }
+    env->DeleteLocalRef(bitmap);
+    return drawn;
+}
+void tick(JNIEnv* env,jlong handle,jint ms,jint x,jint y,jboolean advance,jint choice,jboolean replay,jintArray meta,jobject host,
+          bool* stage_story=nullptr) {
     try {
         const auto length=meta ? env->GetArrayLength(meta) : 0;
         if (length<7 || ms<0) throw std::invalid_argument("Invalid frame input");
@@ -426,9 +475,7 @@ API void JNICALL FN(tick)(JNIEnv* env,jclass,jlong handle,jint ms,jint x,jint y,
         if (p.title) {
             if (ms>0 && !p.back_script.empty()) {
                 try {
-                    const int frames=std::clamp(ms/static_cast<int>(p.game->frame_ms()),1,64);
-                    for (int i=0;i<frames;++i)
-                        if (step_title(p)==emberfall::scene::Wait::Ended && !p.loop_title) break;
+                    step_title(p,static_cast<unsigned>(ms));
                 }
                 catch(const std::exception& e) {
                     __android_log_print(ANDROID_LOG_WARN,"SystemNNN","title background: %s",e.what());
@@ -444,6 +491,10 @@ API void JNICALL FN(tick)(JNIEnv* env,jclass,jlong handle,jint ms,jint x,jint y,
                 const jint ended=!p.loop_title && !p.back_script.empty() &&
                     p.game->state().wait==emberfall::scene::Wait::Ended;
                 env->SetIntArrayRegion(meta,11,1,&ended);
+            }
+            if (length>=15) {
+                const jint mouse=p.game->state().script_mouse;
+                env->SetIntArrayRegion(meta,14,1,&mouse);
             }
             return;
         }
@@ -461,13 +512,34 @@ API void JNICALL FN(tick)(JNIEnv* env,jclass,jlong handle,jint ms,jint x,jint y,
         if (input.recorded_clock && clock[0]>0)
             input.clock_sample=emberfall::scene::ScriptClockSample{clock[0],clock[1]};
         if (!replay) flush_screen_capture(p);
-        // A journal replays the paced time it recorded. A zero-time tick continues the script only.
-        const auto step_ms=replay || ms==0 ? static_cast<unsigned>(ms) : p.game->pace(static_cast<unsigned>(ms));
-        const auto& f=p.game->step_frame(step_ms,input);
+        // Legacy journals supply a single interval. Live updates keep actual time
+        // for the choice and speech clocks and apply CShakin to animation.
+        const auto elapsed_ms=static_cast<unsigned>(ms);
+        const auto step_ms=replay || ms==0 ? elapsed_ms : p.game->pace(elapsed_ms);
+        emberfall::render::Layers::OverlapCapture capture;
+        if (host && has_surface(p))
+            capture=[env,host](auto& source) { return capture_overlap_ui(env,host,source); };
+        using emberfall::scene::Wait;
+        const auto large_dialogue=[](const emberfall::scene::FrameState& frame) {
+            return frame.wait==Wait::Dialogue && frame.dialogue.layout_command==0x22220002U;
+        };
+        const auto& previous=p.game->state();
+        const auto before=previous.wait;
+        const bool before_large=large_dialogue(previous);
+        const bool before_overlap=before==Wait::Overlap || p.overlap_endpoint;
+        const auto& f=p.game->step_frame({elapsed_ms,step_ms},input,capture);
         if (f.wait==emberfall::scene::Wait::Error) throw std::runtime_error(f.script+" @"+std::to_string(f.word)+" "+f.error);
         const auto sampled=p.game->script_clock_sample();
         if (input.clock_sample && !sampled) throw std::runtime_error("Unused journal clock sample");
-        if (!replay) present(p);
+        p.overlap_endpoint=before==Wait::Overlap && f.wait==Wait::Running;
+        const bool in_overlap=f.wait==Wait::Overlap || p.overlap_endpoint;
+        const bool story=f.wait==Wait::Overlap || f.wait==Wait::Dialogue || f.wait==Wait::Draw || f.wait==Wait::Choice;
+        // DRAW can carry the same artwork that LPRINT will draw over the next scene.
+        // Publish the replacement artwork with the new base so neither appears alone.
+        const bool replace_large=before_large!=large_dialogue(f) && p.game->needs_redraw();
+        const bool stage=stage_story && has_surface(p) && story && (before_overlap!=in_overlap || replace_large);
+        if (stage_story) *stage_story=stage;
+        if (!replay && !stage) present(p);
         frame_meta(env,p,meta);
         if (with_clock) {
             const jint values[]={sampled ? sampled->date : 0,sampled ? sampled->milliseconds : 0};
@@ -478,6 +550,32 @@ API void JNICALL FN(tick)(JNIEnv* env,jclass,jlong handle,jint ms,jint x,jint y,
             env->SetIntArrayRegion(meta,12,1,&paced);
         }
     } catch (const std::exception& e) { fail(env,e.what()); }
+}
+}
+API void JNICALL FN(tick)(JNIEnv* env,jclass,jlong handle,jint ms,jint x,jint y,jboolean advance,jint choice,jboolean replay,jintArray meta) {
+    tick(env,handle,ms,x,y,advance,choice,replay,meta,nullptr);
+}
+API jboolean JNICALL FN(tickStory)(JNIEnv* env,jclass,jlong handle,jint ms,jint x,jint y,jboolean advance,jint choice,jintArray meta,jobject host) {
+    bool stage=false;
+    tick(env,handle,ms,x,y,advance,choice,JNI_FALSE,meta,host,&stage);
+    return stage ? JNI_TRUE : JNI_FALSE;
+}
+API void JNICALL FN(copyStoryFrame)(JNIEnv* env,jclass,jlong handle,jobject bitmap) {
+    try {
+        auto& p=player(handle);
+        emberfall::android::LockedBitmap out(env,bitmap);
+        const auto& source=p.game->surface();
+        if (out.info.width!=source.width || out.info.height!=source.height)
+            throw std::invalid_argument("Story frame size changed");
+        copy_scene_rgba(source,out.row(0),out.info.stride);
+    } catch (const std::exception& e) { fail(env,e.what()); }
+}
+API jlong JNICALL FN(presentStoryFrame)(JNIEnv* env,jclass,jlong handle) {
+    try {
+        auto& p=player(handle);
+        p.repaint=true;
+        return present(p);
+    } catch (const std::exception& e) { fail(env,e.what()); return 0; }
 }
 API jobjectArray JNICALL FN(content)(JNIEnv* env,jclass,jlong handle) {
     const auto& f=player(handle).game->state();
@@ -816,7 +914,8 @@ API jobjectArray JNICALL FN(saveLayoutConfig)(JNIEnv* env,jclass,jbyteArray path
         if (env->ExceptionCheck()) return nullptr;
         auto fields=int_array(env,{static_cast<int>(config->layer_records),static_cast<int>(config->message_width),
             static_cast<int>(config->status_bytes),config->system_save_version,config->executable_layout,config->okikae,
-            config->system_save_source});
+            config->system_save_source,config->executable_message_width,config->executable_status_bytes,
+            config->executable_okikae});
         if (fields) env->SetObjectArrayElement(result,1,fields);
         return result;
     } catch (const std::exception& e) { fail(env,e.what());return nullptr; }
@@ -1313,8 +1412,11 @@ API jintArray JNICALL FN(displayParameters)(JNIEnv* env,jclass,jlong handle) {
     try {
         const auto& game=*player(handle).game;
         std::vector<jint> values;
-        for (nnn::Word id=0;id<nnn::NNNPARAM_CHARAVOICEVOLUME+nnn::runtime_character_volume_count;++id)
-            if (nnn::RuntimeParameters::contains(id)) { values.push_back(static_cast<jint>(id)); values.push_back(game.get_system_parameter(id)); }
+        for (nnn::Word id=0;id<nnn::NNNPARAM_CHARAVOICEVOLUME+nnn::runtime_character_volume_count;++id) {
+            if (!nnn::RuntimeParameters::contains(id)) continue;
+            values.push_back(static_cast<jint>(id));
+            values.push_back(id==nnn::NNNPARAM_AUTOSPEEDSLIDER ? game.settings_auto_speed() : game.get_system_parameter(id));
+        }
         auto result=env->NewIntArray(static_cast<jsize>(values.size()));
         if (result) env->SetIntArrayRegion(result,0,static_cast<jsize>(values.size()),values.data());
         return result;
@@ -1335,8 +1437,16 @@ API jintArray JNICALL FN(auxiliaryState)(JNIEnv* env,jclass,jlong handle) {
         return result;
     } catch (const std::exception& e) { fail(env,e.what()); return nullptr; }
 }
+API void JNICALL FN(setPcDisplayOptions)(JNIEnv* env,jclass,jlong handle,jboolean no_skip_frame,jint mouse) {
+    try { player(handle).game->runtime()->set_pc_display_options(no_skip_frame==JNI_TRUE,mouse); }
+    catch (const std::exception& e) { fail(env,e.what()); }
+}
 API jboolean JNICALL FN(legacyVolumeDefaults)(JNIEnv* env,jclass,jlong handle) {
     try { return player(handle).game->runtime()->legacy_volume_defaults() ? JNI_TRUE : JNI_FALSE; }
+    catch (const std::exception& e) { fail(env,e.what()); return JNI_FALSE; }
+}
+API jboolean JNICALL FN(usesXAudio2)(JNIEnv* env,jclass,jlong handle) {
+    try { return player(handle).game->runtime()->routing().use_xaudio2 ? JNI_TRUE : JNI_FALSE; }
     catch (const std::exception& e) { fail(env,e.what()); return JNI_FALSE; }
 }
 API void JNICALL FN(setAuxiliaryState)(JNIEnv* env,jclass,jlong handle,jintArray pairs) {
@@ -1380,10 +1490,11 @@ API void JNICALL FN(setTextLength)(JNIEnv* env,jclass,jlong handle,jint length,j
 API jintArray JNICALL FN(textState)(JNIEnv* env,jclass,jlong handle) {
     try {
         const auto& game=*player(handle).game;
-        const std::array<jint,3> values{{static_cast<jint>(std::min<std::uint32_t>(game.visible_text(),INT32_MAX)),
-            static_cast<jint>(std::min<std::uint32_t>(game.text_length(),INT32_MAX)),game.text_complete() ? 1 : 0}};
-        auto result=env->NewIntArray(3);
-        if (result) env->SetIntArrayRegion(result,0,3,values.data());
+        const std::array<jint,5> values{{static_cast<jint>(std::min<std::uint32_t>(game.visible_text(),INT32_MAX)),
+            static_cast<jint>(std::min<std::uint32_t>(game.text_length(),INT32_MAX)),game.text_complete() ? 1 : 0,
+            game.state().dialogue.effect_type,static_cast<jint>(game.text_fraction())}};
+        auto result=env->NewIntArray(5);
+        if (result) env->SetIntArrayRegion(result,0,5,values.data());
         return result;
     } catch (const std::exception& e) { fail(env,e.what()); return nullptr; }
 }
@@ -1402,6 +1513,14 @@ API jintArray JNICALL FN(settingsTextRates)(JNIEnv* env,jclass,jlong handle) {
 }
 API jboolean JNICALL FN(requestAdvance)(JNIEnv* env,jclass,jlong handle) {
     try { return player(handle).game->request_advance() ? JNI_TRUE : JNI_FALSE; }
+    catch (const std::exception& e) { fail(env,e.what()); return JNI_FALSE; }
+}
+API jboolean JNICALL FN(requestFilmSkip)(JNIEnv* env,jclass,jlong handle) {
+    try { return player(handle).game->request_film_skip() ? JNI_TRUE : JNI_FALSE; }
+    catch (const std::exception& e) { fail(env,e.what()); return JNI_FALSE; }
+}
+API jboolean JNICALL FN(completeMiniGame)(JNIEnv* env,jclass,jlong handle,jint number) {
+    try { return number>=0 && number<64 && player(handle).game->complete_minigame(static_cast<unsigned>(number)); }
     catch (const std::exception& e) { fail(env,e.what()); return JNI_FALSE; }
 }
 API jint JNICALL FN(textCharacters)(JNIEnv* env,jclass,jlong handle,jint elapsed) {
@@ -1464,6 +1583,10 @@ API jboolean JNICALL FN(skipActive)(JNIEnv* env,jclass,jlong handle) {
     try { return player(handle).game->skip_active() ? JNI_TRUE : JNI_FALSE; }
     catch (const std::exception& e) { fail(env,e.what()); return JNI_FALSE; }
 }
+API void JNICALL FN(setCtrlSkip)(JNIEnv* env,jclass,jlong handle,jboolean enabled) {
+    try { player(handle).game->set_ctrl_skip(enabled==JNI_TRUE); }
+    catch (const std::exception& e) { fail(env,e.what()); }
+}
 API jboolean JNICALL FN(skipEffective)(JNIEnv* env,jclass,jlong handle) {
     try { return player(handle).game->skip_effective() ? JNI_TRUE : JNI_FALSE; }
     catch (const std::exception& e) { fail(env,e.what()); return JNI_FALSE; }
@@ -1513,6 +1636,10 @@ API jint JNICALL FN(movieVolume)(JNIEnv* env,jclass,jlong handle) {
         return game.get_system_parameter(nnn::NNNPARAM_MOVIESWITCH)
             ? game.get_system_parameter(nnn::NNNPARAM_MOVIEVOLUME) : 0;
     } catch (const std::exception& e) { fail(env,e.what()); return 0; }
+}
+API jfloat JNICALL FN(movieGain)(JNIEnv* env,jclass,jlong handle) {
+    try { return player(handle).game->audio().movie_gain(); }
+    catch (const std::exception& e) { fail(env,e.what()); return 0; }
 }
 API jintArray JNICALL FN(choiceInfo)(JNIEnv* env,jclass,jlong handle) {
     const auto& game=*player(handle).game;

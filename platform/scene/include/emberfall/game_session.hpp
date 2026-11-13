@@ -37,13 +37,17 @@ struct InputState {
     bool recorded_clock=false;
     std::optional<ScriptClockSample> clock_sample;
 };
+struct FrameTiming {
+    std::uint32_t elapsed_ms=0;
+    std::uint32_t animation_ms=0;
+};
 inline constexpr unsigned timeout_choice=UINT32_MAX;
 struct DialogueState {
     std::string script, speaker, raw_bytes, display_bytes; // Unmodified game encoding.
     std::uint32_t message_id=0, table_index=0, command=0;
     std::uint32_t layout_command=0;
     std::uint64_t sequence=0;
-    int window_type=0, font_type=0;
+    int window_type=0, font_type=0, effect_type=0;
     bool window_visible=false;
 };
 struct BacklogEntry {
@@ -91,7 +95,7 @@ struct FrameState {
     std::uint32_t choice_limit_ms=0,choice_remaining_ms=0;
     bool choice_timed_out=false;
     int config_mask=0,demo_mode=0;
-    int script_cursor=0; // Independent of the user's configured message cursor.
+    int script_cursor=0,script_mouse=0; // Message cursor and mouse pointer are separate.
     std::string film_name,story_name;
     unsigned movie=0; // One-based position in spt/movielist.xtx.
     std::optional<nnn::ScriptSelection> selection;
@@ -135,9 +139,13 @@ public:
     GameSession(const GameSession&)=delete;
     GameSession& operator=(const GameSession&)=delete;
     const FrameState& step_frame(std::uint32_t dt_ms,const InputState& input={});
-    // Convert elapsed wall time to the step_frame time for this frame. The game's
-    // maxSkipFrame bounds how many frames a late call can run at once.
+    const FrameState& step_frame(FrameTiming timing,const InputState& input={},
+                                 const render::Layers::OverlapCapture& capture={});
+    // Convert elapsed wall time to the animation budget for this update.
     std::uint32_t pace(std::uint32_t elapsed_ms);
+    bool film_skip_available() const;
+    bool request_film_skip();
+    bool complete_minigame(unsigned number);
     const FrameState& state() const;
     bool complete_modal(int request,bool accepted,unsigned elapsed_frames,const std::vector<std::string>& values);
     // Back, choose, page, hover, confirm, group, resume, chart scroll and chart commit use codes 0 through 8.
@@ -180,7 +188,9 @@ public:
     void reset_ui_background(const std::string& entry,int mode,std::shared_ptr<nnn::RuntimeContext> runtime={});
     bool claim_ui_background(std::shared_ptr<nnn::RuntimeContext> runtime,const nnn::RuntimeContext::PreviewState& before);
     void start_ui_background(const std::string& entry,int mode,bool fresh=false);
-    const FrameState& step_ui_background(const InputState& input,bool loop);
+    const FrameState& step_ui_background(const InputState& input,bool loop,unsigned frames=1);
+    const FrameState& tick_ui_background(const InputState& input,bool loop,std::uint32_t elapsed_ms);
+    void reset_frame_pacing();
     void set_ui_saved_screen(render::Surface frame,bool background=true);
     void set_ui_variable(const std::string& name,nnn::Value value);
     void set_ui_place_preview(unsigned place);
@@ -212,9 +222,11 @@ public:
     std::uint32_t text_characters(std::uint32_t elapsed_ms);
     int text_delay_ms() const;
     std::uint32_t settings_text_rate(int index,bool automatic) const noexcept;
+    int settings_auto_speed() const;
     std::string_view append_prefix() const noexcept;
     void set_text_length(std::uint32_t length,std::optional<std::uint32_t> visible={});
     std::uint32_t visible_text() const;
+    unsigned text_fraction() const;
     std::uint32_t text_length() const;
     bool text_complete() const;
     bool request_advance();
@@ -225,6 +237,7 @@ public:
     bool auto_skip() const;
     bool skip_read_only() const;
     void set_skip_active(bool enabled);
+    void set_ctrl_skip(bool enabled);
     bool skip_active() const;
     bool skip_effective() const;
     ScriptRestrictions script_restrictions() const;
@@ -255,6 +268,7 @@ public:
         std::size_t message_width=0, status_bytes=0;
         int system_save_version=0, system_save_source=0;
         bool executable_layout=false, okikae=false;
+        bool executable_message_width=false, executable_status_bytes=false, executable_okikae=false;
     };
     // Inspection is read-only. Regeneration always analyzes the EXE before applying fallbacks.
     static std::optional<PcSaveConfiguration> pc_save_configuration(const std::filesystem::path& root,bool regenerate);
@@ -270,6 +284,8 @@ public:
     void restore_snapshot(const nnn::snapshot::Bytes& bytes,const std::function<bool(const FrameState&)>& verify={},
                           bool keep_music_position=false,bool migrate_legacy_system_variables=false,bool restart_music=false);
 private:
+    const FrameState& advance_ui_background(const InputState& input,bool loop,unsigned frames,
+                                           std::optional<std::uint32_t> elapsed_ms);
     struct Impl;
     explicit GameSession(std::unique_ptr<Impl> data);
     std::unique_ptr<Impl> data_;

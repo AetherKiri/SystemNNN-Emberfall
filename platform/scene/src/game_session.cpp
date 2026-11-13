@@ -35,7 +35,7 @@ constexpr nnn::Word draw=0x22220004U, overlap=0x22220005U, select=0x22220006U;
 constexpr nnn::Word prepare=0x33330011U, clear_all=0x33330012U, effect=0x33330013U, clear=0x33330014U;
 constexpr nnn::Word load=0x33330015U, rect=0x33330016U, preload=0x3333001fU;
 constexpr nnn::Word end=0x55560005U, next=0x55560006U, exit_script=0x5556000bU;
-constexpr nnn::Word end_koma=0x5556000eU, user_command=0x11110001U;
+constexpr nnn::Word end_koma=0x5556000eU, end_if=0x55560013U, user_command=0x11110001U;
 constexpr nnn::Word end_film=0x5556000cU, set_cg=0x33330018U, set_film=0x3333001aU, set_cg_by_var=0x33330061U;
 constexpr nnn::Word set_demo_flag=0x3333001eU, frame_control=0x33330028U, default_frame=0x33330029U;
 constexpr nnn::Word start_message=0x3333001bU, start_koma=0x3333001cU;
@@ -45,7 +45,7 @@ constexpr nnn::Word cutin_mode=0x3333005bU, cutin_click=0x3333005cU, face_type=0
 constexpr nnn::Word set_term=0x3333006dU;
 constexpr unsigned variable_count=32768;
 constexpr unsigned first_system_variable=200;
-constexpr std::uint32_t snapshot_magic=0x31534e4eU, snapshot_version=14;
+constexpr std::uint32_t snapshot_magic=0x31534e4eU, snapshot_version=16;
 constexpr int default_next_message_type=3;
 constexpr int heroine_limit=12,object_limit=1024;
 constexpr std::size_t backlog_capacity=100;
@@ -371,6 +371,7 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
     std::shared_ptr<nnn::RuntimeContext> shared_runtime;
     std::unique_ptr<nnn::PlayerBehavior> behavior;
     std::shared_ptr<GameAssets> shared_assets;
+    const render::Layers::OverlapCapture* overlap_capture=nullptr;
     GameAssets& assets;
     nnn::audio::GameAudio playback;
     bool queue_audio_events;
@@ -378,7 +379,7 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
     std::optional<nnn::Value> ui_mode;
     std::optional<std::array<int,2>> ui_click;
     std::string ui_script;
-    int window_type=0, font_type=0, next_window=-1, next_message_speed=0,option_off=0;
+    int window_type=0, font_type=0, next_window=-1, next_message_speed=0,next_message_effect=0,option_off=0;
     int next_message_type=default_next_message_type;
     std::size_t append_prefix_bytes=0;
     bool draw_window_with_message=false;
@@ -387,7 +388,10 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
     std::string overlap_window_config,long_background_config;
     int auto_message=0,cannot_click=0,cannot_skip=0;
     bool auto_message_kill_shift=false,cannot_skip_kill_shift=false,effect_gate=false;
+    bool ctrl_skip=false;
+    std::optional<nnn::Word> pending_voice_message;
     bool background_unlocks=false, skip_cg=true, skip_film=true, skip_music=true, skip_voice_roles=true, ignore_hidden_cg=false;
+    bool film_skip_button=false, film_skip_enabled=false, mark_skipped_messages=true;
     bool message_has_voice=false;
     std::uint32_t message_voice_ms=0;
     std::uint32_t speaking_ms=0;
@@ -434,6 +438,9 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
     std::unordered_map<nnn::Word,nnn::Word> extended_variables;
     std::unordered_map<nnn::Word,std::uint32_t> layer_visibility;
     std::array<nnn::Value,32> layer_variables{};
+    std::uint32_t rename_layers=0;
+    nnn::Word rename_variable=variable_count;
+    std::vector<std::string> rename_tags;
     bool require_variant_graphic=false;
     std::unordered_map<std::string,unsigned> ids, script_ids;
     std::vector<std::string> project_scripts;
@@ -475,6 +482,7 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
     InputState input;
     unsigned period=20, default_period=20, remainder=0;
     nnn::FrameDebt pacing;
+    unsigned max_background_frames=2;
     std::uint32_t draw_remaining=0;
     std::size_t movie_count=0;
     std::optional<nnn::Word> movie_command;
@@ -590,7 +598,11 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
     Impl(const fs::path& root,const SessionOptions& options,bool decorative=false,std::shared_ptr<GameAssets> peer={})
         : shared_runtime(options.runtime ? options.runtime : std::make_shared<nnn::RuntimeContext>(root)),
           shared_assets(peer ? std::move(peer) : std::make_shared<GameAssets>(root,options.cache_bytes,options.filename_encoder)),
-          assets(*shared_assets),playback(root,options.audio,options.filename_encoder),
+          assets(*shared_assets),playback(root,[&] {
+              auto audio=options.audio;
+              audio.directsound_gain=!shared_runtime->routing().use_xaudio2;
+              return audio;
+          }(),options.filename_encoder),
           queue_audio_events(options.queue_audio_events),decorative_preview(decorative),
           save_layout(options.save_layout ? options.save_layout : std::make_shared<const pc::DirectorySaveLayout>()),
           replay_films(options.replay_films),
@@ -683,6 +695,8 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         background_unlocks=config_int(init,"backScriptSetCGOkFlag",0)!=0;
         skip_cg=config_int(init,"mustSetCGFlag",1)!=0;
         skip_film=config_int(init,"mustSetFilmFlag",1)!=0;
+        film_skip_button=config_int(init,"skipFilmButtonCreateFlag",0)!=0;
+        mark_skipped_messages=config_int(init,"mustSetMessageFlag",1)!=0;
         skip_music=config_int(init,"mustSetMusicFlag",1)!=0;
         skip_voice_roles=config_int(init,"mustSetVoiceFlag",1)!=0;
         ignore_hidden_cg=config_int(init,"offLayerDontSetCG",0)!=0;
@@ -693,6 +707,8 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         default_period=period;
         pacing.configure(static_cast<int>(period),std::clamp(config_int(init,"maxSkipFrame",2),1,64),
             std::clamp(config_int(init,"skipAdjustFrame",10),1,1000));
+        max_background_frames=static_cast<unsigned>(
+            std::clamp(config_int(init,"maxSkipFrameBackScript",pacing.max_frames()),1,64));
         auto varfile=assets.config("var2.fxf");
         const auto classic_varfile=assets.config("var.fxf");
         render_layer_count=render_layer_capacity(layer_limit,!varfile.empty(),!classic_varfile.empty());
@@ -735,6 +751,11 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         for (unsigned i=0;i<layer_variables.size();++i) {
             const auto id=variable_id(config_text(init,"layerOffVar"+std::to_string(i),""));
             if (id<variable_count) layer_visibility[id]|=std::uint32_t{1}<<i;
+        }
+        rename_variable=variable_id(config_text(init,"renameLayerVar",""));
+        if (rename_variable<variable_count) {
+            const int count=std::clamp(config_int(init,"renameTagNumber",0),0,4096);
+            for (int i=1;i<=count;++i) rename_tags.push_back(config_text(init,"renameTag"+std::to_string(i),"").substr(0,62));
         }
         const auto project=file_text(assets.config("project.xtx"));
         std::size_t project_cursor=0;
@@ -912,14 +933,25 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
     }
     bool skip_blocked() const { return auto_message>0 || cannot_skip>0; }
     bool click_blocked() const { return auto_message>0 || cannot_click>0; }
-    // The player's Skip is the PC message skip. Only F4, F5 and skip-to-film-end
-    // set the command flags, so a slot saved by an earlier build drops them here.
-    bool message_skip() const { return !ui_mode && shared_runtime->skip_active() && !skip_blocked(); }
+    bool ctrl_can_skip_message(nnn::Word message) const {
+        return ctrl_skip && (shared_runtime->get_system_parameter(nnn::NNNPARAM_SKIPMODE)==nnn::NNNSKIPMODE_ALL ||
+                             shared_runtime->is_read(message));
+    }
     void sync_skip() {
         auto flags=GetSkipFlags();
-        flags.skip_next_command=flags.skip_effect_command=false;
+        if (!flags.skip_to_film_end) flags.skip_next_command=flags.skip_effect_command=false;
         SetSkipFlags(flags);
         effect_gate=false;
+    }
+    bool film_skip_available() const {
+        return !ui_mode && film_skip_button && film_skip_enabled && replay_films.empty() && frame.demo_mode==0 &&
+            (frame.wait==Wait::Dialogue || frame.wait==Wait::Draw || frame.wait==Wait::Overlap);
+    }
+    bool request_film_skip() {
+        if (!film_skip_available()) return false;
+        film_skip_enabled=false;
+        SetSkipFlags({false,true,true,true,true});
+        return true;
     }
     void mark_current_read() {
         if (!ui_mode && frame.wait==Wait::Dialogue && !shared_runtime->mark_read(frame.dialogue.message_id))
@@ -1058,6 +1090,34 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         if (script!=script_ids.end()) shared_runtime->unlock_gallery(nnn::GalleryKind::Film,
             script->second,static_cast<nnn::Word>(a[0]-1));
     }
+    bool complete_minigame(unsigned number) {
+        const auto setup=nnn::game_config::read(shared_runtime->root(),"init","minigame.xtx");
+        const auto suffix=std::to_string(number+1);
+        const int count=config_int(setup,"addMiniGame",0);
+        const int type=config_int(setup,"miniGame"+suffix,0);
+        if (count<=0 || number>=static_cast<unsigned>(count) || type<1 || type>10) return false;
+        const auto id=variable_id(config_text(setup,"setVarName"+suffix,""));
+        if (id<variable_count) {
+            const auto value=static_cast<std::uint32_t>(GetVarData(id));
+            switch (config_int(setup,"setVarType"+suffix,1)) {
+            case 1: SetVarData(id,1); break;
+            case 2: SetVarData(id,static_cast<nnn::Value>(value+1)); break;
+            case 3: SetVarData(id,static_cast<nnn::Value>(value|(std::uint32_t{1}<<(number%32)))); break;
+            default: break;
+            }
+        }
+        const int rewards=std::clamp(config_int(setup,"setCGNumber"+suffix,0),0,127);
+        for (int i=0;i<rewards;++i) {
+            const auto item=suffix+"_"+std::to_string(i+1);
+            const int player=config_int(setup,"setCGPlayer"+item,i==0?config_int(setup,"setCGPlayer"+suffix,0):0);
+            const int cg_number=config_int(setup,"setCGParam"+item,i==0?config_int(setup,"setCGParam"+suffix,0):0);
+            if (player>0 && cg_number>0)
+                shared_runtime->unlock_gallery(nnn::GalleryKind::Cg,static_cast<nnn::Word>(player-1),
+                    static_cast<nnn::Word>(cg_number-1));
+        }
+        system_save_requested=true;
+        return true;
+    }
     void remember(BacklogEntry entry) {
         if (entry.text.size()>16384U) return;
         if (backlog.size()>=backlog_capacity) {
@@ -1170,17 +1230,22 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
     }
     std::uint32_t pace(std::uint32_t elapsed) {
         const auto frames=[](std::uint32_t count) { return static_cast<int>(std::clamp<std::uint32_t>(count,1,1U<<20)); };
-        int wanted=pacing.max_frames();
+        const bool no_skip_frame=shared_runtime->no_skip_frame();
+        const int limit=no_skip_frame ? 1 : pacing.max_frames();
+        int wanted=limit;
         switch (frame.wait) {
         case Wait::Running: case Wait::Dialogue: break;
         case Wait::Draw: wanted=frames(draw_remaining); break;
         case Wait::Overlap: wanted=frames(renderer->overlap_remaining()); break;
+        case Wait::Choice:
+            pacing.clear();
+            return elapsed ? period : 0;
         default:
             // The PC clears its debt outside the message mode.
             pacing.clear();
-            return std::min(elapsed,static_cast<std::uint32_t>(pacing.max_frames())*period);
+            return std::min(elapsed,static_cast<std::uint32_t>(limit)*period);
         }
-        return static_cast<std::uint32_t>(pacing.repay(elapsed,wanted))*period;
+        return static_cast<std::uint32_t>(pacing.repay(elapsed,wanted,no_skip_frame))*period;
     }
     std::string speaker(const std::string& text) const {
         const auto end=text.find_first_of("\r\n");
@@ -2958,6 +3023,8 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
             return true;
         }
         const auto& a=e.parameters;
+        const auto skip_flags=GetSkipFlags();
+        const bool suppress_effects=skip_flags.skip_next_command && skip_flags.skip_effect_command;
         if (e.opcode==set_term || e.opcode==nnn::audio::set_voice_flag) {
             if (!a.empty()) {
                 const bool changed=e.opcode==set_term ? shared_runtime->set_term_unlocked(a[0]) :
@@ -2975,9 +3042,11 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
             const bool appending=d.layout_command!=0 && (e.opcode==append ||
                 (cutins.active() && e.opcode==print && dialogue_connect(text,e.opcode)));
             d.command=e.opcode; d.script=frame.script; ++d.sequence;
+            d.effect_type=std::exchange(next_message_effect,0);
             if (!appending) d.layout_command=e.opcode==lprint ? lprint : print;
             d.table_index=a.empty() ? 0 : static_cast<unsigned>(a.front());
             d.message_id=identity(e.primary);
+            pending_voice_message.reset();
             if (!ui_mode) {
                 shared_runtime->check_dialogue_skip(d.message_id);
                 sync_skip();
@@ -3015,7 +3084,7 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
             location();
             const auto flags=GetSkipFlags();
             if (e.opcode==nnn::audio::voice && !a.empty() && a[0]>=0 && e.text &&
-                (skip_voice_roles || (!flags.skip_next_command && !shared_runtime->skip_active()))) {
+                (skip_voice_roles || (!flags.skip_next_command && !ctrl_skip && !shared_runtime->skip_active()))) {
                 const int character=playback.voice_character_number(*e.text);
                 if (shared_runtime->mark_voice_role_heard(character) && replay_films.empty()) system_save_requested=true;
             }
@@ -3026,12 +3095,17 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
                 (skip_music || !flags.skip_next_command || !flags.skip_effect_command))
                 shared_runtime->unlock_gallery(nnn::GalleryKind::Music,0,static_cast<nnn::Word>(a[0]-1));
             bool voice_started=false;
+            // CANNOTSKIP masks text advancement. The PC's VOICE and SOUND handlers still see Ctrl.
+            const bool message_skip=!ui_mode && shared_runtime->skip_active() && !skip_blocked();
+            const bool ctrl_audio_skip=!ui_mode && ctrl_skip && auto_message==0 &&
+                (e.opcode!=nnn::audio::voice ||
+                 ctrl_can_skip_message(pending_voice_message.value_or(frame.dialogue.message_id)));
             const nnn::audio::AudioGate gate{flags.skip_next_command,
-                flags.skip_next_command && flags.skip_effect_command,message_skip()};
+                flags.skip_next_command && flags.skip_effect_command,message_skip,ctrl_audio_skip};
             const auto error=playback.submit(e,frame.script,frame.word,gate,&voice_started);
             if (!error.empty()) warn("Audio "+frame.script+" at "+std::to_string(frame.word)+": "+error);
             if (error.empty() && e.opcode==nnn::audio::voice && a.size()>=2 &&
-                a[0]>=0 && a[1]>=0 && a[1]<2 && !gate.command && !gate.message) {
+                a[0]>=0 && a[1]>=0 && a[1]<2 && !gate.command && !gate.message && !gate.ctrl) {
                 message_has_voice=true;
                 message_voice_ms=playback.voice_duration_ms(static_cast<unsigned>(a[1]));
                 if (voice_started) { speaking_ms=message_voice_ms;renderer->set_speaking(speaking_ms!=0); }
@@ -3041,16 +3115,25 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
             return true;
         }
         if (e.opcode==load || e.opcode==preload) {
+            if (suppress_effects) return true;
             if (slot(e.primary)) {
                 const auto layer=static_cast<unsigned>(e.primary);
                 if (const auto* tags=ui_preview_tags();tags && !(*tags)[layer].empty()) return true;
                 const auto name=e.text.value_or("");
                 const auto variable=layer_variables[layer];
                 std::shared_ptr<const render::Texture> image;
-                if (e.opcode==load && variable>0) {
-                    const auto variant=GetVarData(static_cast<nnn::Word>(variable));
-                    if (variant>1) {
-                        const auto alternate=name+"__"+std::to_string(variant);
+                if (e.opcode==load) {
+                    const auto variant=variable>0 ? GetVarData(static_cast<nnn::Word>(variable)) : 0;
+                    const auto tagged=(rename_layers & (std::uint32_t{1}<<layer)) && rename_variable<variable_count
+                        ? GetVarData(rename_variable) : 0;
+                    std::string suffix;
+                    if (tagged>0) {
+                        const auto n=static_cast<std::size_t>(tagged);
+                        suffix=n<rename_tags.size() && !rename_tags[n-1].empty() ? rename_tags[n-1]
+                            : (n<rename_tags.size() ? "" : "__")+std::to_string(tagged);
+                    } else if (variant>1) suffix="__"+std::to_string(variant);
+                    if (!suffix.empty()) {
+                        const auto alternate=name+suffix;
                         image=texture(alternate);
                         if (!image && require_variant_graphic) {
                             warn("Missing layer variant "+alternate);
@@ -3079,6 +3162,12 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         case default_frame: set_period(default_period); return true;
         case film_name: frame.film_name=e.text.value_or("").substr(0,62); return true;
         case story_name: frame.story_name=e.text.value_or("").substr(0,62); return true;
+        case 0x3333005dU: // FILMENDENABLE enables the configured PC skip button.
+            if (!ui_mode && !a.empty() && a[0]==1) film_skip_enabled=true;
+            return true;
+        case 0x33330060U: // RENAMELAYER sets the layer bit mask.
+            if (!a.empty()) rename_layers=static_cast<std::uint32_t>(a[0]);
+            return true;
         case film_type_time: return true; // The upstream callback reserves FILMTYPETIME.
         case config_mask: if (!a.empty() && a[0]!=0) frame.config_mask=std::max(0,a[0]); return true;
         case var_control_layer:
@@ -3086,6 +3175,7 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
                 layer_variables[static_cast<unsigned>(a[0])]=a[1];
             return true;
         case 0x33330054U: if (!a.empty()) window_type=a[0]; return true;
+        case 0x33330055U: if (!a.empty()) frame.script_mouse=a[0]; return true;
         case 0x33330056U: if (!a.empty()) frame.script_cursor=a[0]; return true;
         case 0x3333005fU: if (!a.empty()) font_type=a[0]; return true;
         case 0x3333005aU: if (!a.empty()) option_off=a[0]==-1 ? 0 : a[0]; return true;
@@ -3095,8 +3185,10 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
             else if (e.opcode==0x33330058U) cannot_click=value;
             else cannot_skip=value;
             if (!ui_mode && ((auto_message>0 && auto_message_kill_shift && e.opcode==0x33330057U) ||
-                             (cannot_skip>0 && cannot_skip_kill_shift && e.opcode==0x33330059U)))
+                             (cannot_skip>0 && cannot_skip_kill_shift && e.opcode==0x33330059U))) {
+                ctrl_skip=false;
                 shared_runtime->set_skip_active(false);
+            }
             sync_skip(); return true;
         }
         case start_message:
@@ -3105,7 +3197,9 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
             message_has_voice=false; message_voice_ms=0;
             backlog_voices={};
             if (!ui_mode && !a.empty() && a[0]!=-1) {
-                shared_runtime->check_dialogue_skip(identity(a[0]));
+                const auto message=identity(a[0]);
+                if (a[0]>=0) pending_voice_message=message;
+                shared_runtime->check_dialogue_skip(message);
                 sync_skip();
             }
             return true;
@@ -3117,6 +3211,9 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
                 next_window=a.size()>2 ? a[2] : -1;
                 frame.dialogue.window_visible=next_window==2 || (next_window!=1 && next_message_type==0);
             }
+            return true;
+        case 0x3333006eU: // MESSAGEEFFECT is consumed by the next message.
+            next_message_effect=a.empty() ? 0 : std::max(0,a[0]);
             return true;
         case 0x3333006fU:
             next_message_speed=a.empty() ? 0 : std::clamp(a[0],0,5);
@@ -3133,6 +3230,7 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
             }
             return true;
         case effect:
+            if (suppress_effects) return true;
             if (a.size()>=2 && slot(a[0])) {
                 const auto layer=static_cast<unsigned>(a[0]);
                 if (a[1]!=-1 && layer>=layer_limit) return true;
@@ -3164,12 +3262,22 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
                 renderer->clear(layer);
             }
             return true;
-        case prepare: renderer->prepare_overlap(); return true;
+        case prepare:
+            if (!suppress_effects) {
+                if (overlap_capture) renderer->prepare_overlap(*overlap_capture);
+                else renderer->prepare_overlap();
+            }
+            return true;
         case overlap: {
+            if (suppress_effects) return true;
             if (frame.dialogue.layout_command) frame.dialogue.layout_command=print;
             location();
             const int type=a.empty()?0:a[0];
-            if (!renderer->start_overlap(static_cast<unsigned>(a.size()>1?std::max(0,a[1]):0),type,overlap_decoration()))
+            const auto duration=static_cast<unsigned>(a.size()>1?std::max(0,a[1]):0);
+            auto decoration=overlap_decoration();
+            const bool supported=overlap_capture ? renderer->start_overlap(duration,type,decoration,*overlap_capture)
+                                                 : renderer->start_overlap(duration,type,decoration);
+            if (!supported)
                 warn("Unsupported wipe "+std::to_string(type)+" uses crossfade");
             ++counters.overlaps; return true;
         }
@@ -3180,6 +3288,7 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
             location(); draw_remaining=static_cast<unsigned>(a.empty() ? 0 : std::max(0,a[0]));
             ++counters.draws; return true;
         case select:
+            if (!ui_mode) { film_skip_enabled=false; ClearSkipFlags(); }
             loaded_pc_preview={};
             frame.dialogue.window_visible=false;
             location(); return true;
@@ -3411,6 +3520,7 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
     void restore_pc_audio(const pc::Status& status) {
         const auto submit=[&](const nnn::SystemEvent& cue) {
             const auto error=cue.opcode==nnn::audio::voice ? playback.submit_pc_voice(cue,frame.script,frame.word) :
+                cue.opcode==nnn::audio::music ? playback.submit_pc_music(cue,frame.script,frame.word) :
                 playback.submit(cue,frame.script,frame.word);
             if (!error.empty()) warn("PC save audio: "+error);
         };
@@ -3472,7 +3582,9 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         status.frame_ms=static_cast<int>(period);status.remaining=30;
         status.last_heroine=last_heroine;
         status.window_number=window_type;status.font_type=font_type;status.window_visible=frame.dialogue.window_visible;
-        status.cursor_number=frame.script_cursor;
+        status.rename_layer=static_cast<nnn::Value>(rename_layers);
+        status.skip_film=film_skip_enabled?1:0;
+        status.cursor_number=frame.script_cursor;status.mouse_number=frame.script_mouse;
         status.config_mask=frame.config_mask;status.layer_off=renderer->hidden_layers();
         status.auto_message=auto_message;status.cannot_click=cannot_click;status.cannot_skip=cannot_skip;
         status.surname=surname;status.given_name=given_name;
@@ -3577,7 +3689,7 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
             pacing.clear();
             frame.movie=0;frame.demo_mode=0;
             frame.film_name.clear();frame.story_name.clear();
-            option_off=next_message_speed=0;next_window=-1;
+            option_off=next_message_speed=next_message_effect=0;next_window=-1;
             next_message_type=default_next_message_type;
             backlog.clear();backlog_voices={};clear_jumps();
         }
@@ -3587,6 +3699,8 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         speaking_ms=message_voice_ms=0;message_has_voice=false;
         renderer->set_speaking(false);
         const auto& status=node->status;
+        rename_layers=static_cast<std::uint32_t>(status.rename_layer);
+        film_skip_enabled=status.skip_film!=0;
         vm.swap(next_vm);
         location();
         chart_run=std::move(node->run);
@@ -3616,7 +3730,7 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         frame.config_mask=status.config_mask;
         frame.dialogue.window_visible=status.window_visible;
         window_type=std::max(0,status.window_number);font_type=std::max(0,status.font_type);
-        frame.script_cursor=status.cursor_number;
+        frame.script_cursor=status.cursor_number;frame.script_mouse=status.mouse_number;
         auto_message=status.auto_message;cannot_click=status.cannot_click;cannot_skip=status.cannot_skip;
         surname=status.surname;given_name=status.given_name;
         const auto global=shared_runtime->runtime_text();
@@ -3779,6 +3893,8 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         if (omake && saved.omake) *omake=*saved.omake;
         load_pc_extensions(saved.extensions);
         loaded_pc_preview=status.log_messages;
+        rename_layers=static_cast<std::uint32_t>(status.rename_layer);
+        film_skip_enabled=status.skip_film!=0;
         pc_save_slot_art=status.remaining;
         last_heroine=status.last_heroine>=0 && status.last_heroine<heroine_limit ? status.last_heroine : 0;
         renderer->hide_layers(status.layer_off);
@@ -3810,7 +3926,7 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         }
         frame.config_mask=status.config_mask;
         window_type=std::max(0,status.window_number);font_type=std::max(0,status.font_type);
-        frame.script_cursor=status.cursor_number;
+        frame.script_cursor=status.cursor_number;frame.script_mouse=status.mouse_number;
         auto_message=status.auto_message;cannot_click=status.cannot_click;cannot_skip=status.cannot_skip;
         surname=status.surname;given_name=status.given_name;
         if (saved.log) for (const auto& old:saved.log->entries) {
@@ -4081,11 +4197,14 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         if (ui_mode || !replay_films.empty() || (wait>Wait::Choice && wait!=Wait::Place && !pending_modal))
             nnn::snapshot::invalid("Cannot snapshot this game mode");
         const bool decorated_overlap=renderer->has_overlap_decoration();
-        const bool optional_classes=faces.enabled() || cutins.enabled() || omake.has_value();
+        const bool script_mouse_format=frame.script_mouse!=0;
+        const bool script_controls=rename_layers || film_skip_enabled || next_message_effect || frame.dialogue.effect_type ||
+            script_mouse_format;
+        const bool optional_classes=faces.enabled() || cutins.enabled() || omake.has_value() || script_controls;
         const bool draw_message_format=decorated_overlap || optional_classes || next_message_type!=default_next_message_type;
         const bool cursor_format=frame.script_cursor!=0 || draw_message_format;
         const bool chart_format=chart_available || cursor_format;
-        out(snapshot_magic,optional_classes ? snapshot_version : decorated_overlap ? 13U :
+        out(snapshot_magic,script_mouse_format ? snapshot_version : script_controls ? 15U : optional_classes ? 14U : decorated_overlap ? 13U :
             draw_message_format ? 12U : cursor_format ? 11U : chart_format ? 10U : 9U,
             static_cast<std::uint8_t>(last_heroine));
         if (cursor_format) out(frame.script_cursor);
@@ -4134,6 +4253,8 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
             if (cutins.enabled()) out(cutins.words,cutins.wait_click);
             if (omake) out(*omake);
         }
+        if (script_controls) out(rename_layers,film_skip_enabled,next_message_effect,frame.dialogue.effect_type);
+        if (script_mouse_format) out(frame.script_mouse);
         behavior->save_snapshot(out);
         vm->save_snapshot(out,chart_format,!save_place);
         renderer->save_snapshot(out,decorated_overlap);
@@ -4143,7 +4264,9 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
     struct SnapshotProgress {
         FrameState frame;
         std::array<nnn::Value,variable_count> vars{};
-        int window_type=0,font_type=0,next_window=-1,next_message_speed=0,option_off=0;
+        int window_type=0,font_type=0,next_window=-1,next_message_speed=0,next_message_effect=0,option_off=0;
+        std::uint32_t rename_layers=0;
+        bool film_skip_enabled=false;
         int next_message_type=default_next_message_type;
         int auto_message=0,cannot_click=0,cannot_skip=0;
         bool effect_gate=false,message_has_voice=false;
@@ -4300,6 +4423,12 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
             if (cutin) in(next.cutin.emplace(),next.cutin_wait_click);
             if (omake) in(next.omake.emplace());
         }
+        if (version>=15) {
+            in(next.rename_layers,next.film_skip_enabled,next.next_message_effect,next.frame.dialogue.effect_type);
+            if (next.next_message_effect<0 || next.frame.dialogue.effect_type<0)
+                invalid("Invalid snapshot message effect");
+        }
+        if (version>=16) in(next.frame.script_mouse);
         return staged;
     }
 
@@ -4458,6 +4587,7 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         else playback.load_snapshot(in,keep_music_position,{},false,restart_music);
         if (next.frame.modal) next.frame.modal->request=new_modal_request();
         frame=std::move(next.frame);vars=next.vars;
+        pending_voice_message.reset();
         append_prefix_bytes=0;
         if (frame.dialogue.layout_command &&
             (frame.wait==Wait::Draw || frame.wait==Wait::Overlap ||
@@ -4481,6 +4611,9 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         std::fill(system_begin,system_end,0);
         window_type=next.window_type;font_type=next.font_type;next_window=next.next_window;
         next_message_type=next.next_message_type;
+        next_message_effect=next.next_message_effect;
+        rename_layers=next.rename_layers;
+        film_skip_enabled=next.film_skip_enabled;
         next_message_speed=next.next_message_speed;option_off=next.option_off;
         auto_message=next.auto_message;cannot_click=next.cannot_click;cannot_skip=next.cannot_skip;
         effect_gate=next.effect_gate;message_has_voice=next.message_has_voice;message_voice_ms=next.message_voice_ms;
@@ -4519,7 +4652,7 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         if (frame.wait==Wait::Place) playback.suspend_script_audio();
     }
 
-    const FrameState& step(std::uint32_t dt,const InputState& in) {
+    const FrameState& step(FrameTiming timing,const InputState& in) {
         const bool resume_movie=frame.wait==Wait::Movie;
         if (!resume_movie) sampled_clock.reset();
         frame.choice_timed_out=false;
@@ -4553,15 +4686,16 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
             if (frame.wait==Wait::Dialogue) shared_runtime->check_dialogue_skip(frame.dialogue.message_id);
         }
         sync_skip();
-        const auto time=static_cast<std::uint64_t>(remainder)+(resume_movie?0U:dt);
+        const bool skip_film_wait=GetSkipFlags().skip_to_film_end;
+        const auto time=static_cast<std::uint64_t>(remainder)+(resume_movie?0U:timing.animation_ms);
         const auto ticks=static_cast<unsigned>(time/period);
         remainder=static_cast<unsigned>(time%period);
         if (!resume_movie && speaking_ms!=0) {
-            speaking_ms-=std::min(speaking_ms,dt);
+            speaking_ms-=std::min(speaking_ms,timing.elapsed_ms);
             if (!speaking_ms) renderer->set_speaking(false);
         }
         renderer->advance(ticks,{input.mouse_x,input.mouse_y});
-        if (frame.wait==Wait::Dialogue && !input.advance) return frame;
+        if (frame.wait==Wait::Dialogue && !input.advance && !skip_film_wait) return frame;
         if (frame.wait==Wait::Dialogue) mark_current_read();
         if (frame.wait==Wait::Choice) {
             if (!frame.selection) return frame;
@@ -4572,7 +4706,7 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
                 return frame;
             }
             if (!chosen && frame.choice_limit_ms) {
-                frame.choice_remaining_ms-=std::min(frame.choice_remaining_ms,dt);
+                frame.choice_remaining_ms-=std::min(frame.choice_remaining_ms,timing.elapsed_ms);
                 timeout=input.expire_choices && frame.choice_remaining_ms==0;
             }
             if (timeout) {
@@ -4590,13 +4724,13 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         if (frame.wait==Wait::Draw) {
             draw_remaining-=std::min(draw_remaining,ticks);
             frame.remaining_frames=draw_remaining;
-            if (draw_remaining && !input.advance) return frame;
+            if (draw_remaining && !input.advance && !skip_film_wait) return frame;
         }
         if (frame.wait==Wait::Overlap) {
-            if (input.advance && frame.demo_mode==0 && renderer->overlapping()) renderer->finish_overlap();
+            if ((input.advance || skip_film_wait) && frame.demo_mode==0 && renderer->overlapping()) renderer->finish_overlap();
             frame.remaining_frames=renderer->overlap_remaining();
             if (!renderer->overlapping()) frame.wait=Wait::Running;
-            return frame; // Present the exact endpoint before executing the next script command.
+            if (!skip_film_wait) return frame; // Present the endpoint before executing the next command.
         }
         frame.wait=Wait::Running;
         frame.remaining_frames=0;
@@ -4612,7 +4746,7 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         };
         std::uint64_t remaining=250000;
         while (remaining) {
-            const auto result=vm->Step(remaining);
+            const auto result=vm->Step(remaining,ui_mode.has_value());
             if (!result.status) {
                 if (result.status.code==nnn::ErrorCode::BudgetExhausted) return frame;
                 location(); frame.error=result.status.detail; frame.wait=Wait::Error; break;
@@ -4627,9 +4761,15 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
             }
             // CBackExecClass calls Exec once per frame, so each of these returns ends the frame.
             if (ui_mode && (result.return_code==end_koma || result.return_code==end_film ||
-                            result.return_code==user_command)) return frame;
+                            result.return_code==user_command || result.return_code==end_if)) return frame;
+            const bool skip_film_command=GetSkipFlags().skip_to_film_end;
             switch (result.return_code) {
-            case print: frame.wait=Wait::Dialogue; set_mode(nnn::RuntimeMode::PrintMessage); return frame;
+            case print:
+                frame.wait=Wait::Dialogue; set_mode(nnn::RuntimeMode::PrintMessage);
+                if (!skip_film_command) return frame;
+                if (mark_skipped_messages) mark_current_read();
+                frame.wait=Wait::Running;
+                break;
             case select:
                 frame.selection=*vm->GetVM(vm->ActiveMode())->PendingSelection();
                 frame.choice_limit_ms=choice_limit(frame.selection->time_limit,vars);
@@ -4637,9 +4777,14 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
                 choice_appear_remaining=choice_appear_frames;
                 remember_choice(*frame.selection);
                 frame.wait=Wait::Choice; set_mode(nnn::RuntimeMode::SelectMessage); return frame;
-            case draw: frame.wait=Wait::Draw; frame.remaining_frames=draw_remaining; set_mode(nnn::RuntimeMode::Draw); return frame;
-            case overlap: frame.wait=Wait::Overlap; frame.remaining_frames=renderer->overlap_remaining(); set_mode(nnn::RuntimeMode::PrintOverlap); return frame;
+            case draw:
+                if (skip_film_command) break;
+                frame.wait=Wait::Draw; frame.remaining_frames=draw_remaining; set_mode(nnn::RuntimeMode::Draw); return frame;
+            case overlap:
+                if (skip_film_command) break;
+                frame.wait=Wait::Overlap; frame.remaining_frames=renderer->overlap_remaining(); set_mode(nnn::RuntimeMode::PrintOverlap); return frame;
             case end_film:
+                if (skip_film_command) { ClearSkipFlags(); film_skip_enabled=false; }
                 if (replay_films.empty()) break;
                 if (++replay_film==replay_films.size()) {
                     return finish(EndReason::ReplayComplete);
@@ -4703,11 +4848,24 @@ std::unique_ptr<GameSession> GameSession::create_ui_preview(const fs::path& root
         peer ? peer->data_->shared_assets : nullptr)));
 }
 const FrameState& GameSession::step_frame(std::uint32_t dt,const InputState& input) {
-    const auto& frame=data_->step(dt,input);
+    return step_frame(FrameTiming{dt,dt},input);
+}
+const FrameState& GameSession::step_frame(FrameTiming timing,const InputState& input,
+                                         const render::Layers::OverlapCapture& capture) {
+    struct CaptureScope {
+        const render::Layers::OverlapCapture*& current;
+        const render::Layers::OverlapCapture* previous;
+        ~CaptureScope() { current=previous; }
+    } scope{data_->overlap_capture,data_->overlap_capture};
+    data_->overlap_capture=capture ? &capture : nullptr;
+    const auto& frame=data_->step(timing,input);
     data_->publish_preview_story();
     return frame;
 }
 std::uint32_t GameSession::pace(std::uint32_t elapsed_ms) { return data_->pace(elapsed_ms); }
+bool GameSession::film_skip_available() const { return data_->film_skip_available(); }
+bool GameSession::request_film_skip() { return data_->request_film_skip(); }
+bool GameSession::complete_minigame(unsigned number) { return data_->complete_minigame(number); }
 const FrameState& GameSession::state() const { return data_->frame; }
 bool GameSession::complete_modal(int id,bool accepted,unsigned elapsed_frames,const std::vector<std::string>& values) {
     if (!data_->complete_modal(id,accepted,elapsed_frames,values)) return false;
@@ -4871,7 +5029,8 @@ std::optional<GameSession::PcSaveConfiguration> GameSession::pc_save_configurati
     const auto& layout=config->layout;
     return PcSaveConfiguration{config->file,layout.layers(),layout.message_width(),layout.status_bytes(),
         layout.system.version,static_cast<int>(layout.system.source),layout.executable.layer_records.has_value(),
-        layout.registers_okikae()};
+        layout.registers_okikae(),layout.executable.message_width.has_value(),layout.executable.status_bytes.has_value(),
+        layout.executable.registers_okikae.has_value()};
 }
 nnn::Value GameSession::save_slot_art() const { return data_->save_slot_art(); }
 void GameSession::restore_snapshot(const nnn::snapshot::Bytes& bytes,const std::function<bool(const FrameState&)>& verify,
@@ -4953,10 +5112,11 @@ void GameSession::reset_ui_background(const std::string& name,int mode,std::shar
     start_ui_background(name,mode,!d.ui_script.empty());
     d.seed_ui_story();
     d.layer_variables.fill(0);
+    d.rename_layers=0;
     d.input={}; d.sampled_clock.reset();
     d.random_state=d.seed_from_clock ? static_cast<std::uint32_t>(std::time(nullptr)) : d.legacy_random_state;
-    d.period=d.default_period;
-    d.window_type=d.font_type=d.next_message_speed=0; d.next_window=-1;
+    d.set_period(d.default_period);
+    d.window_type=d.font_type=d.next_message_speed=d.next_message_effect=0; d.next_window=-1;
     d.auto_message=d.cannot_click=d.cannot_skip=d.option_off=0;
     d.choice_appear_remaining=0; d.effect_gate=false;
     d.message_has_voice=false; d.message_voice_ms=d.speaking_ms=0;
@@ -4979,6 +5139,7 @@ void GameSession::start_ui_background(const std::string& name,int mode,bool fres
     }
     if ((mode==static_cast<int>(nnn::RuntimeMode::Opening) || mode==static_cast<int>(nnn::RuntimeMode::Title)) &&
         (data_->ui_mode!=mode || fresh)) data_->set_period(data_->default_period);
+    if (!restarting || data_->ui_mode!=mode) data_->pacing.clear();
     data_->ui_mode=mode;
     if (!restarting) data_->ui_click.reset();
     data_->ui_script=entry;
@@ -4988,24 +5149,50 @@ void GameSession::start_ui_background(const std::string& name,int mode,bool fres
     if (fresh) data_->renderer=data_->make_renderer(static_cast<int>(data_->renderer->width()),static_cast<int>(data_->renderer->height()));
     else if (!restarting) data_->renderer->clear_all();
     else if (data_->renderer->overlapping()) data_->renderer->finish_overlap();
-    data_->frame={}; data_->frame.script=entry;
+    const int script_mouse=restarting ? data_->frame.script_mouse : 0;
+    data_->frame={}; data_->frame.script=entry; data_->frame.script_mouse=script_mouse;
     data_->draw_remaining=0; data_->remainder=0;
     data_->frame.movie=0;
 }
-const FrameState& GameSession::step_ui_background(const InputState& input,bool loop) {
+const FrameState& GameSession::step_ui_background(const InputState& input,bool loop,unsigned frames) {
+    return advance_ui_background(input,loop,frames,{});
+}
+const FrameState& GameSession::tick_ui_background(const InputState& input,bool loop,std::uint32_t elapsed_ms) {
+    return advance_ui_background(input,loop,0,elapsed_ms);
+}
+void GameSession::reset_frame_pacing() { data_->pacing.clear(); }
+const FrameState& GameSession::advance_ui_background(const InputState& input,bool loop,unsigned frames,
+                                                     std::optional<std::uint32_t> elapsed_ms) {
     if (data_->ui_script.empty()) throw std::logic_error("No decorative script");
-    data_->step(0,input);
+    const auto period=data_->period;
+    const bool no_skip_frame=data_->shared_runtime->no_skip_frame();
+    if (elapsed_ms) data_->pacing.begin_frame(*elapsed_ms,no_skip_frame);
+    data_->step({},input);
     if (loop && data_->frame.wait==Wait::Ended) {
         start_ui_background(data_->ui_script,*data_->ui_mode);
-        data_->step(0,input);
+        data_->step({},input);
     }
     // CBackExecClass runs the script when its wait expires, then calculates
     // the effects and consumes one frame of the new wait, including on entry.
     if (data_->frame.wait==Wait::Error || data_->frame.wait==Wait::Ended ||
-        data_->frame.wait==Wait::Modal) return data_->frame;
-    data_->renderer->advance(1,{data_->input.mouse_x,data_->input.mouse_y});
-    if (data_->frame.wait==Wait::Draw && data_->draw_remaining)
-        data_->frame.remaining_frames=--data_->draw_remaining;
+        data_->frame.wait==Wait::Modal) {
+        if (elapsed_ms) data_->pacing.clear();
+        return data_->frame;
+    }
+    // Repay time within the current wait. The PC runs ExecScript once
+    // per displayed frame, even when several DRAW or overlap ticks are due.
+    unsigned wanted=1;
+    if (data_->frame.wait==Wait::Draw) wanted=std::max(1U,data_->draw_remaining);
+    else if (data_->frame.wait==Wait::Overlap)
+        wanted=std::max(1U,data_->renderer->overlap_remaining());
+    const unsigned ticks=elapsed_ms
+        ? static_cast<unsigned>(data_->pacing.repay_frames(static_cast<int>(std::min(wanted,data_->max_background_frames))))
+        : std::min(wanted,no_skip_frame || period!=data_->period ? 1U : std::max(1U,frames));
+    data_->renderer->advance(ticks,{data_->input.mouse_x,data_->input.mouse_y});
+    if (data_->frame.wait==Wait::Draw) {
+        data_->draw_remaining-=std::min(data_->draw_remaining,ticks);
+        data_->frame.remaining_frames=data_->draw_remaining;
+    }
     if (data_->frame.wait==Wait::Overlap) {
         data_->frame.remaining_frames=data_->renderer->overlap_remaining();
         if (!data_->renderer->overlapping()) data_->frame.wait=Wait::Running;
@@ -5049,7 +5236,14 @@ nnn::RuntimeParameters GameSession::snapshot_parameters() const { return data_->
 void GameSession::apply_runtime_parameters() { data_->apply_parameters(); }
 void GameSession::begin_player_line(bool has_voice,std::uint32_t voice_ms,int speed) { data_->begin_line(has_voice,voice_ms,speed); }
 std::uint32_t GameSession::text_characters(std::uint32_t elapsed) {
-    return data_->shared_runtime->with_parameters([&](nnn::RuntimeParameters&) { return data_->behavior->text_characters(elapsed); });
+    const bool reveal_for_skip=data_->frame.wait==Wait::Dialogue && skip_effective();
+    return data_->shared_runtime->with_parameters([&](nnn::RuntimeParameters&) {
+        auto& behavior=*data_->behavior;
+        if (!reveal_for_skip || behavior.text_complete()) return behavior.text_characters(elapsed);
+        const auto visible=behavior.visible_text();
+        behavior.request_advance();
+        return behavior.visible_text()-visible;
+    });
 }
 int GameSession::text_delay_ms() const {
     return data_->shared_runtime->with_parameters([&](const nnn::RuntimeParameters&) { return data_->behavior->text_delay_ms(); });
@@ -5064,6 +5258,9 @@ void GameSession::set_text_length(std::uint32_t length,std::optional<std::uint32
 }
 std::uint32_t GameSession::visible_text() const {
     return data_->shared_runtime->with_parameters([&](const nnn::RuntimeParameters&) { return data_->behavior->visible_text(); });
+}
+unsigned GameSession::text_fraction() const {
+    return data_->shared_runtime->with_parameters([&](const nnn::RuntimeParameters&) { return data_->behavior->text_fraction(); });
 }
 std::uint32_t GameSession::text_length() const {
     return data_->shared_runtime->with_parameters([&](const nnn::RuntimeParameters&) { return data_->behavior->text_length(); });
@@ -5087,6 +5284,11 @@ bool GameSession::auto_ready(std::uint32_t elapsed,bool complete) {
 std::uint32_t GameSession::settings_text_rate(int index,bool automatic) const noexcept {
     return data_->behavior->settings_text_rate(index,automatic);
 }
+int GameSession::settings_auto_speed() const {
+    return data_->shared_runtime->with_parameters([&](const nnn::RuntimeParameters&) {
+        return static_cast<int>(data_->behavior->auto_speed_index());
+    });
+}
 std::int64_t GameSession::auto_remaining_ms() const {
     return data_->shared_runtime->with_parameters([&](const nnn::RuntimeParameters&) { return data_->behavior->auto_remaining_ms(); });
 }
@@ -5109,7 +5311,11 @@ void GameSession::set_skip_active(bool enabled) {
     data_->sync_skip();
 }
 bool GameSession::skip_active() const { return !data_->ui_mode && data_->shared_runtime->skip_active(); }
-bool GameSession::skip_effective() const { return skip_active() && !data_->skip_blocked(); }
+void GameSession::set_ctrl_skip(bool enabled) { data_->ctrl_skip=enabled && !data_->ui_mode; }
+bool GameSession::skip_effective() const {
+    return !data_->ui_mode && !data_->skip_blocked() &&
+        (skip_active() || data_->ctrl_can_skip_message(data_->frame.dialogue.message_id));
+}
 ScriptRestrictions GameSession::script_restrictions() const { return {data_->auto_message,data_->cannot_click,data_->cannot_skip,data_->option_off}; }
 bool GameSession::options_enabled() const { return data_->option_off==0 && data_->auto_message<=0; }
 DrawMessage GameSession::draw_message() const {

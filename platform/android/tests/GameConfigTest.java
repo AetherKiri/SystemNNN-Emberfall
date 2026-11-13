@@ -122,6 +122,29 @@ public final class GameConfigTest {
                 tab.off.art.states[1].frames==3,"radio position inherits previous ON and optional source reset retains animation");
             check(buttons.systemVoices.size()==3&&buttons.systemVoices.get(2).off.art.image.equals("theme")&&
                 buttons.systemVoices.get(2).off.width==160,"game system voice count allows sparse atlas declarations");
+            String voiceChanges="voiceCutButtonNumber 3\nvoiceNameChangeFlag 1\nvoiceNameChangeVar1 nameFlag\n"+
+                "voiceVoiceChangeVar1 soundFlag\nvoiceNameChangeVar2 \u0083\\\nvoiceVoiceChangeVar3 unused\n"+
+                "voice1Button1ClickSound 7\nvoice1Button1BadSound 8\nvoice1Button1EnterSound 9\nvoice1Button1ExitSound 10\n"+
+                "voice1Button2ClickSound 11\nvoice1Button2ClickVoice 12\nvoice1Button2EnterSound 13\n"+
+                "voiceVoiceChangeVoiceOffClick1 41\nvoiceVoiceChangeVoiceOnClick1 42\nvoiceVoiceChangeVoiceOffCannot1 43\n"+
+                "voiceVoiceChangeVoiceOffEnter1 44\nvoiceVoiceChangeVoiceOffExit1 45\nvoiceVoiceChangeVoiceOnEnter1 -1\n"+
+                "voiceVoiceChangeVoiceOnClick2 46\n";
+            File conditional=new File(root,"init/conditional.xtx");
+            write(conditional,"voiceVoiceChangeFlag 1\n"+voiceChanges,false);
+            OriginalSettingsModel changed=new OriginalSettingsModel(GameUiAssets.readConfig(root,"conditional"));
+            OriginalSettingsModel.CharacterControl first=changed.characters.get(0),second=changed.characters.get(1);
+            check(first.soundChange.variable.equals("soundFlag")&&second.soundChange.variable.equals("\u0083\\")&&
+                changed.characters.get(2).soundChange==null,"explicit and inherited variable names retain their original bytes");
+            ButtonArt.SoundEvent click=ButtonArt.SoundEvent.CLICK,enter=ButtonArt.SoundEvent.ENTER;
+            check(first.sound(false,click,false)==6&&first.sound(true,click,false)==10&&
+                first.sound(false,click,true)==40&&first.sound(true,click,true)==41,"the variable switches the current OFF and ON cues independently");
+            check(first.sound(false,ButtonArt.SoundEvent.CANNOT_CLICK,true)==42&&first.sound(false,enter,true)==43&&
+                first.sound(false,ButtonArt.SoundEvent.EXIT,true)==44,"the alternate cannot, enter and exit cues use the source fields");
+            check(first.sound(true,enter,true)==12&&first.sound(true,ButtonArt.SoundEvent.EXIT,true)==9&&
+                first.button.on.voice(click)==11,"nonpositive and absent replacements preserve the inherited cues and button voice");
+            write(conditional,"voiceVoiceChangeFlag 0\n"+voiceChanges,false);
+            OriginalSettingsModel.CharacterControl unchanged=new OriginalSettingsModel(GameUiAssets.readConfig(root,"conditional")).characters.get(0);
+            check(unchanged.soundChange==null&&unchanged.sound(true,click,true)==10,"games must opt into variable-based cues");
             write(new File(root,"init2/config.fxf"),"musicVolumePrintX 100\nmusicBarFileName bar\nvolumeNumber 4\nvolumeSizeX1 320\nvolumeSizeY1 13\nfilenameBG first_bg\nfilenameBG3 third_bg\nmodePageMax 3\npageMode 1\nvoiceCutButtonNumber 2\nvoiceCutButtonCustomFlag 1\nvoiceOffNumberByButton1 2\nvoiceOffButton1chara1 7\nvoiceOffNumberByButton2 1\n",true);
             OriginalSettingsModel inherited=new OriginalSettingsModel(GameUiAssets.readConfig(root,"config"));
             check(inherited.pageMode==1&&inherited.sliders.get(3).width==320&&inherited.sliders.get(3).height==13,"source slider size inheritance and page mode");

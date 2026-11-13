@@ -1173,6 +1173,44 @@ void blur_effects() {
             return result;
         });
     }
+    {
+        auto cropped=pattern(3,2);
+        cropped->canvas_width=5;cropped->canvas_height=4;cropped->content={1,1,3,2};
+        const Rect dst{-1,0,4,4};
+        Layers l(7,6);require(l.effect(0,54,{0,17,42,65}));l.bind(1,cropped,false);
+        l.rectangle(1,dst,dst);require(l.effect(1,126,{1,3,3,100,100}));
+        const std::array<int,3> fill{17,42,65};
+        std::vector<Byte> expected(7*6*3);
+        for (int y=0;y<6;++y) for (int x=0;x<7;++x) {
+            const int sx=x-dst.x,sy=y-dst.y;
+            const auto dest=static_cast<std::size_t>((y*7+x)*3);
+            std::array<int,3> sum{};
+            int count=0;
+            for (int row=std::max(1,sy-1);row<std::min(3,sy+2);++row)
+                for (int col=std::max(1,sx-1);col<std::min(4,sx+2);++col) {
+                    const auto source=static_cast<std::size_t>(((row-1)*3+col-1)*4);
+                    for (std::size_t c=0;c<3;++c) sum[c]+=cropped->pixels.rgba[source+c];
+                    ++count;
+                }
+            for (std::size_t c=0;c<3;++c) expected[dest+c]=static_cast<Byte>(count?
+                ((sum[c]>>1)*std::min(32767,32768/count))>>14:fill[c]);
+        }
+        require(l.surface().rgb==expected);
+    }
+    {
+        Layers cached(4,4),reference(4,4);
+        cached.bind(1,t,false);reference.bind(4,t,false);
+        require(cached.effect(1,126,{1,3,3,100,100}));
+        require(reference.effect(4,126,{1,3,3,100,100}));
+        cached.advance(1);reference.advance(1);
+        require(cached.surface().rgb==reference.surface().rgb);
+        require(cached.effect(0,54,{0,25,50,75}));
+        require(reference.effect(0,54,{0,25,50,75}));
+        require(cached.surface().rgb==reference.surface().rgb);
+        const Rect moved{1,0,4,4};
+        cached.rectangle(1,moved,moved);reference.rectangle(4,moved,moved);
+        require(cached.surface().rgb==reference.surface().rgb);
+    }
 }
 void easing_tests() {
     auto white=pattern(1,1);white->pixels.rgba={255,255,255,255};
@@ -1326,6 +1364,26 @@ int main() {
         require(!layers.overlapping());require(layers.needs_redraw());
         require(layers.surface().rgb==std::vector<Byte>({0,255,0}));require(!layers.needs_redraw());
         layers.advance(1);require(!layers.needs_redraw());
+    }
+    // A live wipe starts from the displayed scene with the host's message plane,
+    // even if the script updated a layer before taking its snapshot.
+    for (bool explicit_prepare : {false,true}) {
+        Layers layers(1,1);
+        require(layers.effect(0,54,{0,64,0,0}));
+        require(layers.surface().rgb==std::vector<Byte>({64,0,0}));
+        require(layers.effect(0,54,{0,0,64,0}));
+        unsigned snapshots=0;
+        const Layers::OverlapCapture message=[&](Surface& screen) {
+            require(screen.rgb==std::vector<Byte>({64,0,0}));
+            screen.rgb={32,0,128};
+            ++snapshots;
+            return true;
+        };
+        if(explicit_prepare)layers.prepare_overlap(message);
+        require(layers.start_overlap(2,0,{},message) && snapshots==1);
+        require(layers.surface().rgb==std::vector<Byte>({32,0,128}));
+        layers.advance(2);
+        require(layers.surface().rgb==std::vector<Byte>({0,64,0}));
     }
     screen_effects();character_colors();movement_effects();composition_effects();blur_effects();easing_tests();mask_presence_tests();rain4_tests();rain2_tests();suna_tests();firefly_tests();chara_noise_tests();rain_tests();old_firefly_tests();chara_ghost_tests();zoom_tests();mask_appear_tests();zantetsu_tests();water_tests();kagerou_tests();raster_tests();old_film_tests();old_lamp_tests();mask_wipe_tests();perspective_tests();shard_tests();
     screen_layer_over_messages(16);screen_layer_over_messages(32);native_background_slots();wipe_tests();

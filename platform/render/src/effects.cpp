@@ -1301,7 +1301,13 @@ void blur_screen_picture(Surface& out,const Layer& l,int kx,int ky) {
         }
     }
 }
-void blur_character(Surface& out,const Layer& l,int kx,int ky,bool background) {
+constexpr auto blur_reciprocals=[] {
+    std::array<int,257> values{};
+    for (unsigned size=1;size<=256;++size) values[size]=static_cast<int>(std::min(32767U,32768U/size));
+    return values;
+}();
+
+void blur_character(Surface& out,const Layer& l,int kx,int ky,bool background,bool cache_background) {
     if (!l.texture) return;
     const Rect dst=destination(l);
     const auto& t=*l.texture;
@@ -1320,6 +1326,21 @@ void blur_character(Surface& out,const Layer& l,int kx,int ky,bool background) {
     const int top=static_cast<int>(std::clamp(static_cast<std::int64_t>(dst.y)+clip_top-yt,std::int64_t{0},static_cast<std::int64_t>(out.height)));
     const int bottom=static_cast<int>(std::clamp(static_cast<std::int64_t>(dst.y)+clip_bottom+yb,std::int64_t{0},static_cast<std::int64_t>(out.height)));
     if (left>=right || top>=bottom) return;
+    // A completed opaque blur covering the entire canvas is independent of the lower layers.
+    const bool cacheable=cache_background && out.rgb.size()<=3300000U && left==0 && top==0 &&
+        right==static_cast<int>(out.width) && bottom==static_cast<int>(out.height) &&
+        std::int64_t{dst.x}+clip_left<xr && std::int64_t{dst.y}+clip_top<yb &&
+        std::int64_t{dst.x}+clip_right+xl>=right && std::int64_t{dst.y}+clip_bottom+yt>=bottom;
+    if (cacheable) {
+        const auto& cache=l.effect_state->background_blur;
+        if (cache && cache->texture.lock()==l.texture && cache->kernel_x==kx && cache->kernel_y==ky &&
+            cache->pixels.width==out.width && cache->pixels.height==out.height &&
+            cache->destination.x==dst.x && cache->destination.y==dst.y &&
+            cache->destination.width==dst.width && cache->destination.height==dst.height) {
+            std::copy(cache->pixels.rgb.begin(),cache->pixels.rgb.end(),out.rgb.begin());
+            return;
+        }
+    }
     std::vector<std::array<int,4>> columns(static_cast<std::size_t>(clip_right-clip_left));
     const bool repeat_bottom=!background && value(l,8)!=0 && clip_bottom>1;
     const auto update=[&](int row,int direction,bool repeat) {
@@ -1353,10 +1374,10 @@ void blur_character(Surface& out,const Layer& l,int kx,int ky,bool background) {
         for (int x=left;x<right;++x) {
             if (sum[3]>0) {
                 const auto di=(static_cast<std::size_t>(y)*out.width+static_cast<unsigned>(x))*3;
+                const int reciprocal=background ? blur_reciprocals[static_cast<std::size_t>(sum[3])] : 0;
                 for (std::size_t c=0;c<3;++c) {
                     int pixel;
                     if (background) {
-                        const int reciprocal=std::min(32767,32768/sum[3]);
                         pixel=std::clamp(((sum[c]>>1)*reciprocal)>>14,0,255);
                     } else {
                         const int scaled=(sum[c]>>16)*div+(((((sum[c]&65535)>>1)*div)>>16)<<1);
@@ -1372,6 +1393,11 @@ void blur_character(Surface& out,const Layer& l,int kx,int ky,bool background) {
         }
         update(sy-yt,-1,repeat_bottom);
         update(sy+yb,1,repeat_bottom);
+    }
+    if (cacheable) try {
+        l.effect_state->background_blur=std::make_shared<BlurredBackground>(BlurredBackground{l.texture,dst,kx,ky,out});
+    } catch (const std::bad_alloc&) {
+        l.effect_state->background_blur.reset();
     }
 }
 void lamp_visibility(Layer& layer) {
@@ -4298,7 +4324,8 @@ void draw(Surface& out,const std::array<Layer,32>& layers,unsigned slot,const Su
     } else if (l.effect==77 || l.effect==125 || l.effect==126) {
         const auto size=blur_size(l);
         if (l.effect==77) blur_screen_picture(out,l,size[0],size[1]);
-        else blur_character(out,l,size[0],size[1],l.effect==126);
+        else blur_character(out,l,size[0],size[1],l.effect==126,
+            l.effect==126 && background && l.effect_state && l.count>=duration(l));
     } else if (l.effect==74) {
         bura(out,l);
     } else if (l.effect==20) {

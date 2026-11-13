@@ -170,7 +170,7 @@ class GameUiPanel extends FrameLayout {
         if(pool==null)return;
         backdropRequest=request;backdropHeld=true;
         ChartBackdrop chart=new ChartBackdrop(canvasWidth,canvasHeight,centerLayer,scriptTiles,display);
-        backdrop=new GameUiBackground(getContext(),pool,request,null,frameMs,UiPreviewPool.stepLimit(assets.game),null,0,0,chart);
+        backdrop=new GameUiBackground(getContext(),pool,request,null,frameMs,null,0,0,chart);
         addView(backdrop,0,new LayoutParams(-1,-1));
     }
     private void uiBackground(GameUiAssets.Config cfg,int mode,int page,UiPreviewPool.Warmup warmup,int[] saved,int width,int height){
@@ -182,7 +182,7 @@ class GameUiPanel extends FrameLayout {
         UiPreviewPool pool=request==null||assets.runtime==null?null:assets.runtime.previews();
         if(pool==null)return;
         backdropRequest=request;
-        backdrop=new GameUiBackground(getContext(),pool,request,warmup,frameMs,UiPreviewPool.stepLimit(assets.game),saved,width,height);
+        backdrop=new GameUiBackground(getContext(),pool,request,warmup,frameMs,saved,width,height);
         backdropHeld=true;
         addView(backdrop,0,new LayoutParams(-1,-1));
     }

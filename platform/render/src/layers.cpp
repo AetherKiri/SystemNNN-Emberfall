@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <limits>
 #include <stdexcept>
 
@@ -89,6 +90,25 @@ void tint(Surface& out,Color value,int alpha) {
         for (unsigned j=0; j<3; ++j) out.rgb[i+j]=static_cast<Byte>((out.rgb[i+j]*(255U-a)+c[j]*a+127U)/255U);
 }
 
+void copy_opaque_row(Byte* dest,const Byte* source,std::size_t count) {
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__==__ORDER_LITTLE_ENDIAN__
+    // Remove the fourth byte of four source pixels at once. The row can be unaligned after clipping.
+    while (count>=4) {
+        std::uint32_t a,b,c,d;
+        std::memcpy(&a,source,4);std::memcpy(&b,source+4,4);
+        std::memcpy(&c,source+8,4);std::memcpy(&d,source+12,4);
+        const std::uint32_t first=(a&0xffffffU)|(b<<24);
+        const std::uint32_t middle=((b>>8)&0xffffU)|(c<<16);
+        const std::uint32_t last=((c>>16)&0xffU)|(d<<8);
+        std::memcpy(dest,&first,4);std::memcpy(dest+4,&middle,4);std::memcpy(dest+8,&last,4);
+        source+=16;dest+=12;count-=4;
+    }
+#endif
+    for (std::size_t i=0;i<count;++i,source+=4,dest+=3) {
+        dest[0]=source[0];dest[1]=source[1];dest[2]=source[2];
+    }
+}
+
 void picture(Surface& out,const Texture& t,Rect src,Rect dst,int percent,Color add,bool use_alpha=true) {
     if (percent<=0 || src.width<=0 || src.height<=0 || dst.width<=0 || dst.height<=0) return;
     const Rect cut=t.content;
@@ -104,6 +124,36 @@ void picture(Surface& out,const Texture& t,Rect src,Rect dst,int percent,Color a
         return;
     }
     const unsigned opacity=static_cast<unsigned>(std::min(100,percent));
+    for (auto& delta:add) delta=std::clamp(delta,-255,255);
+    const auto paint_pixel=[&](Byte* dst_pixel,const Byte* src_pixel) {
+        const unsigned a=((use_alpha ? src_pixel[3] : 255U)*opacity+50U)/100U;
+        if (!a) return;
+        for (unsigned c=0;c<3;++c) {
+            const unsigned value=channel(src_pixel[c]+add[c]);
+            dst_pixel[c]=static_cast<Byte>(a==255U ? value : ((value*a)>>8U)+((dst_pixel[c]*(256U-a))>>8U));
+        }
+    };
+    if (src.width==dst.width && src.height==dst.height) {
+        // Unscaled layers only need the clip calculation once per rectangle.
+        const auto source_x=std::int64_t{src.x}-dst.x,source_y=std::int64_t{src.y}-dst.y;
+        const auto left=std::max(source_x+x0,std::int64_t{cut.x});
+        const auto top=std::max(source_y+y0,std::int64_t{cut.y});
+        const auto right=std::min(source_x+x1,std::int64_t{cut.x}+cut.width);
+        const auto bottom=std::min(source_y+y1,std::int64_t{cut.y}+cut.height);
+        if (left>=right || top>=bottom) return;
+        const auto dest_x=static_cast<std::size_t>(left-source_x);
+        const auto texture_x=static_cast<std::size_t>(left-cut.x);
+        const bool copy=!use_alpha && opacity==100 && add==Color{};
+        for (auto y=top;y<bottom;++y) {
+            auto* dest=out.rgb.data()+(static_cast<std::size_t>(y-source_y)*out.width+dest_x)*3;
+            const auto* pixel=t.pixels.rgba.data()+(static_cast<std::size_t>(y-cut.y)*t.pixels.width+texture_x)*4;
+            if (copy) copy_opaque_row(dest,pixel,static_cast<std::size_t>(right-left));
+            else {
+                for (auto x=left;x<right;++x,pixel+=4,dest+=3) paint_pixel(dest,pixel);
+            }
+        }
+        return;
+    }
     for (int y=y0; y<y1; ++y) {
         const int sy=src.y+static_cast<int>((std::int64_t{y-dst.y}*src.height)/dst.height)-cut.y;
         if (sy<0 || sy>=cut.height) continue;
@@ -112,13 +162,7 @@ void picture(Surface& out,const Texture& t,Rect src,Rect dst,int percent,Color a
             const int sx=src.x+static_cast<int>((std::int64_t{x-dst.x}*src.width)/dst.width)-cut.x;
             if (sx<0 || sx>=cut.width) continue;
             const auto si=(static_cast<std::size_t>(sy)*t.pixels.width+static_cast<unsigned>(sx))*4;
-            const unsigned a=((use_alpha ? t.pixels.rgba[si+3] : 255U)*opacity+50U)/100U;
-            if (!a) continue;
-            for (unsigned j=0;j<3;++j) {
-                const unsigned c=channel(t.pixels.rgba[si+j]+std::clamp(add[j],-255,255));
-                if (a==255U) out.rgb[di+j]=static_cast<Byte>(c);
-                else out.rgb[di+j]=static_cast<Byte>(((c*a)>>8U)+((out.rgb[di+j]*(256U-a))>>8U));
-            }
+            paint_pixel(out.rgb.data()+di,t.pixels.rgba.data()+si);
         }
     }
 }
@@ -718,9 +762,21 @@ void Layers::advance(std::uint32_t frames,Point cursor) {
         }
     }
 }
-void Layers::prepare_overlap() { previous_=surface(); }
-bool Layers::start_overlap(std::uint32_t frames,int type,const OverlapDecoration& decorate) {
-    if (previous_.rgb.empty()) previous_=output_;
+void Layers::prepare_overlap(const OverlapCapture& capture) {
+    if (capture && !output_.rgb.empty()) {
+        // The host UI belongs to the last displayed scene, not to any layers
+        // the script has changed since that scene was drawn.
+        previous_=output_;
+        if (capture(previous_)) return;
+    }
+    previous_=surface();
+}
+bool Layers::start_overlap(std::uint32_t frames,int type,const OverlapDecoration& decorate,
+                           const OverlapCapture& capture) {
+    if (previous_.rgb.empty()) {
+        previous_=output_;
+        if (frames && capture && !previous_.rgb.empty()) capture(previous_);
+    }
     overlap_display_={};
     compose(target_,decorate); overlap_time_=frames; overlap_count_=0; invalidate();
     const bool supported=supports_wipe(type);

@@ -48,6 +48,8 @@ final class TitlePanel extends FrameLayout {
                         ()->finishClick(click,item)))pending(true);
                 });
                 button=game;
+            } else if(fallback==null&&item.action==TitleMenu.Action.MINIGAME) {
+                button=new View(context);button.setOnClickListener(v->{if(!pending&&!restarting)finishClick(click,item);});
             } else {
                 Button text=new Button(context); text.setText(item.label); button=text;
                 button.setOnClickListener(v->{

@@ -88,9 +88,26 @@ public final class PcSystemSaveTest {
                 loaded.optional[1024+1]==16&&loaded.text[2][0]=='A',"PC achievements, term, voice and replacement text");
             save.write(loaded,restored);
             check(Arrays.equals(Files.readAllBytes(live),written),"unchanged progress did not rewrite");
+            int[] audio={100,87,200,0,500,-4,506,3};
+            int[] owners={6,1};
+            check(save.writeAudioSettings(audio,owners),"write original audio settings");
+            PcSystemSave.Initial audioReloaded=save.load();
+            for(int i=0;i<audio.length;i+=2)check(pair(audioReloaded.audioParameters(),audio[i])==audio[i+1],
+                "audio parameter "+audio[i]+" survives PC archive reload");
+            check(pair(audioReloaded.audioOwners(),6)==1,"original character mute flag survives reload");
+            byte[] withAudio=Files.readAllBytes(live);
+            for(int block:new int[]{5,6,7,8,9,10,11,12})
+                check(Arrays.equals(slice(written,block),slice(withAudio,block)),"audio edit preserved progress block "+block);
+            if(version==3){
+                check(save.writeAudioSettings(new int[]{109,83,209,1},new int[]{0,4}),"write PC version 3 audio settings");
+                audioReloaded=save.load();
+                check(audioReloaded.audioTheme()==4&&pair(audioReloaded.audioParameters(),109)==83&&
+                    pair(audioReloaded.audioParameters(),209)==1,"version 3 theme and script SE survive reload");
+            }
             Files.write(live,Arrays.copyOf(written,17));
             check(!PcSystemSave.valid(live.toFile()),"truncated archive rejected");
             check(!save.load().live,"truncated archive left out of startup progress");
+            check(!save.writeAudioSettings(audio,owners),"damaged PC archive rejected for audio edits");
             save.write(edited,keys);
             check(Files.size(live)==17,"damaged PC archive preserved");
             chartProgress(directory);
@@ -153,5 +170,9 @@ public final class PcSystemSaveTest {
         return result;
     }
     private static boolean has(int[] values,int key){for(int value:values)if(value==key)return true;return false;}
+    private static int pair(int[] values,int id){
+        for(int i=0;i<values.length;i+=2)if(values[i]==id)return values[i+1];
+        throw new AssertionError("Missing parameter "+id);
+    }
     private static void check(boolean condition,String subject){if(!condition)throw new AssertionError(subject);}
 }

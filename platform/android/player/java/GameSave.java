@@ -100,8 +100,8 @@ final class GameSave {
         save.useNativeBaseline(0,0);
         return save;
     }
-    void recordModalBoundary(int x,int y){
-        // The legacy journal cannot reproduce a raw-text or multi-step reply.
+    void recordNativeBoundary(int x,int y){
+        // The legacy journal cannot reproduce a native-only action.
         // Existing native Backlog checkpoints still validate their original cursor.
         if(!requiresSnapshot())useNativeBaseline(x,y);
     }
@@ -175,6 +175,18 @@ final class GameSave {
     void appendWithClock(int ms,int x,int y,boolean advance,int choice,boolean skip,int date,int milliseconds){
         if(date!=0)stateRun(CLOCK_SAMPLE,date,milliseconds);
         append(ms,x,y,advance,choice,skip);
+    }
+    void appendWithClock(int elapsed,int animation,int x,int y,boolean advance,int choice,boolean skip,
+                         int date,int milliseconds){
+        if(elapsed==animation&&elapsed<=1000){
+            appendWithClock(elapsed,x,y,advance,choice,skip,date,milliseconds);
+        }else if(requiresSnapshot()){
+            updateNativePointer(x,y);
+        }else{
+            // The legacy journal has one time per input. Keep the native Backlog
+            // checkpoints when an update has distinct elapsed and animation clocks.
+            useNativeBaseline(x,y);
+        }
     }
     void recordMovieContinuationClock(int date,int milliseconds){
         if(requiresSnapshot()||runs.isEmpty())return;

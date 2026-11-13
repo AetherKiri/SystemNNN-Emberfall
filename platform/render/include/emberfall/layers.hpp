@@ -80,6 +80,8 @@ class Layers {
 public:
     using TextureReader=std::function<std::shared_ptr<const Texture>(const std::string&)>;
     using OverlapDecoration=std::function<void(Surface&)>;
+    // Decorate the outgoing RGB frame. Return false without changing it when no host frame is available.
+    using OverlapCapture=std::function<bool(Surface&)>;
     Layers(int width,int height,unsigned layer_count=32);
     void clear_all();
     void clear(unsigned slot);
@@ -89,8 +91,9 @@ public:
     bool effect(unsigned slot, int number, std::vector<std::int32_t> parameters,const FragmentMesh* mesh=nullptr);
     bool restore_layer(unsigned slot,Layer layer,const FragmentMesh* mesh=nullptr);
     void advance(std::uint32_t frames,Point cursor={-1,-1});
-    void prepare_overlap();
-    bool start_overlap(std::uint32_t frames,int type=0,const OverlapDecoration& decorate={});
+    void prepare_overlap(const OverlapCapture& capture={});
+    bool start_overlap(std::uint32_t frames,int type=0,const OverlapDecoration& decorate={},
+                       const OverlapCapture& capture={});
     void finish_overlap();
     void resume_overlap_scene();
     bool has_overlap_decoration() const noexcept { return !overlap_display_.rgb.empty(); }

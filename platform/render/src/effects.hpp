@@ -44,6 +44,13 @@ struct Particle {
     bool reverse=false;
 };
 
+struct BlurredBackground {
+    std::weak_ptr<const Texture> texture;
+    Rect destination{};
+    int kernel_x=0,kernel_y=0;
+    Surface pixels;
+};
+
 struct State {
     int offset_x=0,offset_y=0;
     int distance=0;
@@ -65,6 +72,7 @@ struct State {
     bool once_drawn=false;
     std::vector<Particle> particles;
     std::vector<Byte> condensation;
+    std::shared_ptr<const BlurredBackground> background_blur;
 };
 
 using AnimationTexture=std::function<std::shared_ptr<const Texture>(const std::string&)>;

@@ -188,8 +188,9 @@ jintArray chart_texture_pixels(JNIEnv* env,const Texture& texture,bool transpare
     }
     return result;
 }
-void step(Preview& p,const emberfall::scene::InputState& input){
-    const auto& state=p.game->step_ui_background(input,p.loop);
+void step(Preview& p,const emberfall::scene::InputState& input,std::optional<unsigned> elapsed_ms={}){
+    const auto& state=elapsed_ms ? p.game->tick_ui_background(input,p.loop,*elapsed_ms)
+                                 : p.game->step_ui_background(input,p.loop);
     if(state.wait==emberfall::scene::Wait::Error)throw std::runtime_error(state.error);
 }
 void present(Preview& p){
@@ -449,18 +450,17 @@ API jintArray JNICALL FN(chartTextureWithinBudget)(JNIEnv* env,jclass,jlong hand
         return chart_texture_pixels(env,*texture,transparent==JNI_TRUE,budget);
     }catch(const std::exception& e){fail(env,e.what());return nullptr;}
 }
-API void JNICALL FN(tick)(JNIEnv* env,jclass,jlong handle,jint x,jint y,jboolean clicked,jboolean held,jint frames){
+API jint JNICALL FN(tick)(JNIEnv* env,jclass,jlong handle,jint x,jint y,jboolean clicked,jboolean held,jint elapsed_ms,jboolean reset_clock){
     try{
-        if(frames<1||frames>1024)throw std::invalid_argument("Invalid UI background frame count");
+        if(elapsed_ms<0)throw std::invalid_argument("Invalid UI background elapsed time");
         auto& p=prepared_preview(handle);
+        if(reset_clock==JNI_TRUE)p.game->reset_frame_pacing();
         emberfall::scene::InputState input;input.mouse_x=x;input.mouse_y=y;
         input.advance=clicked==JNI_TRUE;input.held=held==JNI_TRUE;
-        for(int frame=0;frame<frames;++frame){
-            step(p,input);
-            input.advance=false;
-        }
+        step(p,input,static_cast<unsigned>(elapsed_ms));
         present(p);
-    }catch(const std::exception& e){fail(env,e.what());}
+        return static_cast<jint>(p.game->frame_ms());
+    }catch(const std::exception& e){fail(env,e.what());return 0;}
 }
 API void JNICALL FN(close)(JNIEnv*,jclass,jlong handle){delete reinterpret_cast<Preview*>(handle);}
 API jlong JNICALL FN(createWipe)(JNIEnv* env,jclass,jobject before,jobject after,jint color,jint width,jint height) {

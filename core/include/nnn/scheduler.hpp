@@ -52,7 +52,7 @@ public:
     // Decorative scripts restart the validated program without reopening it.
     bool RestartRoot(const std::string& identity) noexcept;
     // One VM yield and at most one owner push/pop; parent is not run after pop.
-    SchedulerResult Step(std::uint64_t work_budget = 10000);
+    SchedulerResult Step(std::uint64_t work_budget = 10000, bool yield_on_endif = false);
     Status Choose(Word one_based_option,bool timeout=false);
     // Resume at the post-SELECT PC without choosing a CASE.
     bool DiscardPendingSelection() noexcept;
@@ -88,7 +88,7 @@ public:
 private:
     std::unique_ptr<CExecScript> make_vm(ScriptMode mode);
     Status prepare_child(ScriptMode caller, Word code, const std::string& target);
-    SchedulerResult step(std::uint64_t work_budget);
+    SchedulerResult step(std::uint64_t work_budget, bool yield_on_endif = false);
     Status load(const std::vector<Byte>* bytes, std::string identity, DecodeParameters parameters);
     SchedulerResult reject(ErrorCode code, const char* detail) const;
 

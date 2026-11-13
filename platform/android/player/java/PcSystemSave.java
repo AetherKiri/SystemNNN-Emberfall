@@ -28,12 +28,15 @@ final class PcSystemSave {
     private static final int HEADER=32, RESULT_WORDS=1024, TERM_WORDS=1024, MAX_BYTES=147456,
         MAX_CHART_NODES=256*1024;
     private static final int DATA=1, READ=5, VAR=6, CG=7, FILM=9, VOICE=10, MOVIE=11, MUSIC=12,
-        TEXT=13, ACHIEVEMENT=14, TERM=15, VOICE_LINE=16, CHOICE=18;
+        TEXT=13, ACHIEVEMENT=14, TERM=15, VOICE_LINE=16, FLAG2=17, CHOICE=18;
     // FILE INFO counts itself. Classic games can end at MUSICFLAG.
     private static final int[] CODES={0,1,5,6,7,8,9,10,11,12,13,14,15,16,17,18};
     private static final int[] SIZES={64,2048,32800,4128,1312,2080,16416,1056,1056,1056,6432,4128,4128,65568,1056,4128};
     private static final String[] LABELS={"FILE INFO","SYSTEM DATA","MES FLAG","SYSTEMVAR","CGFLAG","SCENEFLAG",
         "FILMFLAG","VOICEFLAG","MOVIEFLAG","MUSICFLAG","OKIKAE","ACHIEVEMENT","TERM","CHARAVOICEFLAG","SYSTEMFLAG2","SELECTMESSAGE"};
+    // Negative offsets belong to SYSTEMFLAG2. The IDs are the native runtime parameter IDs.
+    private static final int[][] AUDIO_FIELDS={{100,44},{101,46},{102,45},{103,47},{104,53},{108,492},{109,-12},
+        {200,48},{201,50},{202,49},{203,51},{204,54},{208,493},{209,-13}};
 
     private final Path file, factory, result;
     private final ChartFiles chartFiles;
@@ -119,6 +122,32 @@ final class PcSystemSave {
         final boolean live;
         final int[] results;
         Initial(Archive archive,boolean live,int[] results){this.archive=archive;this.live=live;this.results=results;}
+        boolean hasDisplayOptions(){return archive!=null&&archive.has(DATA);}
+        boolean noSkipFrame(){return archive.data.getInt(archive.at(DATA)+38*Integer.BYTES)!=0;}
+        int mouseCursor(){return archive.data.getInt(archive.at(DATA)+482*Integer.BYTES);}
+        int[] audioParameters(){
+            if(!live)return new int[0];
+            int[] pairs=new int[(AUDIO_FIELDS.length+72)*2];int at=0;
+            for(int[] field:AUDIO_FIELDS){
+                int offset=audioOffset(archive,field[1]);
+                if(offset>=0){pairs[at++]=field[0];pairs[at++]=archive.data.getInt(offset);}
+            }
+            for(int group=0;group<72;group++){
+                int packed=archive.data.getInt(characterGainOffset(archive,group));
+                int gain=(packed>>((group%6)*5))&31;
+                pairs[at++]=500+group;pairs[at++]=gain<16?gain:gain-32;
+            }
+            return Arrays.copyOf(pairs,at);
+        }
+        int[] audioOwners(){
+            if(!live)return new int[0];
+            int[] pairs=new int[64];
+            for(int word=0;word<32;word++){
+                pairs[word*2]=word+2;pairs[word*2+1]=archive.data.getInt(archive.at(DATA)+(384+word)*4);
+            }
+            return pairs;
+        }
+        int audioTheme(){return live&&archive.has(FLAG2)?archive.data.getInt(archive.at(FLAG2)+14*4):-1;}
     }
 
     Initial load() throws IOException {
@@ -237,6 +266,52 @@ final class PcSystemSave {
 
     private boolean represented(Archive archive,int key){
         return galleryBit(key)>=0 && (key>>>28!=5 || archive.has(CHOICE));
+    }
+
+    private static int audioOffset(Archive archive,int word){
+        int block=word<0?FLAG2:DATA;
+        return archive.has(block)?archive.at(block)+Math.abs(word)*4:-1;
+    }
+    private static int characterGainOffset(Archive archive,int group){return archive.at(DATA)+(356+group/6)*4;}
+    boolean storesAudioParameter(int id){
+        if(id>=500&&id<572)return true;
+        for(int[] field:AUDIO_FIELDS)if(id==field[0])return field[1]>0||version==3;
+        return false;
+    }
+    boolean storesAudioOwner(int id){return id==0?version==3:id>=2&&id<34;}
+    boolean writeAudioSettings(int[] parameters,int[] owners) throws IOException {
+        if(damaged)return false;
+        try{
+            Archive archive=liveArchive();
+            boolean fresh=archive==null;
+            if(fresh){
+                archive=factoryArchive();
+                if(archive==null)archive=create();
+            }
+            byte[] before=archive.bytes.clone();
+            for(int i=0;i<parameters.length;i+=2){
+                int id=parameters[i],value=parameters[i+1];
+                if(id>=500&&id<572){
+                    int group=id-500,offset=characterGainOffset(archive,group),shift=(group%6)*5;
+                    int packed=archive.data.getInt(offset);
+                    archive.data.putInt(offset,(packed&~(31<<shift))|((value&31)<<shift));
+                }else for(int[] field:AUDIO_FIELDS)if(id==field[0]){
+                    int offset=audioOffset(archive,field[1]);
+                    if(offset>=0)archive.data.putInt(offset,value);
+                }
+            }
+            for(int i=0;i<owners.length;i+=2){
+                int id=owners[i],value=owners[i+1];
+                if(id==0&&archive.has(FLAG2))archive.data.putInt(archive.at(FLAG2)+14*4,value);
+                if(id>=2&&id<34)archive.data.putInt(archive.at(DATA)+(382+id)*4,value);
+            }
+            if(fresh||!Arrays.equals(before,archive.bytes)){archive.stamp();commit(file,archive.bytes);}
+            return true;
+        }catch(InvalidFile invalid){
+            damaged=true;
+            LOG.warning(invalid.getMessage());
+            return false;
+        }
     }
 
     void write(GameProgress.State state,int[] gallery) throws IOException {
