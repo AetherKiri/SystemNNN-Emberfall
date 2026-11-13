@@ -444,23 +444,16 @@ Save parse_save(const std::vector<nnn::Byte>& bytes,std::string_view expected_he
         save.messages[i]=messages.text(header_size+i*save.message_width,save.message_width,i<static_cast<std::size_t>(active_messages));
 
     const auto& info=save.info;
-    const auto has_named_block=[&](std::uint32_t code,std::string_view name) {
-        const auto found=blocks.find(code);
-        return found!=blocks.end() && found->second.header.name==name;
-    };
     std::uint32_t ext_base=first_extension_code;
     if (info.extension_count>0) {
-        if (has_named_block(first_extension_code,"EXT1")) {
-            ext_base=first_extension_code;
-        } else if (!info.has_cutin && has_named_block(legacy_extension_code,"EXT1") &&
-                   (info.extension_count<2 || !info.has_log)) {
-            ext_base=legacy_extension_code;
-        } else if (!info.has_omake && !info.has_cutin && has_named_block(min_legacy_extension_code,"EXT1") &&
-                   (info.extension_count<3 || !info.has_log)) {
-            ext_base=min_legacy_extension_code;
-        } else {
-            invalid("missing or mislabeled EXT1 block");
+        bool found=false;
+        for (const auto& item:blocks) if (item.second.header.name=="EXT1") {
+            if (found || item.first<min_legacy_extension_code || item.first>UINT32_MAX-max_extensions)
+                invalid("ambiguous or invalid EXT1 block");
+            ext_base=item.first;
+            found=true;
         }
+        if (!found) invalid("missing or mislabeled EXT1 block");
     }
     save.extension_code_base=ext_base;
     const auto expected_ext_end=ext_base+static_cast<std::uint32_t>(info.extension_count);
@@ -500,8 +493,7 @@ Save parse_save(const std::vector<nnn::Byte>& bytes,std::string_view expected_he
         const auto& block=item.second;
         if (is_declared_ext(code) || code<=10) continue;
         if (code>=first_extension_code && code<=last_extension_code) invalid("undeclared extension block");
-        if (ext_base<first_extension_code && code<ext_base+max_extensions &&
-            block.header.name.compare(0,3,"EXT")==0) invalid("undeclared extension block");
+        if (block.header.name.compare(0,3,"EXT")==0) invalid("undeclared extension block");
         const auto size=block.view.size()-header_size;
         const auto* payload=block.view.at(header_size,size);
         save.unsupported_blocks.push_back({block.header,{payload,payload+size}});
@@ -512,9 +504,12 @@ Save parse_save(const std::vector<nnn::Byte>& bytes,std::string_view expected_he
 std::vector<nnn::Byte> write_save(const Save& save) {
     if (!save.unsupported_blocks.empty())
         invalid("cannot write unresolved PC state");
-    const bool valid_ext_base=save.extension_code_base==first_extension_code ||
-        (save.extension_code_base==legacy_extension_code && !save.cutin && (save.extensions.size()<2 || !save.log)) ||
-        (save.extension_code_base==min_legacy_extension_code && !save.omake && !save.cutin && (save.extensions.size()<3 || !save.log));
+    const auto occupies=[&](unsigned code) {
+        return code>=save.extension_code_base && code-save.extension_code_base<save.extensions.size();
+    };
+    const bool valid_ext_base=save.extension_code_base>=min_legacy_extension_code &&
+        save.extension_code_base<=UINT32_MAX-max_extensions &&
+        !(save.omake && occupies(8)) && !(save.cutin && occupies(9)) && !(save.log && occupies(10));
     if (save.header.name.empty() || (save.vars.size()!=1024 && save.vars.size()!=2224) ||
         (save.layer_records!=classic_layer_count && save.layer_records!=layer_count) ||
         (save.message_width!=legacy_message_width && save.message_width!=classic_message_width &&
