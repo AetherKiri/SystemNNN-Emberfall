@@ -763,20 +763,20 @@ void Layers::advance(std::uint32_t frames,Point cursor) {
     }
 }
 void Layers::prepare_overlap(const OverlapCapture& capture) {
-    if (capture && !output_.rgb.empty()) {
-        // The host UI belongs to the last displayed scene, not to any layers
-        // the script has changed since that scene was drawn.
-        previous_=output_;
-        if (capture(previous_)) return;
+    // PREPAREOVERRAP captures the outgoing frame before pending layer changes
+    // are drawn. A decorated endpoint already has its window and screen effect.
+    const auto& endpoint=!overlapping() && has_overlap_decoration() && !output_changed_
+        ? overlap_display_ : last_decorated_endpoint_;
+    if (!endpoint.rgb.empty()) {
+        previous_=endpoint;
+        return;
     }
-    previous_=surface();
+    previous_=!has_rendered_ && saved_background_ && !saved_.rgb.empty() ? saved_ : output_;
+    if (capture && !previous_.rgb.empty()) capture(previous_);
 }
 bool Layers::start_overlap(std::uint32_t frames,int type,const OverlapDecoration& decorate,
                            const OverlapCapture& capture) {
-    if (previous_.rgb.empty()) {
-        previous_=output_;
-        if (frames && capture && !previous_.rgb.empty()) capture(previous_);
-    }
+    if (frames && previous_.rgb.empty()) prepare_overlap(capture);
     overlap_display_={};
     compose(target_,decorate); overlap_time_=frames; overlap_count_=0; invalidate();
     const bool supported=supports_wipe(type);
@@ -790,6 +790,7 @@ void Layers::finish_overlap() {
 }
 void Layers::resume_overlap_scene() {
     if (!overlapping() && has_overlap_decoration()) {
+        if (!output_changed_) last_decorated_endpoint_=std::move(overlap_display_);
         overlap_display_={};
         output_changed_=true;
     }
@@ -906,12 +907,16 @@ void Layers::load_snapshot(nnn::snapshot::Reader& in,const std::function<std::sh
     if (decorated_overlap) read_surface(overlap_display_,false,false);
     if (inspect) return;
     std::fill(slots_.begin()+layer_count(),slots_.end(),Layer{});
-    if (rendered.rgb.empty()) dirty_=true;
+    last_decorated_endpoint_={};
+    has_rendered_=!rendered.rgb.empty();
+    if (!has_rendered_) dirty_=true;
     else output_=std::move(rendered);
     output_changed_=true; ++revision_;
 }
 const Surface& Layers::surface() {
     output_changed_=false;
+    last_decorated_endpoint_={};
+    has_rendered_=true;
     if (!overlapping() && has_overlap_decoration()) return overlap_display_;
     if (!dirty_) return output_;
     if (!overlapping()) compose(output_);

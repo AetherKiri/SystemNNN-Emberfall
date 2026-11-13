@@ -141,13 +141,14 @@ private:
     Layers()=default;
     std::array<Layer,32> slots_;
     TextureReader animation_textures_;
-    Surface output_, previous_, target_, saved_, overlap_display_;
+    Surface output_, previous_, target_, saved_, overlap_display_, last_decorated_endpoint_;
     std::uint32_t overlap_time_ = 0, overlap_count_ = 0;
     int overlap_type_=0;
     unsigned screen_slot_=31;
     std::uint32_t hidden_ = 0;
     std::uint64_t revision_=0;
     bool dirty_ = true;
+    bool has_rendered_ = false;
     bool saved_background_ = false;
     bool animation_off_ = false, speaking_ = false;
     bool capture_screen_layer_ = false;
