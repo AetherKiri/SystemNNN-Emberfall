@@ -1,0 +1,248 @@
+#!/usr/bin/env python3
+"""Inventory game setup fields and report the evidence for their behavior."""
+
+import argparse
+from bisect import bisect_right
+from collections import Counter, defaultdict
+from functools import lru_cache
+import json
+from pathlib import Path
+import re
+import sys
+
+
+REPO = Path(__file__).resolve().parents[3]
+MAX_SETUP_BYTES = 4 * 1024 * 1024
+FXF = bytes(byte ^ 255 for byte in range(256))
+SETUP_LINE = re.compile(rb"^[ \t]*([A-Za-z0-9_]+)[ \t]+(.*)$")
+CPP_TOKEN = re.compile(r'"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|//[^\n]*|/\*.*?\*/', re.S)
+KEY_ARG = r'(?:"(?P<literal>[A-Za-z0-9_]+)"|(?P<buffer>[A-Za-z_]\w*))'
+LOOKUP = re.compile(r"\bGetInitGame(?:Param|String)\d*\s*\(\s*[^,;()\n]+,\s*" + KEY_ARG + r"\s*[,)]")
+FORMAT = re.compile(
+    r'\b(?:wsprintfA?|sprintf(?:_s)?|snprintf|_snprintf(?:_s)?)\s*'
+    r'\(\s*(?P<buffer>[A-Za-z_]\w*)\s*,[^;\n"]*"(?P<format>[A-Za-z0-9_%]+)"'
+)
+PLACEHOLDER = re.compile(r"%[0-9]*(?:[diu]|s)")
+
+# Status applies to this field in this setup file. Verify runtime behavior
+# independently of spelling matches in either codebase.
+REVIEWED = {
+    ("game", "layerexpand"): ("SUPPORTED", "Layer and PC-slot geometry tests"),
+    ("game", "frametime"): ("SUPPORTED", "Story and background clock tests"),
+    ("game", "maxskipframe"): ("SUPPORTED", "Bounded frame repayment test"),
+    ("game", "maxskipframebackscript"): ("SUPPORTED", "Decorative pacing test"),
+    ("game", "skipadjustframe"): ("SUPPORTED", "Decorative pacing test"),
+    ("config", "extseflag"): ("SUPPORTED", "Themed configuration feedback test"),
+    ("config", "useconfigsevoice"): ("SUPPORTED", "Themed configuration feedback test"),
+    ("config", "voicesamebufferflag"): ("SUPPORTED", "Themed configuration feedback test"),
+    ("config", "soundsenumber"): ("SUPPORTED", "Themed configuration feedback test"),
+    ("config", "voicesenumber"): ("SUPPORTED", "Themed configuration feedback test"),
+    ("config", "voiceisvoice"): ("SUPPORTED", "Themed configuration feedback test"),
+    ("printmessage", "drawoverrapoptionflag"): ("SUPPORTED", "GameStoryControlsTest"),
+    ("printmessage", "drawwindowwithmessageflag"): ("SUPPORTED", "Message visibility during wipes"),
+    ("printmessage", "lprintbgmode"): ("SUPPORTED", "Long-print background tests"),
+    ("maincontrol", "mutexname"): ("PC_WINDOW_ONLY", "Windows CreateMutex name"),
+    ("maincontrol", "checkmutexflag"): ("PC_WINDOW_ONLY", "Windows CreateMutex startup check"),
+    ("game", "vistacheck"): ("PC_WINDOW_ONLY", "Windows version check"),
+    ("game", "f9keyexitoffflag"): ("PC_WINDOW_ONLY", "Windows F9 exit shortcut"),
+    ("config", "muststartpage1flag"): (
+        "PARTIAL", "A zero value lets PC retain the last page. Android always opens page 1"
+    ),
+    ("printmessage", "fullmessagenumber"): (
+        "UNSUPPORTED_BEHAVIOR", "PC uses this limit to scroll long-print rows in CommonPrintMessage"
+    ),
+    ("selectcg", "filenamedifferencefont"): (
+        "UNSUPPORTED_BEHAVIOR", "PC CG difference counter uses the configured digit atlas, Android draws text"
+    ),
+    ("listenbgm", "cannotcolorr"): ("UNSUPPORTED_BEHAVIOR", "PC uses this RGB component for locked BGM labels"),
+    ("listenbgm", "cannotcolorg"): ("UNSUPPORTED_BEHAVIOR", "PC uses this RGB component for locked BGM labels"),
+    ("listenbgm", "cannotcolorb"): ("UNSUPPORTED_BEHAVIOR", "PC uses this RGB component for locked BGM labels"),
+}
+
+
+def mask_cpp_tokens(source, retain_literals=True):
+    def mask(match):
+        token = match[0]
+        if retain_literals and not token.startswith("/"):
+            return token
+        return re.sub(r"[^\n]", " ", token)
+
+    return CPP_TOKEN.sub(mask, source)
+
+
+def source_text(path):
+    raw = path.read_bytes()
+    try:
+        return raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return raw.decode("cp932", errors="replace")
+
+
+def format_pattern(template):
+    parts = PLACEHOLDER.split(template.lower())
+    if len(parts) == 1 or any("%" in part for part in parts):
+        return None
+    substitutions = [
+        "[a-z0-9_]+" if match[0].endswith("s") else "[0-9]+"
+        for match in PLACEHOLDER.finditer(template)
+    ]
+    # A format with no fixed text offers no useful evidence.
+    if not any(parts):
+        return None
+    pattern = re.escape(parts[0])
+    for substitution, suffix in zip(substitutions, parts[1:]):
+        pattern += substitution + re.escape(suffix)
+    return re.compile(pattern)
+
+
+def upstream_keys(root):
+    literal = defaultdict(set)
+    formats = defaultdict(set)
+    for path in sorted(root.glob("nnn*Lib/**/*.cpp")):
+        source = mask_cpp_tokens(source_text(path))
+        if "GetInitGame" not in source:
+            continue
+        code = mask_cpp_tokens(source, retain_literals=False)
+        calls = [match for match in LOOKUP.finditer(source) if code[match.start()] != " "]
+        line_starts = [0, *(m.end() for m in re.finditer("\n", source))]
+        writes = defaultdict(list)
+        for match in FORMAT.finditer(source):
+            if code[match.start()] != " ":
+                writes[match["buffer"]].append((match.start(), match["format"]))
+        name = path.relative_to(root).as_posix()
+        for call in calls:
+            site = f"{name}:{bisect_right(line_starts, call.start())}"
+            if call["literal"]:
+                literal[call["literal"].lower()].add(site)
+                continue
+            candidates = writes[call["buffer"]]
+            index = bisect_right(candidates, (call.start(), "")) - 1
+            if index >= 0:
+                position, template = candidates[index]
+                if call.start() - position <= 512 and format_pattern(template):
+                    formats[template].add(site)
+    if not literal:
+        raise ValueError(f"No upstream config readers found in {root}")
+    return literal, formats
+
+
+def setup_files(root):
+    """Resolve an encrypted setup in preference to the corresponding XTX."""
+    folders = {}
+    for path in sorted(root.iterdir(), key=lambda p: p.name):
+        if path.is_dir() and path.name.lower() in ("init", "init2"):
+            name = path.name.lower()
+            if name not in folders or path.name == name:
+                folders[name] = path
+    selected = {}
+    for folder, suffix in (("init", ".xtx"), ("init2", ".fxf")):
+        directory = folders.get(folder)
+        if directory is None:
+            continue
+        entries = {}
+        for path in sorted(directory.iterdir(), key=lambda p: p.name):
+            if path.is_file() and path.suffix.lower() == suffix:
+                entries.setdefault(path.stem.lower(), path)
+        selected.update(entries)
+    return sorted(selected.items())
+
+
+def setup_fields(path):
+    with path.open("rb") as stream:
+        raw = stream.read(MAX_SETUP_BYTES + 1)
+    if len(raw) > MAX_SETUP_BYTES:
+        raise ValueError(f"Setup exceeds the engine's text limit: {path}")
+    if path.suffix.lower() == ".fxf":
+        raw = raw.translate(FXF)
+    fields = {}
+    for number, line in enumerate(re.split(rb"\r\n?|\n", raw.split(b"\0", 1)[0]), 1):
+        match = SETUP_LINE.fullmatch(line)
+        if match is None:
+            continue
+        name, value = match.groups()
+        key = name.decode("ascii")
+        value = value.strip(b" \t")
+        state = "empty" if not value else "zero" if re.fullmatch(rb"[+-]?0+", value) else "set"
+        fields.setdefault(key.lower(), (key, number, state))
+    return fields
+
+
+def game_report(root, lookup):
+    files = setup_files(root)
+    if not files:
+        raise ValueError(f"No init/*.xtx or init2/*.fxf in {root}")
+    rows = []
+    for stem, path in files:
+        for key, (spelling, line, value) in setup_fields(path).items():
+            evidence = lookup(key)
+            status, behavior = REVIEWED.get((stem, key), ("REVIEW" if evidence else "UNKNOWN", ""))
+            rows.append({
+                "key": spelling, "file": path.relative_to(root).as_posix(), "line": line,
+                "value": value, "status": status, "behavior": behavior, "upstream": evidence,
+            })
+    return {"game": root.name, "setup_files": len(files),
+            "status_counts": dict(Counter(row["status"] for row in rows)), "fields": rows}
+
+
+def discover(directory):
+    def has_scripts(root):
+        return any(path.name.lower() == "spt" and path.is_dir() for path in root.iterdir())
+
+    for child in sorted(path for path in directory.iterdir() if path.is_dir()):
+        if has_scripts(child):
+            yield child
+            continue
+        for nested in sorted(path for path in child.iterdir() if path.is_dir()):
+            if has_scripts(nested):
+                yield nested
+
+
+def audit(roots, source):
+    literal, formats = upstream_keys(source)
+    patterns = [(format_pattern(template), template, sorted(sites)) for template, sites in sorted(formats.items())]
+
+    @lru_cache(maxsize=None)
+    def evidence(key):
+        if key in literal:
+            return {"literal": sorted(literal[key])}
+        candidates = {name: sites for pattern, name, sites in patterns if pattern.fullmatch(key)}
+        return {"formats": candidates} if candidates else {}
+
+    return {"upstream_literal_keys": len(literal), "upstream_format_candidates": len(formats),
+            "upstream_catalog": {
+                "literal": {name: sorted(sites) for name, sites in sorted(literal.items())},
+                "formats": {name: sorted(sites) for name, sites in sorted(formats.items())},
+            },
+            "games": [game_report(root, evidence) for root in roots]}
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("game", type=Path, nargs="*", help="game root(s)")
+    parser.add_argument("--discover", type=Path, help="find game roots up to two levels under this folder")
+    parser.add_argument("--upstream", type=Path, default=REPO / "upstream/SystemNNN")
+    parser.add_argument("--json", action="store_true", help="show all fields with their source lines")
+    args = parser.parse_args()
+    try:
+        discovered = discover(args.discover) if args.discover else ()
+        roots = list(dict.fromkeys(p.resolve() for p in [*args.game, *discovered]))
+        if not roots:
+            parser.error("specify at least one game directory or --discover")
+        report = audit(roots, args.upstream)
+    except (OSError, ValueError) as error:
+        parser.exit(1, f"{error}\n")
+    if args.json:
+        # Keep the report portable even when the console has a legacy encoding.
+        json.dump(report, sys.stdout, indent=2)
+        print()
+        return
+    for game in report["games"]:
+        counts = ", ".join(f"{status}={count}" for status, count in sorted(game["status_counts"].items()))
+        print(f'{game["game"]}: {game["setup_files"]} setup files, {counts}')
+        for row in game["fields"]:
+            if row["status"] in ("UNSUPPORTED_BEHAVIOR", "PARTIAL"):
+                print(f'  {row["file"]}:{row["line"]} {row["key"]} ({row["value"]}) - {row["behavior"]}')
+
+
+if __name__ == "__main__":
+    main()
