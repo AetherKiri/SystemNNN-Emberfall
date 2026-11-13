@@ -1769,6 +1769,12 @@ API jboolean JNICALL FN(skipActive)(JNIEnv* env,jclass,jlong handle) {
     try { return player(handle).game->skip_active() ? JNI_TRUE : JNI_FALSE; }
     catch (const std::exception& e) { fail(env,e.what()); return JNI_FALSE; }
 }
+API jint JNICALL FN(storyModes)(JNIEnv* env,jclass,jlong handle) {
+    try {
+        const auto& game=*player(handle).game;
+        return (game.get_system_parameter(nnn::NNNPARAM_AUTOMODE)!=0 ? 1 : 0) | (game.skip_active() ? 2 : 0);
+    } catch (const std::exception& e) { fail(env,e.what()); return 0; }
+}
 API void JNICALL FN(setCtrlSkip)(JNIEnv* env,jclass,jlong handle,jboolean enabled) {
     try { player(handle).game->set_ctrl_skip(enabled==JNI_TRUE); }
     catch (const std::exception& e) { fail(env,e.what()); }
