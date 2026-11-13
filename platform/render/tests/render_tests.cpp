@@ -197,7 +197,8 @@ void wipe_tests() {
     require(a.rgb[0]==(before.rgb[0]*after.rgb[0]>>8));
 
     Layers live(17,13),restored(17,13);
-    live.bind(0,first,false);live.prepare_overlap();live.bind(0,second,false);
+    live.bind(0,first,false);require(live.surface().rgb==before.rgb);
+    live.prepare_overlap();live.bind(0,second,false);
     require(live.start_overlap(16,39));live.advance(5);
     nnn::snapshot::Writer saved;live.save_snapshot(saved);
     nnn::snapshot::Reader reader(saved.bytes);
@@ -1405,6 +1406,39 @@ int main() {
     }
     screen_effects();character_colors();movement_effects();composition_effects();blur_effects();easing_tests();mask_presence_tests();rain4_tests();rain2_tests();suna_tests();firefly_tests();chara_noise_tests();rain_tests();old_firefly_tests();chara_ghost_tests();zoom_tests();mask_appear_tests();zantetsu_tests();water_tests();kagerou_tests();raster_tests();old_film_tests();old_lamp_tests();mask_wipe_tests();perspective_tests();shard_tests();
     screen_layer_over_messages(16);screen_layer_over_messages(32);native_background_slots();wipe_tests();
+    {
+        // Resuming the script must keep a displayed decorated endpoint
+        // available until the next frame is drawn.
+        Layers layers(1,1);
+        require(layers.effect(0,54,{0,64,0,0}));
+        require(layers.start_overlap(1,0,[](Surface& frame) { frame.rgb={0,64,64}; }));
+        layers.advance(1);
+        const auto displayed=layers.surface().rgb;
+        require(displayed==std::vector<Byte>({0,64,64}));
+        layers.resume_overlap_scene();
+        require(layers.effect(0,54,{0,64,0,0}));
+        layers.prepare_overlap();
+        require(layers.start_overlap(2));
+        require(layers.surface().rgb==displayed);
+        layers.advance(2);
+        require(layers.surface().rgb==std::vector<Byte>({64,0,0}));
+        layers.resume_overlap_scene();
+        layers.prepare_overlap();
+        require(layers.start_overlap(2));
+        require(layers.surface().rgb==std::vector<Byte>({64,0,0}));
+    }
+    {
+        // A new menu preview can start from the screen supplied by the host.
+        Layers layers(1,1);
+        const Surface background{1,1,{64,0,0}};
+        layers.saved_screen(background,true);
+        require(layers.effect(0,54,{0,0,64,0}));
+        layers.prepare_overlap();
+        require(layers.start_overlap(2));
+        require(layers.surface().rgb==background.rgb);
+        layers.advance(2);
+        require(layers.surface().rgb==std::vector<Byte>({0,64,0}));
+    }
     geometry_effects();animation_effects();condensation_effect();
     std::printf("PASS compositor: %u assertions\n", checks);
 }
