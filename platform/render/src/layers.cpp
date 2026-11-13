@@ -764,15 +764,16 @@ void Layers::advance(std::uint32_t frames,Point cursor) {
 }
 void Layers::prepare_overlap(const OverlapCapture& capture) {
     // PREPAREOVERRAP captures the outgoing frame before pending layer changes
-    // are drawn. A decorated endpoint already has its window and screen effect.
+    // are drawn. The host may have displayed new text over the same native scene.
+    const auto& scene=!has_rendered_ && saved_background_ && !saved_.rgb.empty() ? saved_ : output_;
     const auto& endpoint=!overlapping() && has_overlap_decoration() && !output_changed_
         ? overlap_display_ : last_decorated_endpoint_;
-    if (!endpoint.rgb.empty()) {
-        previous_=endpoint;
+    if (!capture || scene.rgb.empty()) {
+        previous_=endpoint.rgb.empty() ? scene : endpoint;
         return;
     }
-    previous_=!has_rendered_ && saved_background_ && !saved_.rgb.empty() ? saved_ : output_;
-    if (capture && !previous_.rgb.empty()) capture(previous_);
+    previous_=scene;
+    if (!capture(previous_) && !endpoint.rgb.empty()) previous_=endpoint;
 }
 bool Layers::start_overlap(std::uint32_t frames,int type,const OverlapDecoration& decorate,
                            const OverlapCapture& capture) {
