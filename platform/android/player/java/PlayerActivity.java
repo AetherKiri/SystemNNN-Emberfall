@@ -565,7 +565,7 @@ public final class PlayerActivity extends Activity implements GameRunner.Listene
         if(typing!=printing){typing=printing;updateVisibility();}
         else storyPlane.schedulePush();
     });}
-    @Override public void parameters(int[] raw,int[] display,int[] auxiliary){runOnUiThread(()->{
+    @Override public void parameters(int[] display,int[] auxiliary){runOnUiThread(()->{
         pendingDisplay=display;pendingAuxiliary=auxiliary;ui.removeCallbacks(syncRuntimeDisplay);ui.post(syncRuntimeDisplay);
     });}
     private final Runnable syncRuntimeDisplay=new Runnable(){public void run(){
@@ -1798,7 +1798,7 @@ public final class PlayerActivity extends Activity implements GameRunner.Listene
             GameUiAssets.Config config=saving?uiAssets.save:uiAssets.load;
             Runnable back=()->leaveOriginalPanel(config);
             gameSlots=new GameSlotsPanel(this,uiAssets,saving,runner.slotEntries(),runner.lastSelectedSlot(),this::systemClick,back,slot->{
-                if(saving){storyPlane.flushForCapture();runner.saveSlot(slot);}
+                if(saving)runner.saveSlot(slot);
                 else{
                     GameUiPanel panel=gamePanel;
                     panel.leave(config,false,(picture,filled)->{
@@ -1833,8 +1833,8 @@ public final class PlayerActivity extends Activity implements GameRunner.Listene
             button.setEnabled(savingSlots||entry.exists&&!entry.corrupt);
             button.setSoundEffectsEnabled(false);button.setOnClickListener(clicked(v -> {
                 if(savingSlots && entry.exists){AlertDialog confirm=new AlertDialog.Builder(this).setTitle("覆盖"+entry.label()+"？").setMessage(detail)
-                    .setNegativeButton("取消",dialogClick(null)).setPositiveButton("覆盖保存",dialogClick((d,which) -> {storyPlane.flushForCapture();runner.saveSlot(entry.slot);})).create();showPanel(confirm);}
-                else if(savingSlots){storyPlane.flushForCapture();runner.saveSlot(entry.slot);}
+                    .setNegativeButton("取消",dialogClick(null)).setPositiveButton("覆盖保存",dialogClick((d,which) -> runner.saveSlot(entry.slot))).create();showPanel(confirm);}
+                else if(savingSlots)runner.saveSlot(entry.slot);
                 else {runner.loadSlot(entry.slot);slotsDialog.dismiss();}
             }));slotRows.addView(button,new LinearLayout.LayoutParams(-1,-2));
         }
