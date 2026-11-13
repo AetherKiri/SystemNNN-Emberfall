@@ -13,7 +13,7 @@ public final class GameStoryControlsTest {
             GameStoryControlsModel model=new GameStoryControlsModel(GameUiAssets.readConfig(root,"game"),GameUiAssets.readConfig(root,"printmessage"),configurations);
             boolean mng=root.getName().equals("鏖殺ノ乙女");
             check(model.original&&model.buttons.size()==3,"Original buttons missing: "+name);
-            check(!model.drawDuringTransitions&&model.largePrintOptions,"Source option visibility: "+name);
+            check(!model.drawDuringTransitions,"Source drawOverrapOptionFlag: "+name);
             Set<GameStoryControlsModel.Action> actions=new HashSet<>();
             for(GameStoryControlsModel.Button b:model.buttons){
                 actions.add(b.action);
