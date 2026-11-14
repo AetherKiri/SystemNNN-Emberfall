@@ -59,7 +59,7 @@ void channels(const Path& root) {
     mix.set_character_slider("AA",5);
     send(mix,voice,{0,0,-20},"AA020001"); // Pack offset zero is a valid member.
     send(mix,voice,{0,1},"ee020001");
-    send(mix,voice,{0,2,0,1},"aa081006"); // Loose chapter patch.
+    send(mix,voice,{0,2,0,1,0,0,0,0,0,0,0,0,1},"aa081006"); // Loose chapter patch, explicitly mixed with the same role.
     send(mix,voice,{0,3,0,1},"01_ok01"); // System voice fallback.
     auto st=mix.state();
     check(st.voices[0].volume==70 && st.voices[2].volume==90,"charaname role volume");
@@ -107,7 +107,7 @@ void live_volumes(const Path& root) {
         send(*audio,music,{2,0,-10,0,0});
         send(*audio,voice,{0,0,-20},"AA020001");
         send(*audio,voice,{0,1},"ee020001");
-        send(*audio,voice,{0,2,0,1},"aa081006");
+        send(*audio,voice,{0,2,0,1,0,0,0,0,0,0,0,0,1},"aa081006");
         send(*audio,voice,{0,3,0,1},"01_ok01");
         send(*audio,sound,{0,7,10,1});
         check(audio->play_system_se(0).empty(),"Live UI SE could not start");

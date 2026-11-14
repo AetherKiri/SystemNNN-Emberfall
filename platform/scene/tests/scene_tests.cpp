@@ -3284,6 +3284,109 @@ int main(){
         require(audio.pc_state().voices[2][0]==0 && audio.pc_state().voice_names[2]=="line",
             "PCM retirement lost the completed stop or current-message voice name");
     });
+    suite.test("configured same-character script voices queue effects and preserve other roles",[]{
+        using nnn::audio::GameAudio;
+        Model model;model.message=true;
+        model.strings.push_back("AA_effect");
+        model.code.voice();model.code.add({6,system_function,nnn::audio::voice,2,5,2});
+        model.code.print(1);model.code.print(2);model.code.end();
+        TempGame temp(model);
+        temp.text("spt/charaname.xtx","0,header\naa,First\nbb,Second\n");
+        temp.write("cdvaw/aa/aa_voice.vaw",pcm_vaw(1,44100,8,{138,148,158,168}));
+        temp.write("cdvaw/aa/aa_effect.vaw",pcm_vaw(1,44100,8,{168,178,188,198}));
+        temp.write("cdvaw/bb/bb_effect.vaw",pcm_vaw(1,44100,8,{178,188,198,208}));
+        const auto voice=[](GameAudio& audio,int channel,const char* name,bool loop=false,bool no_wait=false,
+                            nnn::audio::AudioGate gate={},int number=1,int gain=0) {
+            nnn::SystemEvent cue;cue.opcode=nnn::audio::voice;if(name)cue.text=name;
+            cue.parameters={name?number:-1,channel,gain,loop?1:0,0,0,0,0,0,0,0,0,no_wait?1:0};
+            require(audio.submit(cue,"spt/sys.spt",0,gate).empty(),"Script voice fixture failed");
+        };
+        const auto control=[](GameAudio& audio,Word op,std::vector<nnn::Value> values) {
+            nnn::SystemEvent cue;cue.opcode=op;cue.parameters=std::move(values);
+            require(audio.submit(cue).empty(),"Script voice control failed");
+        };
+        const auto pull=[](GameAudio& audio,std::size_t frames) {
+            std::vector<std::int16_t> pcm(frames*2);audio.pull(pcm.data(),frames);return pcm;
+        };
+        GameAudio legacy(temp.root);voice(legacy,0,"aa_voice");voice(legacy,2,"aa_effect",true);
+        require(legacy.state().voices[0].active && legacy.state().voices[2].active,"Unconfigured game lost its existing mix");
+
+        temp.text("init/game.xtx","checkSameCharaMustChannel1 0\n");
+        GameAudio paired(temp.root);voice(paired,0,"aa_voice");voice(paired,3,"aa_effect",true);
+        require(paired.state().voices[3].active,"Paired policy stopped an unpaired effect");
+        voice(paired,1,"AA_voice");
+        require(!paired.state().voices[3].active && paired.pc_state().voices[3][0]==1,"Paired main voice did not interrupt its looping effect");
+
+        temp.text("init/game.xtx","checkSameCharaMustChannel1 1\nplayLoadVoiceFlag 3\nsaveLog 0\n");
+        scene::GameSession game(temp.root,test_options());
+        require(game.step_frame(0).wait==scene::Wait::Dialogue && game.audio().state().voices[0].active &&
+            !game.audio().state().voices[2].active,"Scripted effect was audible alongside its same-character line");
+        nnn::audio::Settings audio_options;audio_options.directsound_gain=!game.runtime()->routing().use_xaudio2;
+        GameAudio main_only(temp.root,audio_options);main_only.set_volumes(80,80,game.audio().state().voices[0].volume,80);
+        voice(main_only,0,"aa_voice");
+        require(pull(game.audio(),4)==pull(main_only,4),"Waiting effect leaked into the active dialogue's PCM");
+        game.step_frame(0);
+        require(game.audio().state().voices[2].active && !game.audio().state().voices[2].looping &&
+            game.audio().state().voices[2].source_frame==0,"Dialogue tick did not start the waiting one-shot from its beginning");
+        pull(game.audio(),4);game.step_frame(0);
+        require(!game.audio().state().voices[2].active,"A completed queued one-shot restarted");
+
+        GameAudio audio(temp.root);
+        voice(audio,3,"bb_effect",true);voice(audio,0,"aa_voice");
+        voice(audio,3,"AA_effect",true,false,{},4,-6);
+        require(audio.state().voices[3].name=="bb_effect", "An eligible different-character effect was cut off before replacement");
+        control(audio,nnn::audio::next_fade_voice,{5});control(audio,nnn::audio::volume_voice,{3,-18});
+        const auto pending=audio.pc_state();
+        require(pending.voice_names[3]=="aa_effect" && pending.voices[3][0]==1 && pending.voices[3][1]==4 &&
+            pending.voices[3][2]==-18 && pending.voice_exist_count[3]==2,"New waiting effect did not own the exported channel work");
+        nnn::snapshot::Writer snapshot;audio.save_snapshot(snapshot);
+        nnn::snapshot::Reader inspection(snapshot.bytes);GameAudio::inspect_snapshot(inspection);
+        nnn::snapshot::Reader in(snapshot.bytes);GameAudio restored(temp.root);restored.load_snapshot(in);
+        require(in.remaining()==0 && restored.state().voices[3].name=="bb_effect" &&
+            restored.pc_state().voices==pending.voices,"Restored native audio lost the running and waiting effects");
+        pull(restored,4);restored.advance_script_voices();
+        require(restored.state().voices[3].name=="aa_effect" && restored.state().voices[3].source_frame==0 &&
+            !restored.state().voices[3].fading,"Waiting effect failed to replace the old PCM or reused NEXTFADE");
+        pull(restored,2);voice(restored,0,"aa_voice");
+        require(!restored.state().voices[3].active && restored.pc_state().voices[3][0]==1,"New dialogue lost a previously playing effect's loop");
+        pull(restored,4);restored.advance_script_voices();
+        require(restored.state().voices[3].source_frame==0 && restored.state().voices[3].looping,"Interrupted loop did not restart from the beginning");
+        voice(restored,3,"aa_effect",true,true);pull(restored,2);voice(restored,3,"AA_effect",true,true,{},9,-9);
+        voice(restored,0,"aa_voice");
+        require(restored.state().voices[3].source_frame==2 && restored.pc_state().voices[3][1]==9,
+            "No-wait same-name request restarted PCM, lost work, or joined the pool");
+
+        audio.stop_script_audio();voice(audio,3,"bb_effect",true);voice(audio,0,"aa_voice");
+        voice(audio,3,"aa_effect",true);voice(audio,0,"aa_voice");
+        require(!audio.state().voices[3].active,"Repeated dialogue did not check the effect slot's newest voice name");
+
+        audio.stop_script_audio();voice(audio,3,"aa_effect",true,false,{},1,60);voice(audio,0,"aa_voice");
+        audio.set_volumes(80,80,80,20);pull(audio,4);audio.advance_script_voices();
+        require(audio.state().voices[3].volume==80 && audio.pc_state().voices[3][2]==60,
+            "A clipped volume lost its original delta when the effect resumed at a lower category volume");
+        audio.set_volumes(80,80,80,80);
+
+        const auto restart=[&] {
+            audio.stop_script_audio();voice(audio,0,"aa_voice");voice(audio,3,"aa_effect",true);
+        };
+        restart();control(audio,nnn::audio::volume_voice,{3,-100});
+        require(audio.pc_state().voices[3][2]==0,"An inactive pooled effect accepted VOLUMEONLY");
+        audio.set_character_volume(0,0,false);pull(audio,4);audio.advance_script_voices();
+        audio.set_character_volume(0,0,true);audio.advance_script_voices();
+        require(!audio.state().voices[3].active,"A pending effect ignored the live role switch or played after it was reenabled");
+        restart();audio.suspend_script_audio();audio.advance_script_voices();
+        require(pull(audio,1)==std::vector<std::int16_t>{0,0},"A waiting effect leaked into the menu");
+        audio.restart_loop_script_audio();
+        require(audio.state().voices[3].looping && audio.state().voices[3].source_frame==0,"Resuming the menu discarded its pending loop");
+        audio.advance_script_voices();
+        require(audio.state().voices[3].looping,"The first resumed story tick lost its loop");
+        restart();voice(audio,3,nullptr);pull(audio,4);audio.advance_script_voices();
+        require(!audio.state().voices[3].active && audio.pc_state().voices[3][0]==0,"Explicit VOICE stop left the old pending effect armed");
+        restart();voice(audio,3,"bb_effect",true,false,{true,false,false,false});pull(audio,4);audio.advance_script_voices();
+        require(!audio.state().voices[3].active && audio.pc_state().voice_exist_count[3]==0,"Skip restored a cancelled pending effect");
+        restart();voice(audio,3,"bb_effect",true);pull(audio,4);audio.advance_script_voices();
+        require(audio.state().voices[3].name=="bb_effect","Replacement left the old waiting effect eligible to play");
+    });
     suite.test("muted voices retain the same PC role-adjusted replay parameters",[]{
         Model model;model.code.end();TempGame temp(model);
         temp.text("spt/charaname.xtx","0,header\naa,Character\n");
