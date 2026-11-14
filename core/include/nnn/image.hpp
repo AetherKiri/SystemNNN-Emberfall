@@ -53,7 +53,9 @@ ImageResult decode_jpeg(const Byte* bytes,std::size_t length);
 // Restricted, uncompressed, unmasked PACKTYPE=0 DWQ profile. No Win32 dependency.
 // The original text-only prefix supplies its dimensions through the embedded DIB.
 // The game loader treats the two embedded BMP sizes as advisory and validates
-// the complete padded row layout against the actual member bytes.
+// the complete padded row layout against the actual member bytes. As in the PC
+// reader, advisory mode ignores unused bytes after those rows; it never derives
+// an alpha mask from them. Exact mode requires the member to end with the rows.
 // Failed results always contain the default zero-sized, empty Image.
 enum class BitmapSizeFields { Exact, Advisory };
 ImageResult decode_dwq(const std::vector<Byte>& bytes, BitmapSizeFields sizes=BitmapSizeFields::Exact);

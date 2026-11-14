@@ -161,9 +161,13 @@ ImageResult decode(const std::vector<Byte>& bytes, BitmapSizeFields sizes) {
             return failure(ErrorCode::InvalidFormat, 98, "Bitmap image size disagrees with padded rows");
         }
     }
-    if (bytes.size() != total_bytes) {
-        return failure(ErrorCode::InvalidFormat, std::min(bytes.size(), total_bytes),
-                       bytes.size() < total_bytes ? "Truncated palette or pixel rows" : "Trailing DWQ payload is unsupported by this profile");
+    if (bytes.size() < total_bytes) {
+        return failure(ErrorCode::InvalidFormat, bytes.size(), "Truncated palette or pixel rows");
+    }
+    // PC LoadDWQData consumes the padded rows, then closes an unmasked type-0
+    // member. Any remaining bytes are unused, not an implicit alpha mask.
+    if (sizes == BitmapSizeFields::Exact && bytes.size() != total_bytes) {
+        return failure(ErrorCode::InvalidFormat, total_bytes, "Trailing DWQ payload is unsupported by this profile");
     }
 
     Image image;
