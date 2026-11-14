@@ -84,8 +84,15 @@ Color color(const Layer& l,std::size_t i,int def=0) {
 void tint(Surface& out,Color value,int alpha) {
     if (alpha<=0) return;
     const std::array<unsigned,3> c{channel(value[0]),channel(value[1]),channel(value[2])};
-    if (alpha>=255 && c[0]==c[1] && c[1]==c[2]) { std::fill(out.rgb.begin(),out.rgb.end(),static_cast<Byte>(c[0])); return; }
     const unsigned a=channel(alpha);
+    if (c[0]==c[1] && c[1]==c[2]) {
+        if (a==255) std::fill(out.rgb.begin(),out.rgb.end(),static_cast<Byte>(c[0]));
+        else {
+            const unsigned inverse=255U-a,bias=c[0]*a+127U;
+            for (auto& pixel:out.rgb) pixel=static_cast<Byte>((pixel*inverse+bias)/255U);
+        }
+        return;
+    }
     for (std::size_t i=0; i<out.rgb.size(); i+=3)
         for (unsigned j=0; j<3; ++j) out.rgb[i+j]=static_cast<Byte>((out.rgb[i+j]*(255U-a)+c[j]*a+127U)/255U);
 }
@@ -554,7 +561,7 @@ void Layers::set_message_plane(std::shared_ptr<const MessagePlane> plane,Overlap
     message_draw_screen_slot_=draw_screen_slot;
     if (!message_plane_active_) {
         message_plane_active_=true;
-        if (scene_base_.rgb.empty() && !overlapping()) dirty_=true;
+        if (story_output_.rgb.empty() && !overlapping()) dirty_=true;
         story_dirty_=true;
         ++revision_;
     } else if (changed) {
@@ -576,7 +583,8 @@ void Layers::clear_message_plane() noexcept {
 
 void Layers::compose_story(bool rebuild_scene) {
     const auto last=screen_slot_;
-    const bool draw_last=!(hidden_&(std::uint32_t{1}<<last));
+    const auto& layer=slots_[last];
+    const bool draw_last=!(hidden_&(std::uint32_t{1}<<last)) && layer.enabled && layer.effect!=66;
     if (rebuild_scene) {
         if (saved_background_ && !saved_.rgb.empty()) output_=saved_;
         else if (!keeps_once_pixels(slots_,hidden_,last)) std::fill(output_.rgb.begin(),output_.rgb.end(),0);
@@ -584,16 +592,16 @@ void Layers::compose_story(bool rebuild_scene) {
             if (!(hidden_&(std::uint32_t{1}<<i)))
                 draw(output_,slots_,i,last,saved_,saved_,animation_textures_,animation_off_,speaking_);
         screen_layer_.reset();
-        scene_base_=output_;
-        slot_last_once_before_=slots_[last].effect_state && slots_[last].effect_state->once_drawn;
+        slot_last_once_before_=layer.effect_state && layer.effect_state->once_drawn;
         if (draw_last) {
-            const auto& layer=slots_[last];
+            scene_base_=output_;
             if (layer.effect==73) draw_capture_picture(output_,layer);
             else draw(output_,slots_,last,last,saved_,saved_,animation_textures_,animation_off_,speaking_);
             if (layer.effect_state) layer.effect_state->once_drawn=slot_last_once_before_;
-        }
+        } else scene_base_.rgb.clear();
     }
-    story_output_=scene_base_;
+    // Without a final screen effect the plain scene already holds the UI base.
+    story_output_=scene_base_.rgb.empty()?output_:scene_base_;
     if ((!message_plane_ || message_plane_->show_backdrop) && message_backdrop_)
         message_backdrop_(story_output_);
     if (message_plane_ && !message_plane_->rgba.empty()) {
@@ -604,7 +612,6 @@ void Layers::compose_story(bool rebuild_scene) {
         blend_message_plane(story_output_,message_plane_->rgba.data(),message_plane_->stride);
     }
     if (draw_last && message_draw_screen_slot_) {
-        const auto& layer=slots_[last];
         if (layer.effect_state) layer.effect_state->once_drawn=slot_last_once_before_;
         draw(story_output_,slots_,last,last,saved_,saved_,animation_textures_,animation_off_,speaking_);
     }
@@ -620,7 +627,11 @@ void Layers::compose(Surface& out,const OverlapDecoration& decorate) {
     else std::fill(out.rgb.begin(),out.rgb.end(),0);
     for (unsigned i=0;i<last;++i)
         if (!(hidden_&(std::uint32_t{1}<<i))) draw(out,slots_,i,last,saved_,saved_,animation_textures_,animation_off_,speaking_);
-    if (&out==&output_) screen_layer_.reset();
+    if (&out==&output_) {
+        screen_layer_.reset();
+        scene_base_.rgb.clear();
+        story_output_.rgb.clear();
+    }
     if (decorate) {
         // Keep a plain endpoint for resuming the script. The wipe shows the PC
         // target with its message window below the final screen effect.
@@ -1037,11 +1048,11 @@ const Surface& Layers::surface() {
         }
         return output_;
     }
-    if (dirty_ || scene_base_.rgb.empty()) {
+    if (dirty_ || story_output_.rgb.empty()) {
         compose_story(true);
         dirty_=false;
         story_dirty_=false;
-    } else if (story_dirty_ || story_output_.rgb.empty()) {
+    } else if (story_dirty_) {
         compose_story(false);
         story_dirty_=false;
     }
