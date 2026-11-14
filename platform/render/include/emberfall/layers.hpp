@@ -92,6 +92,8 @@ class Layers {
 public:
     using TextureReader=std::function<std::shared_ptr<const Texture>(const std::string&)>;
     using OverlapDecoration=std::function<void(Surface&)>;
+    // The message background owns which parts remain visible when the user hides the UI.
+    using MessageDecoration=std::function<void(Surface&,bool)>;
     // Decorate the outgoing RGB frame. Return false without changing it when no host frame is available.
     using OverlapCapture=std::function<bool(Surface&)>;
     Layers(int width,int height,unsigned layer_count=32);
@@ -119,7 +121,7 @@ public:
     const Surface& scene_surface();
     // The scene-only counterpart of the just-composed story frame.
     const Surface& composed_scene() const noexcept { return output_; }
-    void set_message_plane(std::shared_ptr<const MessagePlane> plane,OverlapDecoration backdrop={},
+    void set_message_plane(std::shared_ptr<const MessagePlane> plane,MessageDecoration backdrop={},
                            bool draw_screen_slot=true);
     void clear_message_plane() noexcept;
     bool message_plane_active() const noexcept { return message_plane_active_; }
@@ -170,7 +172,7 @@ private:
     Surface output_, previous_, target_, saved_, overlap_display_, last_decorated_endpoint_;
     Surface scene_base_, story_output_, presented_;
     std::shared_ptr<const MessagePlane> message_plane_;
-    OverlapDecoration message_backdrop_;
+    MessageDecoration message_backdrop_;
     std::uint32_t overlap_time_ = 0, overlap_count_ = 0;
     int overlap_type_=0;
     unsigned screen_slot_=31;

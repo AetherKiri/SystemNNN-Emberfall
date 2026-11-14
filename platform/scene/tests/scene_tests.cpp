@@ -1752,6 +1752,7 @@ int main(){
         Model model;model.message=true;model.message_text="Alice\r\nFirst\r\nSecond";
         model.code.number(0x33330064U,{2,2}); // FACE
         model.code.number(0x33330065U,{2|(2U<<16U)}); // MUSTFACE on the right
+        model.code.number(0x3333001bU,{1,1}); // Hide the message window, not FACE.
         model.code.print(1);
         model.code.number(0x33330065U,{0});
         model.code.number(0x3333005bU,{1});
@@ -1772,7 +1773,7 @@ int main(){
         scene::GameSession game(temp.root,initialization_options());
         require(game.step_frame(0).wait==scene::Wait::Dialogue,"FACE did not reach the first line");
         auto visuals=game.dialogue_visuals();
-        require(visuals.portrait_depth==2 && visuals.portraits.size()==1 &&
+        require(!game.state().dialogue.window_visible && visuals.portrait_depth==2 && visuals.portraits.size()==1 &&
             visuals.portraits[0].image=="sys/ta_sys_face2__2" && visuals.portraits[0].x==220 &&
             visuals.portraits[0].frames==3,"forced face, pinned side, or expression atlas differs");
         const auto face_save=game.export_pc_save();
@@ -2449,6 +2450,27 @@ int main(){
         frame->composite(rgba.data(),std::size_t{frame->width()}*4,false);
         require(rgba[0]==100 && rgba[1]==100 && rgba[2]==100,"hidden window must leave the scene alone");
         require(game.surface().rgb[0]==100,"window decoration changed the native scene cache");
+    });
+    suite.test("Long message image precedes the filter and follows its own hide setting",[]{
+        for (const bool hide_image:{false,true}) {
+            Model model;model.message=true;
+            model.code.number(effect,{0,54,0,100,100,100});
+            model.code.add({6,command,0x22220002U,0,1,0});
+            model.code.end();
+            TempGame temp(model);
+            temp.write("sys/insert.dwq",asset("tiny_red"));
+            temp.text("init/printmessage.xtx","LPrintAddImageFlag 1\nFilenameLPrintImage insert\nLPrintBGMode 2\n"
+                "lprintBGMultiR 50\nlprintBGMultiG 50\nlprintBGMultiB 50\naddLPrintImageOffWithWindow "+
+                std::to_string(hide_image?1:0)+"\n");
+            scene::GameSession game(temp.root,test_options());
+            require(game.step_frame(0).wait==scene::Wait::Dialogue,"LPRINT not reached");
+            game.set_message_plane(nullptr);
+            require(game.surface().rgb==Bytes({127,0,0}),"LPrintBG did not filter the additional image");
+            auto hidden=std::make_shared<emberfall::render::MessagePlane>();hidden->show_backdrop=false;
+            game.set_message_plane(hidden);
+            require(game.surface().rgb==(hide_image?Bytes({100,100,100}):Bytes({255,0,0})),
+                "additional image did not honor addLPrintImageOffWithWindow independently of the backdrop");
+        }
     });
     suite.test("PREPAREOVERRAP keeps the last DRAW if host capture fails",[]{
         Model model;
@@ -3995,6 +4017,7 @@ int main(){
             "AdjustLoadBGM did not remap after SetVarByLoad restored non-zero gate variable");
     });
     suite.test("First movie exit color remains available until the next real presentation",[]{
+        for (const bool filled:{false,true}) {
         for (bool intermediate_yield:{false,true}) {
         Model model;
         model.code.number(effect,{0,54,0,200,0,0});
@@ -4008,7 +4031,8 @@ int main(){
         temp.text("spt/command.xtx","printmovie,0\n");
         temp.text("init/game.xtx","printmovieIsDefault 1\n");
         temp.text("spt/movielist.xtx","intro,Intro\n");
-        temp.text("init/printmovie.xtx","fillExitScreenFlag 1\nexitFadeOutColorR 12\nexitFadeOutColorG 34\nexitFadeOutColorB 56\nlastWait 0\n");
+        temp.text("init/printmovie.xtx","fillExitScreenFlag "+std::to_string(filled?1:0)+
+            "\nexitFadeOutColorR 12\nexitFadeOutColorG 34\nexitFadeOutColorB 56\nlastWait 0\n");
         scene::GameSession game(temp.root,test_options());
         scene::InputState interactive;interactive.play_movies=true;
         require(game.step_frame(0,interactive).wait==scene::Wait::Movie,"PRINTMOVIE did not yield to the host");
@@ -4019,8 +4043,43 @@ int main(){
             (void)game.surface(); // Inspection is not an acknowledgement of presentation.
             require(game.step_frame(20,finished).wait==scene::Wait::Overlap,"DRAW did not resume into the wipe");
         } else require(resumed==scene::Wait::Overlap,"movie did not resume into the wipe");
-        require(game.surface().rgb==Bytes({12,34,56}),"temporary cleanup erased the movie exit frame before capture");
+        require(game.surface().rgb==(filled?Bytes({12,34,56}):Bytes({0,0,0})),
+            "movie exit retained the old scene or erased the configured exit frame before capture");
         }
+        }
+    });
+    suite.test("A short retained DRAW waits for its own displayed plane before the next capture",[]{
+        Model model;model.message=true;
+        model.code.number(effect,{0,54,0,90,0,0});
+        model.code.print(1);
+        model.code.present(1);
+        model.code.number(0x33330011U,{});
+        model.code.number(effect,{0,54,0,0,0,90});
+        model.code.number(0x22220005U,{0,2});
+        model.code.end();
+        TempGame temp(model);temp.text("init/printmessage.xtx","drawWindowWithMessageFlag 1\n");
+        scene::GameSession game(temp.root,test_options());
+        scene::StoryCompositor compositor;
+        auto mailbox=compositor.mailbox();mailbox->set_attached(true);
+        using Outcome=scene::StoryCompositor::PresentOutcome;
+        const auto submit=[](const auto&){return true;};
+        require(game.step_frame(0).wait==scene::Wait::Dialogue,"first PRINT not reached");
+        const Bytes first{0,100,0,255};
+        mailbox->push(first.data(),4,1,1,game.expected_plane_key());
+        require(compositor.present(game,true,true,submit)==Outcome::Presented,"first PRINT not presented");
+        scene::InputState click;click.advance=true;
+        require(game.step_frame(0,click).wait==scene::Wait::Draw && game.state().remaining_frames==1,
+            "short DRAW not reached");
+        require(compositor.present(game,false,true,submit)==Outcome::SkippedPending && compositor.waiting_for_draw(game),
+            "old Dialogue plane must not authorize the retained DRAW timer");
+        const Bytes current{0,0,200,255};
+        mailbox->push(current.data(),4,1,1,game.expected_plane_key());
+        require(compositor.present(game,false,true,[](const auto&){return false;})==Outcome::SubmitFailed &&
+            compositor.waiting_for_draw(game),"failed surface submission acknowledged the short DRAW");
+        require(compositor.present(game,false,true,submit)==Outcome::Presented && !compositor.waiting_for_draw(game),
+            "ready DRAW did not release the presentation wait");
+        require(game.step_frame(game.frame_ms()).wait==scene::Wait::Overlap && game.surface().rgb==Bytes({0,0,200}),
+            "PREPAREOVERRAP lost the displayed short DRAW");
     });
     suite.test("PlaneMailbox replaces, removes and resizes the floating plane",[]{
         scene::PlaneMailbox mailbox;

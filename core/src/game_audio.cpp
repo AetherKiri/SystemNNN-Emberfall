@@ -701,6 +701,24 @@ struct GameAudio::Impl {
 GameAudio::GameAudio(const std::filesystem::path& root,Settings settings,const resource::FilenameEncoder& encode)
     :impl_(std::make_unique<Impl>(root,std::move(settings),encode)) {}
 GameAudio::~GameAudio()=default;
+void GameAudio::inherit_music(const GameAudio& previous) {
+    if (this==&previous) return;
+    auto& dest=*impl_;
+    const auto& source=*previous.impl_;
+    std::scoped_lock commands(dest.commands,source.commands);
+    std::scoped_lock mixer(dest.mixer,source.mixer);
+    if (dest.settings.sample_rate!=source.settings.sample_rate)
+        throw std::invalid_argument("Cannot inherit music at a different output sample rate");
+    dest.song=source.song;
+    dest.outgoing=source.outgoing;
+    dest.song.set_base(dest.settings.music_volume);
+    dest.outgoing.set_base(dest.settings.music_volume);
+    dest.song_paused=source.song_paused;
+    dest.last_music=source.last_music;
+    dest.current_music=source.current_music;
+    dest.muted_music_volume=source.muted_music_volume;
+    dest.next_music=source.next_music;
+}
 void GameAudio::stop_script_audio() {
     std::lock_guard<std::mutex> command(impl_->commands);
     std::lock_guard<std::mutex> lock(impl_->mixer);

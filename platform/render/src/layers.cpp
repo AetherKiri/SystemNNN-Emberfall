@@ -617,7 +617,7 @@ void ScreenLayerFrame::composite(Byte* pixels,std::size_t stride,bool show_backd
     }
 }
 
-void Layers::set_message_plane(std::shared_ptr<const MessagePlane> plane,OverlapDecoration backdrop,
+void Layers::set_message_plane(std::shared_ptr<const MessagePlane> plane,MessageDecoration backdrop,
                                bool draw_screen_slot) {
     const bool had_backdrop=static_cast<bool>(message_backdrop_);
     const bool has_backdrop=static_cast<bool>(backdrop);
@@ -669,8 +669,8 @@ void Layers::compose_story(bool rebuild_scene) {
     }
     // Without a final screen effect the plain scene already holds the UI base.
     story_output_=scene_base_.rgb.empty()?output_:scene_base_;
-    if ((!message_plane_ || message_plane_->show_backdrop) && message_backdrop_)
-        message_backdrop_(story_output_);
+    if (message_backdrop_)
+        message_backdrop_(story_output_,!message_plane_ || message_plane_->show_backdrop);
     if (message_plane_ && !message_plane_->rgba.empty()) {
         if (message_plane_->width!=width() || message_plane_->height!=height() ||
             message_plane_->stride<std::size_t{width()}*4 ||

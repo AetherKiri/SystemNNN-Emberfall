@@ -76,6 +76,7 @@ final class DialoguePanel extends FrameLayout implements StoryPlaneView.Host {
         if(directDraw!=value){directDraw=value;invalidate();}
     }
     boolean waitingCursorVisible(){return cursor.getVisibility()==VISIBLE;}
+    boolean textComplete(){return revealed>=message.length();}
     boolean portraitAnimating(){
         return getVisibility()!=GONE&&(belowWindow.moving()||aboveWindow.moving());
     }
@@ -177,7 +178,7 @@ final class DialoguePanel extends FrameLayout implements StoryPlaneView.Host {
         nameWindow.setVisibility(normal&&showWindow&&showNameWindow&&style.nameWindowEnabled?VISIBLE:GONE);
         speaker.setVisibility(normal&&!longPrint&&hasSpeaker?VISIBLE:GONE);
         body.setVisibility(normal?VISIBLE:GONE);
-        cutinLayer.setVisibility(!normal&&(showWindow||longPrint)?VISIBLE:GONE);
+        cutinLayer.setVisibility(!normal?VISIBLE:GONE);
         if(normal)cutinLayer.clear();
     }
     void message(String text,int visible){message(DialogueMarkup.plain(text),visible);}

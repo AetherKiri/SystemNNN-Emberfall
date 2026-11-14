@@ -3,6 +3,7 @@
 #include "frame_pixels.hpp"
 #include "resource_names_jni.hpp"
 #include "surface_binding.hpp"
+#include "native_window_buffer.hpp"
 #include "nnn/runtime_context.hpp"
 #include <android/native_window_jni.h>
 #include <android/log.h>
@@ -172,17 +173,18 @@ void copy_scene_rgba(const emberfall::render::Surface& src,std::uint8_t* row,std
         }
     }
 }
-void sync_story_plane(Player& p) {
-    if (p.title || !p.compositor.mailbox()->attached()) return;
+bool sync_story_plane(Player& p) {
+    if (p.title || !p.compositor.mailbox()->attached()) return true;
     if (!p.game->needs_message_plane()) {
         p.game->clear_message_plane();
-        return;
+        return true;
     }
     const auto snap=p.compositor.mailbox()->snapshot();
-    if (snap.has_plane && emberfall::scene::scene_plane_key_matches(snap.key,p.game->expected_plane_key()))
+    if (snap.has_plane && emberfall::scene::scene_plane_key_matches(snap.key,p.game->expected_plane_key())) {
         p.game->set_message_plane(snap.plane);
-    else
-        p.game->set_message_plane(nullptr);
+        return true;
+    }
+    return false;
 }
 jlong present(Player& p) {
     const bool visible=has_surface(p);
@@ -199,10 +201,14 @@ jlong present(Player& p) {
             }
             ANativeWindow_Buffer dst{};
             if (ANativeWindow_lock(window,&dst,nullptr)!=0) { p.repaint=true; return; }
-            if (dst.width==static_cast<int>(src.width) && dst.height==static_cast<int>(src.height) && dst.format==WINDOW_FORMAT_RGBA_8888) {
+            if (emberfall::android::rgba_window_buffer(dst,static_cast<int>(src.width),static_cast<int>(src.height))) {
                 copy_scene_rgba(src,static_cast<std::uint8_t*>(dst.bits),static_cast<std::size_t>(dst.stride)*4);
                 p.repaint=false;
-            } else p.repaint=true;
+            } else {
+                emberfall::android::clear_window_buffer(dst);
+                p.repaint=true;
+                p.window_geometry_pending=true;
+            }
             // The SurfaceTexture receives the native producer's monotonic timestamp.
             const auto now=std::chrono::steady_clock::now().time_since_epoch();
             if (ANativeWindow_unlockAndPost(window)!=0) p.repaint=true;
@@ -225,10 +231,13 @@ jlong present(Player& p) {
                 }
                 ANativeWindow_Buffer dst{};
                 if (ANativeWindow_lock(window,&dst,nullptr)!=0) return;
-                const bool copied=dst.width==static_cast<int>(src.width) &&
-                    dst.height==static_cast<int>(src.height) && dst.format==WINDOW_FORMAT_RGBA_8888;
+                const bool copied=emberfall::android::rgba_window_buffer(dst,static_cast<int>(src.width),static_cast<int>(src.height));
                 if (copied)
                     copy_scene_rgba(src,static_cast<std::uint8_t*>(dst.bits),static_cast<std::size_t>(dst.stride)*4);
+                else {
+                    emberfall::android::clear_window_buffer(dst);
+                    p.window_geometry_pending=true;
+                }
                 const auto now=std::chrono::steady_clock::now().time_since_epoch();
                 if (ANativeWindow_unlockAndPost(window)==0 && copied) {
                     posted=true;
@@ -534,6 +543,10 @@ void tick(JNIEnv* env,jlong handle,jint ms,jint x,jint y,jboolean advance,jint c
     try {
         const auto length=meta ? env->GetArrayLength(meta) : 0;
         if (length<7 || ms<0) throw std::invalid_argument("Invalid frame input");
+        if (length>=16) {
+            const jint executed=0;
+            env->SetIntArrayRegion(meta,15,1,&executed);
+        }
         const bool with_clock=length>=9;
         jint clock[2]{};
         if (replay && with_clock) {
@@ -568,6 +581,14 @@ void tick(JNIEnv* env,jlong handle,jint ms,jint x,jint y,jboolean advance,jint c
             }
             return;
         }
+        if (!replay && has_surface(p) && p.compositor.waiting_for_draw(*p.game)) {
+            present(p);
+            p.game->reset_frame_pacing();
+            frame_meta(env,p,meta);
+            if (with_clock) {const jint clock_values[]={0,0};env->SetIntArrayRegion(meta,7,2,clock_values);}
+            if (length>=13) {const jint paced=0;env->SetIntArrayRegion(meta,12,1,&paced);}
+            return;
+        }
         if (replay) {
             const auto samples=static_cast<unsigned>(ms)*std::uint64_t{p.game->audio().sample_rate()}+p.remainder;
             p.game->audio().skip_frames(samples/1000);
@@ -599,6 +620,10 @@ void tick(JNIEnv* env,jlong handle,jint ms,jint x,jint y,jboolean advance,jint c
         const bool before_large=large_dialogue(previous);
         const bool before_overlap=before==Wait::Overlap || p.overlap_endpoint;
         const auto& f=p.game->step_frame({elapsed_ms,step_ms},input,capture);
+        if (length>=16) {
+            const jint executed=1;
+            env->SetIntArrayRegion(meta,15,1,&executed);
+        }
         if (f.wait==emberfall::scene::Wait::Error) throw std::runtime_error(f.script+" @"+std::to_string(f.word)+" "+f.error);
         const auto sampled=p.game->script_clock_sample();
         if (input.clock_sample && !sampled) throw std::runtime_error("Unused journal clock sample");
@@ -634,9 +659,10 @@ API jboolean JNICALL FN(tickStory)(JNIEnv* env,jclass,jlong handle,jint ms,jint 
 API void JNICALL FN(copyStoryFrame)(JNIEnv* env,jclass,jlong handle,jobject bitmap) {
     try {
         auto& p=player(handle);
-        sync_story_plane(p);
+        const bool ready=sync_story_plane(p);
         emberfall::android::LockedBitmap out(env,bitmap);
-        const auto& source=p.game->surface();
+        const auto& source=ready ? p.game->surface() : p.game->presented_surface();
+        if (source.rgb.empty()) throw std::runtime_error("Story frame is not ready");
         if (out.info.width!=source.width || out.info.height!=source.height)
             throw std::invalid_argument("Story frame size changed");
         copy_scene_rgba(source,out.row(0),out.info.stride);
@@ -919,12 +945,12 @@ API jbyteArray JNICALL FN(snapshot)(JNIEnv* env,jclass,jlong handle) {
     try {
         auto& p=player(handle);
         if (p.compositor.mailbox()->attached()) {
-            sync_story_plane(p);
-            (void)p.game->surface();
+            if (sync_story_plane(p)) (void)p.game->surface();
         } else {
             flush_screen_capture(p);
         }
         const auto data=p.game->snapshot();
+        p.repaint=true;
         auto out=env->NewByteArray(static_cast<jsize>(data.size()));
         if (out) env->SetByteArrayRegion(out,0,static_cast<jsize>(data.size()),reinterpret_cast<const jbyte*>(data.data()));
         return out;
@@ -1403,8 +1429,10 @@ API void JNICALL FN(stopScriptAudio)(JNIEnv* env,jclass,jlong handle) {
 API jintArray JNICALL FN(saveThumbnail)(JNIEnv* env,jclass,jlong handle,jint width,jint height) {
     try {
         auto& p=player(handle);
-        if (!p.title) sync_story_plane(p);
-        const auto& source=p.title && !p.static_title.rgb.empty()?p.static_title:p.game->surface();
+        const bool ready=p.title || sync_story_plane(p);
+        const auto& source=p.title && !p.static_title.rgb.empty()?p.static_title:
+            ready?p.game->surface():p.game->presented_surface();
+        if (source.rgb.empty()) return nullptr;
         p.repaint=true;
         return emberfall::android::frame_pixels(env,source,width,height);
     } catch (const std::exception& e) { fail(env,e.what()); return nullptr; }
@@ -1900,6 +1928,15 @@ API jint JNICALL FN(openingVariable)(JNIEnv* env,jclass,jlong handle,jbyteArray 
 API jboolean JNICALL FN(setStoryVariable)(JNIEnv* env,jclass,jlong handle,jbyteArray name,jint value) {
     try {return player(handle).game->set_story_variable(resource_name(env,name),value) ? JNI_TRUE : JNI_FALSE;}
     catch (const std::exception& e) {fail(env,e.what());return JNI_FALSE;}
+}
+API void JNICALL FN(inheritMenuMusic)(JNIEnv* env,jclass,jlong handle,jlong previous) {
+    try {
+        auto& target=*player(handle).game;
+        const auto& source=*player(previous).game;
+        if (target.runtime()->root()!=source.runtime()->root())
+            throw std::invalid_argument("Cannot inherit music from another game directory");
+        target.audio().inherit_music(source.audio());
+    } catch (const std::exception& e) { fail(env,e.what()); }
 }
 API void JNICALL FN(menuMusic)(JNIEnv* env,jclass,jlong handle,jint number,jint plays,jint volume,jint fade,jboolean restart) {
     try {

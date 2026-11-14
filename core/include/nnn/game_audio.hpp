@@ -115,6 +115,8 @@ public:
     // Menus stop one-shot script sounds while retaining the scene's loop sources.
     void suspend_script_audio();
     void restart_loop_script_audio();
+    // Same-game menu handoff: keep BGM, including its crossfade and sample cursor, but no script voices/SE.
+    void inherit_music(const GameAudio& previous);
     std::string replay_backlog_voice(const std::string& name);
     std::string replay_menu_voice(const std::string& name);
     bool has_menu_voice(const std::string& name);

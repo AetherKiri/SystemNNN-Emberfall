@@ -1568,7 +1568,8 @@ int main() {
         plane->width=2;plane->height=1;plane->stride=8;plane->show_backdrop=true;
         // Premultiplied green (0,120,0,128) across both pixels.
         plane->rgba={0,120,0,128, 0,120,0,128};
-        layers.set_message_plane(plane,[](Surface& s) {
+        layers.set_message_plane(plane,[](Surface& s,bool visible) {
+            if (!visible) return;
             for (auto& ch : s.rgb) ch=static_cast<Byte>(ch/2U);
         },true);
 
@@ -1584,7 +1585,8 @@ int main() {
         require(layers.scene_surface().rgb==std::vector<Byte>({255,255,0, 200,0,0}));
 
         // SELECTMESSAGE backPrintMode != 2 omits Slot N-1 above UI plane:
-        layers.set_message_plane(plane,[](Surface& s) {
+        layers.set_message_plane(plane,[](Surface& s,bool visible) {
+            if (!visible) return;
             for (auto& ch : s.rgb) ch=static_cast<Byte>(ch/2U);
         },false);
         // Pixel 0 now keeps (0,0,100) blended with (0,120,0,128) -> (0,120,50).

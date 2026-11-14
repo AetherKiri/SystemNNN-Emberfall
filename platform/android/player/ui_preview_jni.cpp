@@ -1,5 +1,6 @@
 #include "emberfall/game_session.hpp"
 #include "frame_pixels.hpp"
+#include "native_window_buffer.hpp"
 #include "nnn/image.hpp"
 #include "nnn/reference_selection.hpp"
 #include "resource_names_jni.hpp"
@@ -55,7 +56,7 @@ struct Preview {
     std::string script,variable;
     int mode=12,page=1;
     bool restart_on_page=false,loop=true;
-    bool primed=false,repaint=true;
+    bool primed=false,repaint=true,window_geometry_pending=true;
     std::weak_ptr<nnn::RuntimeContext> warm_owner;
     std::optional<nnn::RuntimeContext::PreviewState> warm_state;
     emberfall::render::ChartLayerScratch chart_scratch;
@@ -196,13 +197,22 @@ void step(Preview& p,const emberfall::scene::InputState& input,std::optional<uns
 void present(Preview& p){
     if(!p.window||(!p.repaint&&!p.game->needs_redraw()))return;
     const auto& src=p.game->surface();ANativeWindow_Buffer dst{};
+    if(p.window_geometry_pending){
+        if(ANativeWindow_setBuffersGeometry(p.window,src.width,src.height,WINDOW_FORMAT_RGBA_8888)!=0){
+            p.repaint=true;return;
+        }
+        p.window_geometry_pending=false;
+    }
     if(ANativeWindow_lock(p.window,&dst,nullptr)!=0){p.repaint=true;return;}
-    if(dst.width==static_cast<int>(src.width)&&dst.height==static_cast<int>(src.height)&&dst.format==WINDOW_FORMAT_RGBA_8888){
+    if(emberfall::android::rgba_window_buffer(dst,static_cast<int>(src.width),static_cast<int>(src.height))){
         auto row=static_cast<unsigned char*>(dst.bits);const auto* rgb=src.rgb.data();
         for(unsigned y=0;y<src.height;++y,row+=static_cast<std::size_t>(dst.stride)*4){
             auto pixel=row;for(unsigned x=0;x<src.width;++x,pixel+=4,rgb+=3){pixel[0]=rgb[0];pixel[1]=rgb[1];pixel[2]=rgb[2];pixel[3]=255;}
         }p.repaint=false;
-    }else p.repaint=true;
+    }else{
+        emberfall::android::clear_window_buffer(dst);
+        p.repaint=true;p.window_geometry_pending=true;
+    }
     if(ANativeWindow_unlockAndPost(p.window)!=0)p.repaint=true;
 }
 }
@@ -263,10 +273,9 @@ API void JNICALL FN(surface)(JNIEnv* env,jclass,jlong handle,jobject surface){
         auto& p=surface ? prepared_preview(handle) : preview(handle);
         if(surface && p.warm_state)throw std::logic_error("Claim the prepared menu before binding its window");
         if(p.window)ANativeWindow_release(p.window);
-        p.window=surface?ANativeWindow_fromSurface(env,surface):nullptr;p.repaint=true;
+        p.window=surface?ANativeWindow_fromSurface(env,surface):nullptr;
+        p.repaint=true;p.window_geometry_pending=true;
         if(p.window){
-            const auto& s=p.game->surface();
-            ANativeWindow_setBuffersGeometry(p.window,s.width,s.height,WINDOW_FORMAT_RGBA_8888);
             present(p);
         }
     }catch(const std::exception& e){fail(env,e.what());}

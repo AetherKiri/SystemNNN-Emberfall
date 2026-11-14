@@ -23,7 +23,7 @@ endforeach()
 if(MOVIE_CODEC_LINKAGE STREQUAL "static")
     # The FFmpeg archives refer to each other and depend on the NDK system libraries.
     target_link_libraries(systemnnn PRIVATE "-Wl,--start-group" ${movie_codec_libraries} "-Wl,--end-group"
-                          m atomic mediandk)
+                          m atomic)
 else()
     target_link_libraries(systemnnn PRIVATE ${movie_codec_libraries})
 endif()

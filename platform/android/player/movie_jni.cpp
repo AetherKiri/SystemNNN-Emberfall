@@ -1,5 +1,6 @@
 #include <android/native_window_jni.h>
 #include <jni.h>
+#include "native_window_buffer.hpp"
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -57,6 +58,7 @@ struct Decoder {
     SwrContext* samples = nullptr;
     int stream = -1;
     bool end_of_input = false;
+    bool window_geometry_pending = false;
     std::int64_t start_us = 0, next_us = 0;
 
     ~Decoder() {
@@ -101,6 +103,7 @@ struct Decoder {
                     codec.ptr->height, WINDOW_FORMAT_RGBA_8888) != 0) return false;
         }
         std::swap(window.ptr, next.ptr);
+        window_geometry_pending=false;
         return true;
     }
 
@@ -136,18 +139,26 @@ struct Decoder {
         auto* picture = frame.ptr;
         if (!window.ptr || picture->width <= 0 || picture->height <= 0 ||
             static_cast<std::int64_t>(picture->width) * picture->height > max_pixels) return false;
+        if (window_geometry_pending) {
+            if (ANativeWindow_setBuffersGeometry(window.ptr,codec.ptr->width,codec.ptr->height,
+                    WINDOW_FORMAT_RGBA_8888)!=0) return false;
+            window_geometry_pending=false;
+        }
         scale = sws_getCachedContext(scale, picture->width, picture->height, static_cast<AVPixelFormat>(picture->format),
             codec.ptr->width, codec.ptr->height, AV_PIX_FMT_RGBA, SWS_FAST_BILINEAR, nullptr, nullptr, nullptr);
         if (!scale) throw std::runtime_error("Movie pixel format");
         ANativeWindow_Buffer buffer{};
         if (ANativeWindow_lock(window.ptr, &buffer, nullptr) != 0) return false;
         bool drawn = false;
-        if (buffer.width == codec.ptr->width && buffer.height == codec.ptr->height && buffer.stride >= buffer.width) {
+        if (emberfall::android::rgba_window_buffer(buffer,codec.ptr->width,codec.ptr->height)) {
             std::uint8_t* pixels[4] = {static_cast<std::uint8_t*>(buffer.bits)};
             const int stride[4] = {buffer.stride * 4};
             drawn = sws_scale(scale, picture->data, picture->linesize, 0, picture->height, pixels, stride) == buffer.height;
         }
-        return ANativeWindow_unlockAndPost(window.ptr) == 0 && drawn;
+        if (!drawn) emberfall::android::clear_window_buffer(buffer);
+        const bool posted=ANativeWindow_unlockAndPost(window.ptr)==0;
+        window_geometry_pending=!drawn || !posted;
+        return drawn && posted;
     }
 
     int pcm(std::int16_t* output, int frames) {

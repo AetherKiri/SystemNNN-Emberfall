@@ -7,6 +7,15 @@ public final class GameStoryControlsTest {
     private static int checks;
     private static void check(boolean value,String message){checks++;if(!value)throw new AssertionError(message);}
     public static void main(String[] roots)throws Exception{
+        for(GameStoryControlsModel.Action action:GameStoryControlsModel.Action.values()){
+            check(GameStoryControls.clickableWhileTyping(action,false),"settled controls remain clickable");
+            check(GameStoryControls.clickableWhileTyping(action,true)==(action==GameStoryControlsModel.Action.FILM_SKIP),
+                "only the original film skip control accepts input while printing or transitioning");
+            boolean save=action==GameStoryControlsModel.Action.SAVE||action==GameStoryControlsModel.Action.LOAD||
+                action==GameStoryControlsModel.Action.QUICK_SAVE||action==GameStoryControlsModel.Action.QUICK_LOAD;
+            check(GameStoryControls.allowedInReplay(action,true)==!save,"scene replay keeps suitable original controls");
+            check(GameStoryControls.allowedInReplay(action,false),"normal story controls remain available");
+        }
         for(String name:roots){
             File root=new File(name);Map<String,GameUiAssets.Config> configurations=new LinkedHashMap<>();
             for(String config:GameStoryControlsModel.CONFIG_NAMES)configurations.put(config,GameUiAssets.readConfig(root,config));
