@@ -443,6 +443,14 @@ public final class GameConfigTest {
             longLayouts[0].x==80&&longLayouts[0].y==60&&longLayouts[0].nextX==-4&&longLayouts[0].nextY==32,
             "DialogueLayout base and LPRINT geometry consume SharedConfig snapshot");
 
+        GameUiAssets.SharedConfig original=GameUiAssets.SharedConfig.fallback(root,null,null);
+        check(original.screenWidth==800&&original.screenHeight==600,"PC canvas default without exesetup");
+        write(new File(root,"init/mainControl.xtx"),"windowSizeX 960\nwindowSizeY 540\nrealWindowSizeX1 1920\nrealWindowSizeY1 1080\n",false);
+        original=GameUiAssets.SharedConfig.fallback(root,null,null);
+        check(original.screenWidth==960&&original.screenHeight==540,"window configuration selects the logical buffer, not the physical window");
+        write(new File(root,"init2/mainControl.fxf"),"windowSizeX 1024\nwindowSizeY 768\n",true);
+        original=GameUiAssets.SharedConfig.fallback(root,null,null);
+        check(original.screenWidth==1024&&original.screenHeight==768,"encrypted legacy canvas takes priority");
         write(new File(root,"spt/exesetup.xtx"),"mainScreenWindowSizeX1 800\nmainScreenWindowSizeY1 600\n",false);
         write(new File(root,"init/game.xtx"),"frameTime 25\ncodeByte 1\ntaikenflag 1\nlayerExpand 1\nokikaeNothing 1\n",false);
         write(new File(root,"init/printmessage.xtx"),"windowMessageNumber 3\nfontSize 20\nLPrintX 40\nLPrintY 120\nLNextY 40\nappendSkipName 0\n",false);

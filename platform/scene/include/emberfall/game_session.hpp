@@ -102,7 +102,7 @@ struct FrameState {
     std::optional<ScriptModal> modal;
 };
 struct SessionOptions {
-    int width=0, height=0; // Use game configuration, then 1280x720.
+    int width=0, height=0; // Use exesetup/mainControl configuration, then the PC default 800x600.
     unsigned frame_ms=0; // Use the game's frameTime.
     std::size_t cache_bytes=96U*1024U*1024U;
     std::string entry="sys.spt";
@@ -305,8 +305,8 @@ public:
     static PcSaveGameDate inspect_pc_save_game_date(const std::vector<nnn::Byte>& bytes,int year_var,int date_var);
     struct SharedConfigSnapshot {
         static constexpr std::size_t size=28;
-        int screen_width=1280;
-        int screen_height=720;
+        int screen_width=800;
+        int screen_height=600;
         int default_frame_ms=20;
         int code_byte=2;
         int trial_flag=0;
