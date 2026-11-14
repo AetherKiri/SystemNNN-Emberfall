@@ -285,7 +285,8 @@ final class GameSlotsPanel extends GameUiPanel {
         // Original decorations may extend past the slot base, e.g. lastSavePrintY=-6 or selectPrintX=-1.
         if(artworkAtlas!=null||lastSaveAtlas!=null||cursorOutside||dateOutside)setClipChildren(false);
         opening(config,false);
-        entries(slots,warmup);
+        entries(slots);
+        render(warmup);
     }
     static String baseImageName(GameUiAssets.Config data,boolean saving,boolean quick){
         if(data.number("basePrintFlag",0)==0)return "";
@@ -298,11 +299,23 @@ final class GameSlotsPanel extends GameUiPanel {
         return quick&&data.has(quickKey)?data.value(quickKey,""):normal;
     }
     @Override boolean controlsBusy(){return super.controlsBusy()||confirmation!=null||selectedCard!=null;}
-    void entries(SaveSlots.Entry[] value){entries(value,null);}
-    private void entries(SaveSlots.Entry[] value,UiPreviewPool.Warmup warmup){
+    void entries(SaveSlots.Entry[] value){
         entries.clear();
         for(SaveSlots.Entry entry:value)entries.put(entry.slot,entry);
-        if(confirmation==null&&selectedCard==null){lastSaveSince=SystemClock.uptimeMillis();render(warmup);}else refreshEntries=true;
+        if(confirmation==null&&selectedCard==null)bindVisibleEntries();else refreshEntries=true;
+    }
+    private SaveSlots.Entry entry(int slot){
+        SaveSlots.Entry value=entries.get(slot);
+        return value!=null?value:new SaveSlots.Entry(slot,false,false,0,"",null);
+    }
+    private void bindVisibleEntries(){
+        refreshEntries=false;
+        lastSaveSince=SystemClock.uptimeMillis();
+        // Save completion must not replace a pressed Back/page button or its pending action.
+        for(int i=0;i<getChildCount();i++)if(getChildAt(i) instanceof SlotCard){
+            SlotCard card=(SlotCard)getChildAt(i);
+            card.bind(entry(card.serial-1));
+        }
     }
     private void render(){render(null);}
     private void render(UiPreviewPool.Warmup warmup){
@@ -310,15 +323,13 @@ final class GameSlotsPanel extends GameUiPanel {
         if(backgroundPage!=page){uiBackground(config,saving?6:5,page+1,warmup);backgroundPage=page;}
         int x=config.number("printX",85),y=config.number("printY",113);
         int dx=config.number("nextX",166),dy=config.number("nextY",124);
-        boolean allowQuick=config.number(saving?"quickSaveSelectOk":"quickLoadSelectOk",0)!=0;
         for(int i=0;i<layout.perPage;i++){
             int index=page*layout.perPage+i;
-            SaveSlots.Entry e=entries.get(index);
-            if(e==null)continue;
             boolean quick=index==layout.quickPosition;
-            SlotCard card=new SlotCard(e,index+1,quick);
-            card.setEnabled((!quick||allowQuick)&&(saving||e.exists&&!e.corrupt));
+            SlotCard card=new SlotCard(entry(index),index+1,quick);
             card.setOnClickListener(v->{
+                if(!card.isEnabled())return;
+                SaveSlots.Entry e=card.e;
                 if(!saving)beginSelect(card,e.slot);
                 else if(e.exists&&config.number("warningPrintFlag",1)!=0){
                     sound(config.number("warningSound",0)-1,-1);confirm(card,e);
@@ -398,7 +409,7 @@ final class GameSlotsPanel extends GameUiPanel {
     }
     private void dismissConfirmation(){
         removeView(confirmation);confirmation=null;
-        if(refreshEntries&&selectedCard==null){refreshEntries=false;lastSaveSince=SystemClock.uptimeMillis();render();}
+        if(refreshEntries&&selectedCard==null)bindVisibleEntries();
     }
     private void beginSelect(SlotCard card,int slot){
         if(selectedCard!=null)return;
@@ -410,7 +421,7 @@ final class GameSlotsPanel extends GameUiPanel {
             if(saving){
                 SlotCard done=selectedCard;selectedCard=null;
                 if(done!=null)done.invalidate();
-                if(refreshEntries){refreshEntries=false;lastSaveSince=SystemClock.uptimeMillis();render();}
+                if(refreshEntries)bindVisibleEntries();
             }
             select.choose(slot);
         };
@@ -427,7 +438,7 @@ final class GameSlotsPanel extends GameUiPanel {
     @Override void cancelLeave(){
         if(selectedCard!=null){selectedCard.invalidate();selectedCard=null;}
         super.cancelLeave();
-        if(refreshEntries){refreshEntries=false;lastSaveSince=SystemClock.uptimeMillis();render();}
+        if(refreshEntries)bindVisibleEntries();
     }
     @Override protected void onDetachedFromWindow(){
         if(pendingSelect!=null){removeCallbacks(pendingSelect);pendingSelect=null;}
@@ -458,29 +469,39 @@ final class GameSlotsPanel extends GameUiPanel {
         return true;
     }
     private final class SlotCard extends View {
-        private final SaveSlots.Entry e;
-        private final Bitmap preview,base;
-        private final Rect artworkTile;
+        private SaveSlots.Entry e;
+        private Bitmap preview;
+        private final Bitmap base;
+        private Rect artworkTile;
         private final int serial;
         private final boolean quick;
-        private final String time,summary,label;
+        private String time,summary;
+        private final String label;
         private final Paint p=new Paint(Paint.ANTI_ALIAS_FLAG|Paint.FILTER_BITMAP_FLAG);
         private final Rect cursorSrc=new Rect(),cursorDest=new Rect();
         private final RectF cursorDestF=new RectF();
         private int cursorState;
         private long cursorSince;
         SlotCard(SaveSlots.Entry e,int serial,boolean quick){
-            super(GameSlotsPanel.this.getContext());this.e=e;this.serial=serial;setSoundEffectsEnabled(false);
-            time=e.exists?new SimpleDateFormat("yyyy/MM/dd HH:mm",Locale.ROOT).format(new Date(e.savedAt)):"";
+            super(GameSlotsPanel.this.getContext());this.serial=serial;setSoundEffectsEnabled(false);
             this.quick=quick;
             label=quick?SaveSlots.labelFor(SaveSlots.QUICK):e.label();
             String image=baseImageName(data,saving,quick);
             base=image.isEmpty()?null:sprite(image);
+            bind(e);
+        }
+        void bind(SaveSlots.Entry value){
+            e=value;
+            time=e.exists?new SimpleDateFormat("yyyy/MM/dd HH:mm",Locale.ROOT).format(new Date(e.savedAt)):"";
             preview=e.picture;
             artworkTile=artworkSource(e.artwork);
             summary=e.displaySummary();
+            boolean allowQuick=config.number(saving?"quickSaveSelectOk":"quickLoadSelectOk",0)!=0;
+            setEnabled((!quick||allowQuick)&&(saving||e.exists&&!e.corrupt));
             setContentDescription(label+" · "+(e.corrupt?"存档无法读取":
                 !e.exists?"空槽位":time+(summary.isEmpty()?"":" · "+summary)));
+            cursorState=-1; // drawCursor resets cursorSince on the next draw, as PC InitAnime does.
+            invalidate();
         }
         @Override public CharSequence getAccessibilityClassName(){return "android.widget.Button";}
         @Override protected void drawableStateChanged(){super.drawableStateChanged();invalidate();}
