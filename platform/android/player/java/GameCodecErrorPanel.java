@@ -53,7 +53,8 @@ final class GameCodecErrorPanel extends GameUiPanel {
             String key=TAGS[i];
             ButtonArt.Setup setup=new ButtonArt.Setup(cfg,key,previous,false);
             Bitmap image=sprite(setup.art.image);
-            x=cfg.number(key+"PrintX",x);y=cfg.number(key+"PrintY",y);
+            x=cfg.number(key+"PrintX",previous==null?0:x+previous.width);
+            y=cfg.number(key+"PrintY",previous==null?0:y+previous.height);
             GameButton.Spec spec=new GameButton.Spec(setup);
             int action=i;
             boolean enabled=i!=1||error.capability!=0;
