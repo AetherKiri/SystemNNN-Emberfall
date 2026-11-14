@@ -10,6 +10,9 @@ inline constexpr std::size_t slot_capacity=nnn::chart::legacy_slot_capacity,
     selection_words=nnn::chart::legacy_selection_words,seen_bytes=nnn::chart::legacy_seen_bytes;
 inline constexpr std::size_t extension_bytes=selection_words*sizeof(nnn::Word)+slot_capacity;
 
+inline constexpr auto current_var="\x8c\xbb\x8d\xdd\x92\x6e"; // 現在地
+inline constexpr auto reserved_var="\x8c\xa9\x82\xbd\x97\x5c\x96\xf1"; // 見た予約
+
 enum class Function { Mark, Enable, Complete, Enabled, Event, Position, Refresh };
 std::optional<Function> function(std::string_view name);
 

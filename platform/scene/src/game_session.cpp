@@ -2668,6 +2668,17 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
     void write_chart_progress(nnn::chart::Progress progress) {
         if (shared_runtime->set_chart_progress(std::move(progress),chart_storage_layout())) system_save_requested=true;
     }
+    void save_legacy_chart_node(nnn::Value slot) {
+        try {
+            ChartNodeSave saved;
+            saved.status=make_pc_status(chart_pc_mode(),true,true);
+            saved.vars=nnn::chart::capture_variables([&](std::size_t i){return GetVarData(static_cast<nnn::Word>(i));});
+            saved.run=*chart_run;
+            chart_store->write(slot,saved,*chart_graph);
+        } catch (const std::exception& e) {
+            warn("Legacy chart checkpoint: "+std::to_string(slot)+": "+e.what());
+        }
+    }
     bool chart_checkpoint(const nnn::chart::Checkpoint& plan,const nnn::chart::Progress& progress,
                           std::optional<nnn::Value> restore_work={}) {
         if (input.legacy_calculations || input.recorded_clock) return false;
@@ -2711,15 +2722,7 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
             chart_run=std::move(run);
             if (action.run_changed) shared_runtime->set_chart_selection(chart_graph->slot_capacity(),chart_run->can_select,chart_storage_layout());
             if (action.progress_changed) write_chart_progress(std::move(updated));
-            if (action.save_node) {
-                try {
-                    ChartNodeSave saved;
-                    saved.status=make_pc_status(chart_pc_mode(),true,true);
-                    saved.vars=nnn::chart::capture_variables([&](std::size_t i){return GetVarData(static_cast<nnn::Word>(i));});
-                    saved.run=*chart_run;
-                    chart_store->write(*action.save_node,saved,*chart_graph);
-                } catch(const std::exception& e) {warn("Legacy chart checkpoint: "+std::string(e.what()));}
-            }
+            if (action.save_node) save_legacy_chart_node(*action.save_node);
             return action.handled;
         }
         const auto function=chart_functions.find(id);
@@ -2736,8 +2739,7 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         return true;
     }
     void save_chart_exit() {
-        if (!configure_chart()) return;
-        if (legacy_chart_active) return; // genzaichi owns old-format node checkpoints.
+        if (!configure_chart() || legacy_chart_active) return;
         const auto progress=chart_progress();
         if (!progress) return;
         const auto read=chart_variables();
@@ -2834,15 +2836,14 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
             set_chart_page(request,state,progress,*chart_run,read);
             return ModalResult::Updated;
         }
-        if (legacy_chart_active) {
-            SetVarData(variable_id(setup.work_var),branch.to);
+        if (legacy_chart_active && !branch.restore_node) {
             SetVarData(variable_id(setup.slot_var),branch.to);
-            const auto* selected=chart_graph->node(branch.to);
-            if (selected->routes==1)
-                SetVarData(variable_id("\x8c\xa9\x82\xbd\x97\x5c\x96\xf1"),branch.to);
+            SetVarData(variable_id(setup.work_var),branch.to);
+            if (chart_graph->node(branch.to)->routes==1)
+                SetVarData(variable_id(legacy_chart::reserved_var),branch.to);
+            SetVarData(variable_id(legacy_chart::current_var),branch.to);
             if (const auto edge=chart_graph->edge_index(branch.from,branch.to)) {
-                if (chart_graph->record_edge(*chart_run,{branch.from,*edge}))
-                    shared_runtime->set_chart_selection(chart_graph->slot_capacity(),chart_run->can_select,chart_storage_layout());
+                chart_graph->record_edge(*chart_run,{branch.from,*edge});
                 if (*edge<8U) {
                     auto updated=progress;
                     auto& bits=updated.traversed[static_cast<std::size_t>(branch.from)];
@@ -2850,6 +2851,7 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
                     if (bits!=next) {bits=next;write_chart_progress(std::move(updated));}
                 }
             }
+            if (!external) save_legacy_chart_node(branch.to);
         } else if (!rewind) {
             SetVarData(variable_id(setup.work_var),branch.from);
             SetVarData(variable_id(setup.slot_var),branch.to);
@@ -4246,7 +4248,7 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
             layer_variables[i]=binding<=(layer_limit==16 ? 32767U : 127U) ? static_cast<nnn::Value>(binding) : 0;
         }
         const auto work=variable_id(chart_graph->setup().work_var);
-        if (branch.restore_node) {
+        if (!legacy_chart_active && branch.restore_node) {
             SetVarData(work,branch.from);
             SetVarData(slot,branch.to);
         }
@@ -4255,7 +4257,7 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
             if (system_variable(id) && GetVarData(id)!=value) system_save_requested=true;
             SetVarData(id,value);
         });
-        if (!branch.restore_node) {
+        if (!legacy_chart_active && !branch.restore_node) {
             SetVarData(work,branch.from);
             SetVarData(slot,branch.to);
         }

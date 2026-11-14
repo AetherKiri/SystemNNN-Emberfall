@@ -1243,7 +1243,7 @@ int main(){
         model.code.add({6,0x66660004U,1,2,0x900003ebU,0x90000000U}); // eraberu(1003,0)
         model.code.print(1);
         model.command_adjust.push_back(model.code.add({5,0x66660003U,0,0,0}));
-        model.code.add({5,0x66660004U,0,1,0x900003eaU}); // genzaichi(1002)
+        const auto continuation=model.code.pc();
         model.code.print(2);
         model.command_adjust.push_back(model.code.add({5,0x66660003U,0,0,1}));
         model.code.print(3);model.code.end();
@@ -1269,6 +1269,7 @@ int main(){
         layout->files.layer_records=16;layout->files.message_width=scene::pc::legacy_message_width;layout->files.registers_okikae=false;
         options.save_layout=layout;
         const auto storage=temp.root/"private";
+        const auto target_path=storage/"mushiex/chart1/slot1002.dat";
         scene::GameSession game(temp.root,options);game.set_chart_storage(storage);
         require(game.legacy_chart() && scene::GameSession::uses_legacy_chart(temp.root),"Old chart configuration was not bound");
         require(game.step_frame(0).wait==scene::Wait::Dialogue && game.variable(0)==1001 && game.variable(3)==1001,
@@ -1314,23 +1315,68 @@ int main(){
         require(restored.state().modal && restored.state().modal->chart->scroll==-300,"Negative chart scroll did not survive native restore");
         const auto pointer=[](int x,int y){return x*65536+y;};
         require(restored.act_modal(restored.state().modal->request,1,pointer(200,500))==4 &&
+            !std::filesystem::exists(target_path) &&
             restored.act_modal(restored.state().modal->request,8,0)==2 && restored.variable(0)==1002 && restored.variable(1)==1002,
             "Forward legacy selection did not commit slot and last-selection variables");
+        const auto bytes=read_file(target_path);
+        const auto next=scene::legacy_chart::parse_node(bytes,graph);
+        require(next.status.game_mode==51 && next.status.adjust_version==0 && next.status.vm[0].pc==static_cast<int>(continuation) &&
+            next.vars[0]==1002 && next.vars[1]==1002 && next.vars[2]==1 && next.vars[3]==1002 && next.vars[4]==1002 &&
+            restored.variable(3)==1002 && restored.variable(4)==1002,
+            "Forward legacy checkpoint did not capture the selected node and raw chartmap continuation");
+        require(next.run.move_road[1001]==1 && next.run.can_select==scene::legacy_chart::parse_extension(pc.extensions[0],graph).can_select &&
+            restored.runtime()->chart_progress()->traversed[1001]==1 && restored.take_system_save_request(),
+            "Selected edge or enabled state was lost from the checkpoint or global progress");
         require(restored.step_frame(0).wait==scene::Wait::Dialogue && restored.state().dialogue.message_id==2,
             "Chart selection did not resume the actual script");
-        const auto next=scene::legacy_chart::parse_node(read_file(storage/"mushiex/chart1/slot1002.dat"),graph);
-        require(next.run.move_road[1001]==1 && restored.runtime()->chart_progress()->traversed[1001]==1,
-            "Selected edge was lost from current-route or global traversed state");
-        modal=restored.step_frame(0,click).modal;
-        require(modal && restored.act_modal(modal->request,1,pointer(100,200))==0 &&
-            restored.act_modal(restored.state().modal->request,4,1)==4 &&
-            restored.act_modal(restored.state().modal->request,8,0)==2,"Legacy revisit failed its original confirmation flow");
-        require(restored.variable(0)==1001 && restored.variable(1)==1001 && restored.step_frame(0).wait==scene::Wait::Dialogue &&
-            restored.state().dialogue.message_id==1 && restored.audio().pc_state().music_plays==-1 &&
-            !restored.audio().state().bgm.looping,"Old checkpoint did not resume after genzaichi with its selected node and BGM intact");
-        require(std::none_of(restored.warnings().begin(),restored.warnings().end(),[](const auto& warning){
+        require(restored.step_frame(0,click).modal.has_value() && restored.runtime()->chart_progress()->seen[1002]==1,
+            "Entering the legacy chart did not mark the single-route selection seen");
+
+        auto cold_options=options;cold_options.runtime=restored.runtime()->fork();
+        cold_options.runtime->set_system_variable(5,91);
+        scene::GameSession cold(temp.root,cold_options);cold.set_chart_storage(storage);
+        cold.restore_pc_save(restored.export_pc_save());
+        const auto revisit=[&](scene::GameSession& session,nnn::Value slot) {
+            const auto& view=*session.state().modal;
+            const auto point=graph.screen_point(graph.node(slot)->center,view.chart->scroll);
+            require(session.act_modal(view.request,1,pointer(point.x,point.y))==0 &&
+                session.act_modal(session.state().modal->request,4,1)==4,"Legacy revisit failed its original confirmation flow");
+            return session.act_modal(session.state().modal->request,8,0);
+        };
+        require(revisit(cold,1002)==2 && cold.state().word==continuation && cold.variable(0)==1002 &&
+            cold.variable(205)==91 && cold.step_frame(0).wait==scene::Wait::Dialogue && cold.state().dialogue.message_id==2 &&
+            read_file(target_path)==bytes,"Cold legacy revisit did not restore the forward checkpoint and preserve global variables");
+        require(cold.step_frame(0,click).modal.has_value() && revisit(cold,1001)==2 &&
+            cold.variable(0)==1001 && cold.variable(1)==checkpoint.vars[1] && cold.variable(4)==checkpoint.vars[4] &&
+            cold.step_frame(0).wait==scene::Wait::Dialogue && cold.state().dialogue.message_id==1 &&
+            cold.audio().pc_state().music_plays==-1 && !cold.audio().state().bgm.looping,
+            "Legacy callback checkpoint did not restore its saved variables, BGM and continuation");
+        require(std::none_of(cold.warnings().begin(),cold.warnings().end(),[](const auto& warning){
             return warning.find("Unsupported user function")!=std::string::npos || warning.find("Legacy chart checkpoint:")!=std::string::npos;
         }),"A private callback advanced only through an unsupported fallback");
+
+        auto unavailable_options=options;unavailable_options.runtime=game.runtime()->fork();
+        scene::GameSession unavailable(temp.root,unavailable_options);
+        unavailable.restore_pc_save(saved);
+        const auto warnings_before=unavailable.warnings().size();
+        const auto& view=*unavailable.state().modal;
+        const auto target=graph.screen_point(graph.node(1002)->center,view.chart->scroll);
+        require(unavailable.act_modal(view.request,1,pointer(target.x,target.y))==4 &&
+            unavailable.act_modal(unavailable.state().modal->request,8,0)==2 &&
+            unavailable.variable(0)==1002 && unavailable.variable(1)==1002 && unavailable.variable(3)==1002 &&
+            unavailable.variable(4)==1002 && unavailable.runtime()->chart_progress()->traversed[1001]==1 &&
+            unavailable.step_frame(0).wait==scene::Wait::Dialogue && unavailable.state().dialogue.message_id==2,
+            "A checkpoint write failure interrupted the selected legacy route");
+        require(unavailable.step_frame(0,click).modal.has_value(),"Missing checkpoint fixture did not return to the chart");
+        const auto before_missing=scene::pc::parse_save(unavailable.export_pc_save());
+        require(revisit(unavailable,1002)==0 && unavailable.state().modal && unavailable.state().modal->selection==1002,
+            "A missing legacy checkpoint left the active chart");
+        const auto after_missing=scene::pc::parse_save(unavailable.export_pc_save());
+        require(before_missing.status.vm[0].pc==after_missing.status.vm[0].pc && before_missing.vars==after_missing.vars &&
+            before_missing.extensions==after_missing.extensions && unavailable.warnings().size()==warnings_before+2 &&
+            unavailable.warnings()[warnings_before].find("Legacy chart checkpoint:")!=std::string::npos &&
+            unavailable.warnings().back().find("Node checkpoint is missing")!=std::string::npos,
+            "A missing legacy checkpoint changed story state or failed to report the storage errors");
     });
     suite.test("chart sentinel checkpoints, pending snapshots and validated branch rewinds",[]{
         Model model;model.message=true;
