@@ -1540,6 +1540,28 @@ int main() {
         // Effect 2 with param[4]=1 draws saved_ captured by EFFECT_GET (73).
         require(get_layers.effect(0,2,{1,100,100,0,1}));
         require(get_layers.surface().rgb==std::vector<Byte>({0,100,0}));
+
+        Layers once_layers(1,1,layer_count);
+        require(once_layers.effect(0,54,{0,100,0,0}));
+        once_layers.bind(last,fg,false);
+        require(once_layers.effect(last,75,{20,10,1}));
+        once_layers.set_message_plane(nullptr);
+        const auto once_frame=once_layers.surface().rgb;
+        require(once_frame==std::vector<Byte>({255,255,0}));
+        once_layers.clear_message_plane();
+        (void)once_layers.scene_surface();
+        once_layers.set_message_plane(nullptr);
+        require(once_layers.surface().rgb==once_frame);
+
+        Layers no_last(1,1,layer_count);
+        require(no_last.effect(0,54,{0,11,0,0}));
+        no_last.set_message_plane(ui1);
+        require(no_last.surface().rgb==std::vector<Byte>({0,100,0}));
+        no_last.clear_message_plane();
+        require(no_last.effect(0,54,{0,30,40,50}));
+        require(no_last.scene_surface().rgb==std::vector<Byte>({30,40,50}));
+        no_last.set_message_plane(nullptr);
+        require(no_last.surface().rgb==std::vector<Byte>({30,40,50}));
     }
     {
         // Physical invariant 1: previous_ == S_clean (from after_present), immune to
