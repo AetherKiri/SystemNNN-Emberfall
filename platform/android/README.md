@@ -74,6 +74,10 @@ Android 10 如果限制直接读取或写入所选目录，可使用「复制到
 
 菜单打开期间暂停主剧情 VM、图层和文字时钟；独立的菜单背景脚本与音频混音继续运行。弹出层隐藏剧情文字和快捷按钮，返回时恢复。Core 的实际 Auto／Skip 状态回传界面，平台不会每帧用旧缓存重新开启已停止的快进。
 
+逻辑画布优先采用 `spt/exesetup` 的尺寸声明，其次采用 `init2/mainControl.fxf` 或 `init/mainControl.xtx` 的 `windowSizeX/Y`，缺省为 800×600。正文、标题和菜单共用此尺寸，画布居中缩放；不会向 `emberfall-system.cfg` 重复保存尺寸。
+
+启动按 `nothing.nextMode` 选择入口，并在游戏要求时检查影片解码能力。影片失败显示游戏的 `codecerror` 背景和按钮；跳过影片的选择保留至本次游戏会话结束。错误页资源缺失时提供可见的操作按钮。
+
 播放器返回前台或收到交互时会重试未取得的音频焦点。影片切到后台或暂时失去显示画面时会暂停，画面恢复后接着播放。可跳过的影片仍可按游戏设定跳过。
 
 转场完成时，渲染器会通知平台提交精确终帧；仅更新缓存却不提交终帧会造成画面停留在双影状态。Android 界面显式处理系统栏和刘海安全区，整个游戏画布在安全区内等比缩放；原版按钮保留游戏内坐标，不另排成 Android 快捷栏。该处理也用于 [Android15 对 target35 的全屏布局要求](https://developer.android.com/about/versions/15/behavior-changes-15#edge-to-edge)。
@@ -106,4 +110,4 @@ Android 10 如果限制直接读取或写入所选目录，可使用「复制到
 
 在 Windows 的仓库根目录运行 `python platform/android/build_player.py` 重建 APK。默认文件名取自 Android manifest 的版本号。本地调试签名密钥保存在 `%LOCALAPPDATA%/CodexTools/SystemNNN-M/debug-signing/emberfall-debug.p12`。 [构建依赖与环境变量](BUILDING.md)
 
-播放器动态链接 FFmpeg 8.1.3，启用 ASF、MPEG 节目流、WMV3、VC-1、WMA、MPEG-1/2 视频和 MP2。APK 内附许可与构建选项。 [FFmpeg 8.1.3 源码](https://codeload.github.com/FFmpeg/FFmpeg/tar.gz/refs/tags/n8.1.3) · [第三方声明](../../THIRD_PARTY_NOTICES.md)
+播放器动态链接 FFmpeg 8.1.3，启用 ASF、MPEG 节目流、WMV3、VC-1、WMA、MP43、MPEG-1/2 视频和 MP2。APK 内附许可与构建选项。 [FFmpeg 8.1.3 源码](https://codeload.github.com/FFmpeg/FFmpeg/tar.gz/refs/tags/n8.1.3) · [第三方声明](../../THIRD_PARTY_NOTICES.md)
