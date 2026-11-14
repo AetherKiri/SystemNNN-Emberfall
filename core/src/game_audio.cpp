@@ -50,9 +50,6 @@ int config_number(const std::string& text,const std::string& wanted,int fallback
 std::uint64_t fade_frames(int tenths,unsigned rate) {
     return static_cast<std::uint64_t>(std::max(0,tenths))*rate/10U;
 }
-bool valid_voice_name(const std::string& name) noexcept {
-    return !name.empty() && name.size()<=255 && name.find('\0')==std::string::npos;
-}
 struct Ramp {
     double from=0,to=0;
     std::uint64_t time=0,total=0;
@@ -223,6 +220,12 @@ struct PcVoices {
     std::array<std::string,4> names;
     std::array<std::array<Value,16>,4> work{};
     std::array<std::uint8_t,4> count{};
+    bool has_request() const {
+        for (std::size_t i=0;i<names.size();++i)
+            if (!names[i].empty() || count[i] || std::any_of(work[i].begin(),work[i].end(),[](Value value){return value!=0;}))
+                return true;
+        return false;
+    }
 };
 constexpr std::uint32_t pc_voice_snapshot_tag=0x31564e4eU;
 constexpr std::uint32_t voice_pool_snapshot_tag=0x31504e4eU;
@@ -274,7 +277,8 @@ struct GameAudio::Impl {
     std::array<bool,72> character_enabled;
     std::set<int> voice_flags;
     std::array<Track,4> voices;
-    std::array<std::shared_ptr<const Program>,2> pooled_voices;
+    // A waiting request can lack audio. Its work and name still own the channel.
+    std::array<std::optional<std::shared_ptr<const Program>>,2> pooled_voices;
     std::array<bool,2> no_wait_voice{};
     std::array<bool,2> voice_work_override{};
     std::array<Track,8> sounds,system_sounds;
@@ -455,7 +459,7 @@ struct GameAudio::Impl {
     void cancel_pooled_voice(std::size_t channel) {
         auto& pooled=pooled_voices[channel-2];
         if (!pooled) return;
-        if (voices[channel].active && voices[channel].program==pooled) voices[channel].stop(0);
+        if (voices[channel].active && voices[channel].program==*pooled) voices[channel].stop(0);
         pooled.reset();
         pc_voices.work[channel][0]=0;
         pc_voices.count[channel]=0;
@@ -463,7 +467,7 @@ struct GameAudio::Impl {
     void restart_effect_voice(std::size_t channel,std::shared_ptr<const Program> program) {
         auto& track=voices[channel];
         track.stop(0);
-        if (!voice_enabled(program->name,static_cast<int>(channel))) return;
+        if (!program || !voice_enabled(program->name,static_cast<int>(channel))) return;
         const auto& work=pc_voices.work[channel];
         const auto named=character_index(program->name);
         const auto group=named<0 ? std::size_t{72} : slider_index(static_cast<std::size_t>(named));
@@ -598,6 +602,7 @@ struct GameAudio::Impl {
         Track& tr=button_voice ? button_voices[next_button_voice] : replay ? backlog_voice :
             speech ? channel(voices,ch) : system ? channel(system_sounds,ch) : channel(sounds,ch);
         const bool script_voice=speech && origin==SampleOrigin::Script && wait_for_same_voice;
+        const bool recorded_voice=speech && !system;
         auto* pool=speech && !system && ch>=2 ? &pooled_voices[static_cast<std::size_t>(ch-2)] : nullptr;
         const bool no_wait=script_voice && parameter(a,12)!=0;
         bool ctrl=gate.ctrl;
@@ -631,19 +636,14 @@ struct GameAudio::Impl {
             info.action=bus+(id==-1 ? ".stop" : ".skipped"); return;
         }
         if (id<0) throw AudioError("Invalid sample number");
-        if (speech && (!e.text || e.text->empty())) throw AudioError("VOICE has no resource name");
-        if (speech && wait_for_same_voice && !valid_voice_name(*e.text)) throw AudioError("VOICE has an invalid resource name");
+        if (speech && (!e.text || (system && e.text->empty()))) throw AudioError("VOICE has no resource name");
+        // A named voice must fit GAMESTATUS's 64-byte terminated CP932 field.
+        if (recorded_voice && !e.text->empty() && (e.text->size()>=64 || resource::normalize_cp932_path(*e.text).empty()))
+            throw AudioError("VOICE has an invalid resource name");
+        if (speech && system && wait_for_same_voice && (e.text->size()>255 || e.text->find('\0')!=std::string::npos))
+            throw AudioError("VOICE has an invalid resource name");
         const bool system_category=system || (!speech && a.size()>12 && a[12]!=0);
-        // Script voice loads replace the channel even when its future play is
-        // gated. SE gates leave an existing source running (PlayScriptSe).
-        if (speech && !menu_voice && !(script_voice && pool)) {
-            std::lock_guard<std::mutex> lock(mixer);
-            if (pool) {
-                pool->reset();no_wait_voice[static_cast<std::size_t>(ch-2)]=false;
-                voice_work_override[static_cast<std::size_t>(ch-2)]=false;
-            }
-            tr.stop(0);
-        }
+        if (replay && !menu_voice) { std::lock_guard<std::mutex> lock(mixer); tr.stop(0); }
         const auto name=button_voice ? files.button_voice_name(id) : config_sound ? files.config_sound_name(id,config_themed) :
             speech ? *e.text : std::string{};
         if (config_sound && name.empty()) { info.action=bus+".unavailable"; return; }
@@ -664,41 +664,45 @@ struct GameAudio::Impl {
             for (const auto& track:button_voices)
                 if (track.active && track.program && track.program->name==resource::fold_cp932(name)) { info.action=bus+".duplicate"; return; }
         }
-        if (script_voice && pool) {
+        const int role_adjustment=!pc_voice && role_gain ? adjustment(role_name) : 0;
+        bool waiting=false;
+        if (recorded_voice) {
             const auto voice_name=resource::fold_cp932(name);
-            const auto delta=saved_voice_delta(parameter(a,2),adjustment(voice_name));
+            const auto delta=pc_voice ? parameter(a,2) : saved_voice_delta(parameter(a,2),role_adjustment);
             std::lock_guard<std::mutex> lock(mixer);
-            no_wait_voice[static_cast<std::size_t>(ch-2)]=no_wait;
-            if (no_wait && tr.active && equal_voice_names(pc_voices.names[ch],voice_name)) {
-                save_voice_request(ch,voice_name,a,delta);
-                voice_work_override[static_cast<std::size_t>(ch-2)]=true;
-                info.action=bus+".duplicate";
-                return;
+            bool duplicate=false;
+            if (pool) {
+                const auto index=static_cast<std::size_t>(ch-2);
+                no_wait_voice[index]=no_wait;
+                duplicate=no_wait && tr.active && equal_voice_names(pc_voices.names[ch],voice_name);
+                if (!duplicate) {
+                    cancel_pooled_voice(static_cast<std::size_t>(ch));
+                    waiting=script_voice && !no_wait && main_voice_blocks(ch,voice_name);
+                }
+                voice_work_override[index]=duplicate;
             }
-            cancel_pooled_voice(static_cast<std::size_t>(ch));
-            voice_work_override[static_cast<std::size_t>(ch-2)]=false;
-            if (no_wait || !main_voice_blocks(ch,voice_name)) tr.stop(0);
+            // Windows records the accepted VOICE before stopping and loading it. An
+            // unavailable clip must not leave an earlier voice armed in a save.
+            const bool replaces_same_character=waiting && same_voice_character(pc_voices.names[ch],voice_name);
+            save_voice_request(ch,voice_name,a,delta);
+            if (duplicate) {info.action=bus+".duplicate";return;}
+            if (script_voice && ch<2) pool_matching_effect_voices(ch,voice_name);
+            if (!waiting || replaces_same_character) tr.stop(0);
+            if (waiting) pool->emplace();
         }
+        if (speech && name.empty()) throw AudioError("VOICE has no resource name",true);
         auto clip=button_voice || config_sound ? files.system_wave(name) : speech ? files.speech(name) : files.se(id,system);
         auto p=std::make_shared<Program>(); p->name=clip->info.name; p->parts.push_back(clip);
         const int base=button_voice ? settings.voice_volume : speech ? (ch<2 ? settings.voice_volume : settings.effect_voice_volume)
                               : system_category ? ui_volume(ui_gain) : settings.sound_volume;
         const auto steps=role>=0 ? character_steps(static_cast<std::size_t>(role)) : 0;
-        const int role_adjustment=!pc_voice && role_gain ? adjustment(role_name) : 0;
         const auto vol=gain_curve(parameter(a,2),role_adjustment,
             false,characters.slider_delta,role>=0,true,pc_voice?steps:0);
         std::lock_guard<std::mutex> lock(mixer);
-        if (speech && !system) {
-            const bool replaces_same_character=script_voice && pool && same_voice_character(pc_voices.names[ch],p->name);
-            const auto delta=script_voice && pool ? saved_voice_delta(parameter(a,2),role_adjustment) : parameter(a,2);
-            save_voice_request(ch,p->name,a,delta);
-            if (script_voice && pool && !no_wait && main_voice_blocks(ch,p->name)) {
-                if (tr.active && replaces_same_character) tr.stop(0);
-                *pool=std::move(p);
-                info.action=bus+".pooled";info.clips.push_back(clip->info);
-                return;
-            }
-            if (script_voice && ch<2) pool_matching_effect_voices(ch,p->name);
+        if (waiting) {
+            **pool=std::move(p);
+            info.action=bus+".pooled";info.clips.push_back(clip->info);
+            return;
         }
         info.action=bus+".play"; info.clips.push_back(clip->info);
         if (button_voice && alternate_button_voices) next_button_voice=(next_button_voice+1U)%2U;
@@ -902,8 +906,8 @@ void GameAudio::restart_loop_script_audio() {
     for (std::size_t channel=0;channel<impl_->voices.size();++channel) {
         auto& track=impl_->voices[channel];
         if (channel>=2 && (impl_->pooled_voices[channel-2] || impl_->voice_work_override[channel-2])) {
-            auto program=impl_->pooled_voices[channel-2] ? impl_->pooled_voices[channel-2] : track.program;
-            if (program && impl_->pc_voices.work[channel][0]) {
+            auto program=impl_->pooled_voices[channel-2].value_or(track.program);
+            if (impl_->pc_voices.work[channel][0]) {
                 impl_->restart_effect_voice(channel,std::move(program));
                 impl_->voice_work_override[channel-2]=false;
             } else track.stop(0);
@@ -1057,7 +1061,7 @@ void GameAudio::save_snapshot(snapshot::Writer& out) const {
     const std::array<bool,2> pooled{static_cast<bool>(impl_->pooled_voices[0]),static_cast<bool>(impl_->pooled_voices[1])};
     const bool voice_pool_metadata=pooled[0] || pooled[1] || impl_->no_wait_voice[0] || impl_->no_wait_voice[1] ||
         impl_->voice_work_override[0] || impl_->voice_work_override[1];
-    if (voice_pool_metadata || std::any_of(voices.names.begin(),voices.names.end(),[](const auto& name){return !name.empty();}))
+    if (voice_pool_metadata || voices.has_request())
         out(pc_voice_snapshot_tag,voices.names,voices.work,voices.count);
     if (voice_pool_metadata) out(voice_pool_snapshot_tag,pooled,impl_->no_wait_voice,impl_->voice_work_override);
 }
@@ -1076,7 +1080,7 @@ void GameAudio::restore_pc_voice_state(const PcAudioState& state) {
 }
 bool GameAudio::has_pc_voice_state() const {
     std::lock_guard<std::mutex> command(impl_->commands);
-    return std::any_of(impl_->pc_voices.names.begin(),impl_->pc_voices.names.end(),[](const auto& name){return !name.empty();});
+    return impl_->pc_voices.has_request();
 }
 
 void GameAudio::load_snapshot(snapshot::Reader& in,bool keep_music_position,
@@ -1186,10 +1190,15 @@ void GameAudio::read_snapshot(snapshot::Reader& in,bool keep_music_position,
             continue;
         }
         const auto& name=voices.names[i+2];
-        auto program=std::make_shared<Program>();
-        program->name=name;program->parts.push_back(impl_->files.speech(name));
-        if (pooled[i]) pooled_programs[i]=std::move(program);
-        else live.program=std::move(program); // Saved loop work outlives a de-duplicated one-shot.
+        if (pooled[i]) pooled_programs[i].emplace();
+        try {
+            auto program=std::make_shared<Program>();
+            program->name=name;program->parts.push_back(impl_->files.speech(name));
+            if (pooled[i]) *pooled_programs[i]=std::move(program);
+            else live.program=std::move(program); // Saved loop work outlives a de-duplicated one-shot.
+        } catch (const AudioError&) {
+            if (!pooled[i]) throw;
+        }
     }
     // PC quick load starts the saved BGM at its intro, even when the same
     // program is already playing. Prepare it before changing the live mixer.
@@ -1282,8 +1291,9 @@ void GameAudio::advance_script_voices() {
     std::lock_guard<std::mutex> lock(impl_->mixer);
     for (std::size_t i=2;i<impl_->voices.size();++i) {
         auto& pooled=impl_->pooled_voices[i-2];
-        if (pooled && !impl_->main_voice_blocks(static_cast<int>(i),pooled->name)) {
-            impl_->restart_effect_voice(i,std::move(pooled));
+        if (pooled && !impl_->main_voice_blocks(static_cast<int>(i),impl_->pc_voices.names[i])) {
+            impl_->restart_effect_voice(i,std::move(*pooled));
+            pooled.reset();
             impl_->voice_work_override[i-2]=false;
         }
     }

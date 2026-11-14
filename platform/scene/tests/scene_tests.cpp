@@ -3269,6 +3269,92 @@ int main(){
         audio.message_started();require(audio.pc_state().voice_exist_count[2]==0,"message counter did not expire");
         audio.stop_script_audio();require(!audio.has_pc_voice_state(),"stop-all retained prior script voice metadata");
     });
+    suite.test("a failed VOICE replaces the saved request and cannot revive its old loop",[]{
+        Model model;model.message=true;
+        model.strings.push_back("aa_missing");
+        model.strings.push_back("");
+        model.code.number(nnn::audio::voice,{4,2,0,1});model.code.print(1);
+        model.code.number(nnn::audio::voice,{5,2,bits(-3),1});model.code.print(2);
+        model.code.number(nnn::audio::voice,{4,2,0,1});model.code.print(3);
+        model.code.number(nnn::audio::voice,{6,2,0,1});model.code.print(4);model.code.end();
+        TempGame temp(model);temp.text("init/game.xtx","saveLog 0\n");
+        temp.write("cdvaw/aa/aa_voice.vaw",pcm_vaw(1,44100,8,{188,198,208,218}));
+        scene::GameSession game(temp.root,test_options());
+        scene::InputState advance;advance.advance=true;
+        require(game.step_frame(0).wait==scene::Wait::Dialogue && game.audio().state().voices[2].looping,"old voice was not playing");
+        const auto verify=[&](const std::string& name,int id) {
+            require(!game.audio().state().voices[2].active,"failed VOICE kept the previous loop playing");
+            const auto slot=game.export_pc_save();
+            const auto status=scene::pc::parse_save(slot).status;
+            require(status.loop_voice_names[2]==name && status.loop_voice[2][0]==1 &&
+                status.loop_voice[2][1]==id && status.loop_voice[2][2]==(name.empty()?0:-3) &&
+                status.voice_exist_count[2]==1,"PC save retained the previous VOICE request");
+            scene::GameSession candidate(temp.root,test_options());
+            candidate.load_pc_save_candidate(slot);
+            require(!candidate.audio().state().voices[2].active && candidate.audio().pc_state().voice_names[2]==name,
+                "PC load played another voice or dropped the failed request");
+            candidate.restore_snapshot(game.snapshot());
+            const auto restored=candidate.audio().pc_state();
+            require(!candidate.audio().state().voices[2].active && restored.voice_names[2]==name &&
+                restored.voices[2][0]==1 && restored.voices[2][1]==id && restored.voice_exist_count[2]==1,
+                "native load lost the failed request");
+            game.audio().suspend_script_audio();game.audio().restart_loop_script_audio();
+            require(!game.audio().state().voices[2].active,"menu return restarted the replaced loop");
+        };
+        require(game.step_frame(0,advance).wait==scene::Wait::Dialogue,"missing voice stopped the script");
+        verify("aa_missing",5);
+        require(game.step_frame(0,advance).wait==scene::Wait::Dialogue && game.audio().state().voices[2].looping,
+            "valid voice failed after the missing request");
+        require(game.step_frame(0,advance).wait==scene::Wait::Dialogue,"empty voice stopped the script");
+        verify("",6);
+    });
+    suite.test("a missing waiting VOICE owns its work until the corresponding line ends",[]{
+        Model model;model.code.end();TempGame temp(model);
+        temp.text("init/game.xtx","checkSameCharaMustChannel1 1\n");
+        temp.write("cdvaw/aa/aa_voice.vaw",pcm_vaw(1,44100,8,{188,198,208,218}));
+        temp.text("cdvaw/aa/aa_broken.vaw","invalid voice data");
+        temp.write("cdvaw/bb/bb_effect.vaw",pcm_vaw(1,44100,8,{138,148,158,168}));
+        const auto cue=[](const char* name,int channel,bool loop) {
+            nnn::SystemEvent event;event.opcode=nnn::audio::voice;event.text=name;
+            event.parameters={0,channel,0,loop?1:0};return event;
+        };
+        using nnn::audio::GameAudio;
+        GameAudio game(temp.root);
+        require(game.submit(cue("aa_voice",0,true)).empty(),"could not start a replaceable loop");
+        require(!game.submit(cue("aa_broken",0,false)).empty() && !game.state().voices[0].active,
+            "undecodable replacement did not stop the old loop");
+        require(game.pc_state().voice_names[0]=="aa_broken" && game.pc_state().voices[0][0]==0 && game.stats().errors==1,
+            "decode failure retained the old loop work");
+        require(game.submit(cue("aa_voice",0,false)).empty() && game.submit(cue("bb_effect",3,true)).empty(),
+            "could not start the line and unrelated effect");
+        require(!game.submit(cue("aa_missing",3,true)).empty() && game.state().voices[3].name=="bb_effect" &&
+            game.pc_state().voice_names[3]=="aa_missing","waiting request lost its name or interrupted the unrelated effect");
+        nnn::snapshot::Writer saved;game.save_snapshot(saved);
+        GameAudio restored(temp.root);
+        nnn::snapshot::Reader reader(saved.bytes);restored.load_snapshot(reader);
+        require(restored.state().voices[3].name=="bb_effect" && restored.pc_state().voice_names[3]=="aa_missing",
+            "native load crossed the active and waiting voice owners");
+        std::array<std::int16_t,32> pcm{};
+        restored.pull(pcm.data(),pcm.size()/2);restored.advance_script_voices();
+        require(!restored.state().voices[3].active && restored.pc_state().voices[3][0]==1,
+            "releasing unavailable voice work revived an older effect or erased the saved loop request");
+        game.suspend_script_audio();game.restart_loop_script_audio();
+        require(!game.state().voices[3].active,"menu restart attached the new loop work to the old effect");
+    });
+    suite.test("native audio preserves other empty VOICE work after the message count expires",[]{
+        Model model;model.code.end();TempGame temp(model);
+        nnn::audio::GameAudio audio(temp.root);
+        nnn::SystemEvent cue;cue.opcode=nnn::audio::voice;cue.text="";cue.parameters={0,2,-3,0,12};
+        require(!audio.submit(cue).empty(),"empty resource did not warn");
+        audio.message_started();audio.message_started();
+        const auto saved=audio.pc_state();
+        require(audio.has_pc_voice_state() && saved.voice_exist_count[2]==0 && saved.voices[2][0]==0 && saved.voices[2][1]==0 &&
+            saved.voices[2][2]==-3 && saved.voices[2][3]==12,"voice work was lost after two unvoiced messages");
+        nnn::snapshot::Writer encoded;audio.save_snapshot(encoded);
+        nnn::audio::GameAudio restored(temp.root);
+        nnn::snapshot::Reader reader(encoded.bytes);restored.load_snapshot(reader);
+        require(reader.remaining()==0 && restored.pc_state().voices[2]==saved.voices[2],"native snapshot lost silent voice parameters");
+    });
     suite.test("completed voice fades disarm saved loops before and after PCM retirement",[]{
         Model model;model.code.end();TempGame temp(model);
         temp.write("cdvaw/li/line.vaw",pcm_vaw(1,44100,8,{188,198,208,218}));
@@ -3407,6 +3493,12 @@ int main(){
             require(actual.voices[0]==expected.voices[0] && actual.voice_names[0]==expected.voice_names[0] &&
                 actual.voice_exist_count[0]==2,"muted voice lost its role-adjusted PC replay state");
         }
+        voice.text="aa_missing";
+        require(!reference.submit(voice).empty() && reference.pc_state().voices[0][2]==expected.voices[0][2] &&
+            !reference.state().voices[0].active,"missing voice lost the original role-adjusted gain");
+        voice.text="aa_voice";voice.parameters[2]=expected.voices[0][2];
+        require(reference.submit_pc_voice(voice).empty() && reference.pc_state().voices[0][2]==expected.voices[0][2],
+            "PC restore applied the saved character adjustment twice");
     });
     suite.test("backlog replay leaves script loops available to restart",[]{
         Model m;m.code.end();TempGame temp(m);
