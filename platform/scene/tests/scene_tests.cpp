@@ -5,6 +5,7 @@
 #include "nnn/snapshot.hpp"
 #include "fixtures/generated_cases.hpp"
 #include "../src/chart_node_save.hpp"
+#include "../src/legacy_chart.hpp"
 #include "../src/game_assets.hpp"
 #include "../src/pc_save.hpp"
 
@@ -1033,6 +1034,93 @@ int main(){
             legacy.act_modal(modal->request,1,1)==-1 && legacy.act_modal(modal->request,0,0)==2,
             "empty graphs pass through and the old party view retains its read-only roster defaults");
     });
+    suite.test("legacy chart callbacks, original checkpoints and nonzero PC state round trip",[]{
+        Model model;model.message=true;
+        model.code.add({5,0x66660004U,0,1,0x900003e9U}); // genzaichi(1001)
+        model.code.add({6,0x66660004U,1,2,0x900003ebU,0x90000000U}); // eraberu(1003,0)
+        model.code.print(1);
+        model.command_adjust.push_back(model.code.add({5,0x66660003U,0,0,0}));
+        model.code.add({5,0x66660004U,0,1,0x900003eaU}); // genzaichi(1002)
+        model.code.print(2);
+        model.command_adjust.push_back(model.code.add({5,0x66660003U,0,0,1}));
+        model.code.print(3);model.code.end();
+        TempGame temp(model);
+        temp.text("init/game.xtx","extSaveDataNumber 1\nextSaveDataSize1 11280\n");
+        temp.text("init/chart.xtx","chartListNumber 1\nbasicChartNumber 1\nslotSizeX 1\nslotSizeY 1\n");
+        temp.text("chart/chart1.xtx","1800 @1001 1 100 100 1002 1003 First @1002 1 200 200 Second @1003 1 300 300 Locked\n");
+        temp.text("spt/command.xtx","chartmap,d\n");
+        temp.text("spt/function.xtx","genzaichi,d,eraberu,d,");
+        const std::string now="\x83\x58\x83\x8d\x83\x62\x83\x67\x94\xd4\x8d\x86";
+        const std::string prior="\x8d\xc5\x8f\x49\x91\x49\x91\xf0\x92\x6e";
+        const std::string page="\x8d\xa1\x95\x5c\x8e\xa6\x82\xb5\x82\xc4\x82\xa2\x82\xe9\x83\x7d\x83\x62\x83\x76";
+        const std::string current="\x8c\xbb\x8d\xdd\x92\x6e",reserved="\x8c\xa9\x82\xbd\x97\x5c\x96\xf1";
+        const std::string names=now+'\n'+prior+'\n'+page+'\n'+current+'\n'+reserved+'\n';
+        Bytes variable_names(names.begin(),names.end());for (auto& byte:variable_names) byte^=0xffU;
+        temp.write("spt/var.fxf",variable_names);
+        for (int sheet=1;sheet<=4;++sheet)temp.write("sys/ta_chart_button1_"+std::to_string(sheet)+".dwq",asset("tiny_red"));
+        auto options=test_options();options.width=800;options.height=600;
+        auto layout=std::make_shared<scene::pc::DirectorySaveLayout>(*options.save_layout);
+        layout->extension_code_base=9;layout->files.status_bytes=scene::pc::legacy_status_bytes;
+        layout->files.layer_records=16;layout->files.message_width=scene::pc::legacy_message_width;layout->files.registers_okikae=false;
+        options.save_layout=layout;
+        const auto storage=temp.root/"private";
+        scene::GameSession game(temp.root,options);game.set_chart_storage(storage);
+        require(game.legacy_chart() && scene::GameSession::uses_legacy_chart(temp.root),"Old chart configuration was not bound");
+        require(game.step_frame(0).wait==scene::Wait::Dialogue && game.variable(0)==1001 && game.variable(3)==1001,
+            "genzaichi did not execute before the first dialogue");
+        nnn::chart::Graph graph(temp.root,800,600,{},nnn::chart::Variant::LegacyChart);
+        const auto checkpoint_bytes=read_file(storage/"mushiex/chart1/slot1001.dat");
+        const auto checkpoint=scene::legacy_chart::parse_node(checkpoint_bytes,graph);
+        require(checkpoint.status.game_mode==51 && checkpoint.status.adjust_version==0 && checkpoint.vars[0]==1001,
+            "Old node checkpoint did not retain raw function continuation and private PC mode");
+        require(scene::GameSession::validate_chart_file(temp.root,"MUSHIEX/CHART1/SLOT1001.DAT",checkpoint_bytes),
+            "Archive validation rejected a canonical original node with case-insensitive PC spelling");
+        for (const auto* bad:{"../mushiex/chart1/slot1001.dat","mushiex/chart01/slot1001.dat","mushiex/chart1/slot01001.dat",
+                "mushiex/chart2/slot1001.dat","mushiex/chart1/slot1999.dat","emberfall.chart/chart1/slot1001.dat"})
+            require(!scene::GameSession::validate_chart_file(temp.root,bad,checkpoint_bytes),"Archive node path bypassed the graph contract");
+        require(scene::GameSession::validate_chart_file(temp.root,"mushiex/mita.dat",Bytes(10004)) &&
+            scene::GameSession::validate_chart_file(temp.root,"mushiex/tsuka.dat",Bytes(10000)) &&
+            !scene::GameSession::validate_chart_file(temp.root,"mushiex/mita.dat",Bytes(10000)) &&
+            !scene::GameSession::validate_chart_file(temp.root,"mita.dat",Bytes(10004)) &&
+            !scene::GameSession::validate_chart_file(temp.root,"mushiex/chart1/slot1001.dat",Bytes(3)),
+            "Legacy archive validation accepted a wrong global layout/location or incomplete checkpoint");
+        require(game.runtime()->chart_progress() && game.runtime()->chart_progress()->seen[1001]==1 &&
+            !std::filesystem::exists(storage/"mushiex/mita.dat"),"Native callbacks must publish progress without competing with the global file owner");
+        scene::InputState click;click.advance=true;
+        auto modal=game.step_frame(0,click).modal;
+        require(modal && modal->chart && modal->chart->min_scroll==-300 && modal->selection==1001 && game.modal_savable(),
+            "chartmap did not create the original chart view");
+        const auto saved=game.export_pc_save();const auto pc=scene::pc::parse_save(saved);
+        require(pc.status.game_mode==51 && pc.status_bytes==scene::pc::legacy_status_bytes && pc.extensions.size()==1 &&
+            pc.extensions[0].size()==11280 && pc.extensions[0][1003/8]==8,"Nonzero disabled state was not exported through EXT1");
+        auto restored_options=options;restored_options.runtime=game.runtime()->fork();
+        scene::GameSession restored(temp.root,restored_options);restored.set_chart_storage(storage);
+        restored.restore_pc_save(saved);
+        require(restored.state().modal && restored.state().modal->selection==1001 &&
+            scene::pc::parse_save(restored.export_pc_save()).extensions==pc.extensions,"PC mode 51 failed to restore chart state");
+        require(restored.act_modal(restored.state().modal->request,7,-300)==0,"Legacy chart minimum scroll was rejected");
+        const auto native=restored.snapshot();nnn::snapshot::Reader inspect(native);scene::GameSession::inspect_snapshot(inspect);
+        restored.restore_snapshot(native);
+        require(restored.state().modal && restored.state().modal->chart->scroll==-300,"Negative chart scroll did not survive native restore");
+        const auto pointer=[](int x,int y){return x*65536+y;};
+        require(restored.act_modal(restored.state().modal->request,1,pointer(200,500))==4 &&
+            restored.act_modal(restored.state().modal->request,8,0)==2 && restored.variable(0)==1002 && restored.variable(1)==1002,
+            "Forward legacy selection did not commit slot and last-selection variables");
+        require(restored.step_frame(0).wait==scene::Wait::Dialogue && restored.state().dialogue.message_id==2,
+            "Chart selection did not resume the actual script");
+        const auto next=scene::legacy_chart::parse_node(read_file(storage/"mushiex/chart1/slot1002.dat"),graph);
+        require(next.run.move_road[1001]==1 && restored.runtime()->chart_progress()->traversed[1001]==1,
+            "Selected edge was lost from current-route or global traversed state");
+        modal=restored.step_frame(0,click).modal;
+        require(modal && restored.act_modal(modal->request,1,pointer(100,200))==0 &&
+            restored.act_modal(restored.state().modal->request,4,1)==4 &&
+            restored.act_modal(restored.state().modal->request,8,0)==2,"Legacy revisit failed its original confirmation flow");
+        require(restored.variable(0)==1001 && restored.variable(1)==1001 && restored.step_frame(0).wait==scene::Wait::Dialogue &&
+            restored.state().dialogue.message_id==1,"Old checkpoint did not resume after genzaichi with the selected node intact");
+        require(std::none_of(restored.warnings().begin(),restored.warnings().end(),[](const auto& warning){
+            return warning.find("Unsupported user function")!=std::string::npos || warning.find("Legacy chart checkpoint:")!=std::string::npos;
+        }),"A private callback advanced only through an unsupported fallback");
+    });
     suite.test("chart sentinel checkpoints, pending snapshots and validated branch rewinds",[]{
         Model model;model.message=true;
         model.command_adjust.push_back(model.code.add({5,0x66660003U,0,0,0}));
@@ -1069,6 +1157,9 @@ int main(){
             "initial sentinel checkpoints node 1 then follows its single cross-page edge");
         const nnn::chart::Graph graph(temp.root,128,96);
         const auto initial=read_file(storage/"chart1/slot1.dat");
+        require(scene::GameSession::validate_chart_file(temp.root,"emberfall.chart/chart1/slot1.dat",initial) &&
+            !scene::GameSession::validate_chart_file(temp.root,"mushiex/chart1/slot1.dat",initial),
+            "Standard archive nodes must retain their own path and graph dialect");
         const auto moved=scene::parse_chart_node(read_file(storage/"chart2/slot1000.dat"),graph);
         require(scene::parse_chart_node(initial,graph).vars[1]==0 && moved.run.move_road[0]==1 && moved.vars[2]==1 &&
             game.runtime()->chart_progress()->seen[1]==1 && game.runtime()->chart_progress()->seen[1000]==1,
@@ -2452,10 +2543,10 @@ int main(){
         require(game.surface().rgb[0]==100,"window decoration changed the native scene cache");
     });
     suite.test("Long message image precedes the filter and follows its own hide setting",[]{
-        for (const bool hide_image:{false,true}) {
+        for (const auto first_command:{0x22220002U,0x22220003U}) for (const bool hide_image:{false,true}) {
             Model model;model.message=true;
             model.code.number(effect,{0,54,0,100,100,100});
-            model.code.add({6,command,0x22220002U,0,1,0});
+            model.code.add({6,command,first_command,0,1,0});
             model.code.end();
             TempGame temp(model);
             temp.write("sys/insert.dwq",asset("tiny_red"));
@@ -2463,7 +2554,8 @@ int main(){
                 "lprintBGMultiR 50\nlprintBGMultiG 50\nlprintBGMultiB 50\naddLPrintImageOffWithWindow "+
                 std::to_string(hide_image?1:0)+"\n");
             scene::GameSession game(temp.root,test_options());
-            require(game.step_frame(0).wait==scene::Wait::Dialogue,"LPRINT not reached");
+            require(game.step_frame(0).wait==scene::Wait::Dialogue && game.state().dialogue.layout_command==0x22220002U,
+                "LPRINT or initial APPEND did not establish long-message layout");
             game.set_message_plane(nullptr);
             require(game.surface().rgb==Bytes({127,0,0}),"LPrintBG did not filter the additional image");
             auto hidden=std::make_shared<emberfall::render::MessagePlane>();hidden->show_backdrop=false;
@@ -2710,6 +2802,43 @@ int main(){
         game.restore_snapshot(saved);
         require(game.surface().rgb==first&&game.stats().decodes==decodes,"compact snapshot missed cached layer");
         require(game.runtime()==owner && &game.audio()==audio,"restore replaced a live owner");
+    });
+    suite.test("menu music inheritance retains both crossfade tracks without script audio",[]{
+        Model model;model.code.end();TempGame temp(model);
+        temp.text("spt/bgmlist.xtx","first,First\nsecond,Second\n");
+        temp.write("wgq/first.wgq",read_file(fixtures/"assets/tone_first.wgq"));
+        temp.write("wgq/second.wgq",read_file(fixtures/"assets/tone_second.wgq"));
+        temp.text("spt/selist.xtx","sample\n");
+        temp.write("vaw/se/sample.vaw",pcm_vaw(1,44100,8,{148,158,168,178}));
+        temp.write("cdvaw/li/line.vaw",pcm_vaw(1,44100,8,{188,198,208,218}));
+        nnn::audio::GameAudio source(temp.root),target(temp.root);
+        nnn::SystemEvent music;music.opcode=nnn::audio::music;music.parameters={1,0,0,0,0};
+        require(source.submit(music).empty(),"first inherited BGM fixture failed");
+        std::array<std::int16_t,512> warm{};source.pull(warm.data(),warm.size()/2);
+        music.parameters={2,0,0,3,2};require(source.submit(music).empty(),"crossfading inherited BGM fixture failed");
+        source.pull(warm.data(),warm.size()/2);
+        nnn::SystemEvent speech;speech.opcode=nnn::audio::voice;speech.text="line";speech.parameters={0,2,0,1};
+        nnn::SystemEvent sound;sound.opcode=nnn::audio::sound;sound.parameters={0,0,0,1};
+        require(source.submit(speech).empty() && source.submit(sound).empty(),"script audio fixture failed");
+        target.inherit_music(source);
+        const auto state=target.state();
+        require(state.bgm.active && state.bgm.fading && state.bgm.source_frame==source.state().bgm.source_frame &&
+            std::none_of(state.voices.begin(),state.voices.end(),[](const auto& track){return track.active;}) &&
+            std::none_of(state.sounds.begin(),state.sounds.end(),[](const auto& track){return track.active;}),
+            "menu inheritance reset its BGM cursor/fade or copied script voice/SE");
+        source.stop_script_audio();
+        std::array<std::int16_t,4096> expected{},actual{};
+        source.pull(expected.data(),expected.size()/2);target.pull(actual.data(),actual.size()/2);
+        require(expected==actual && std::any_of(actual.begin(),actual.end(),[](auto sample){return sample!=0;}),
+            "inherited incoming and outgoing tracks diverged during the same PCM interval");
+        auto settings=nnn::audio::Settings{};settings.sample_rate=source.sample_rate()==44100?48000:44100;
+        nnn::audio::GameAudio different_rate(temp.root,settings);
+        music.parameters={1,0,0,0,0};require(different_rate.submit(music).empty(),"different-rate fixture failed");
+        different_rate.pull(warm.data(),warm.size()/2);
+        nnn::snapshot::Writer before,after;different_rate.save_snapshot(before);
+        bool refused=false;try {different_rate.inherit_music(source);} catch(const std::invalid_argument&) {refused=true;}
+        different_rate.save_snapshot(after);
+        require(refused && before.bytes==after.bytes,"sample-rate rejection changed the destination music state");
     });
     suite.test("finished current-line voices remain replayable through PC and native saves",[]{
         Model model;model.message=true;model.code.voice();model.code.print(1);model.code.print(2);model.code.end();
@@ -4049,10 +4178,14 @@ int main(){
         }
     });
     suite.test("A short retained DRAW waits for its own displayed plane before the next capture",[]{
+        for (const bool long_message:{false,true}) for (const Word draw_frames:{1U,2U}) {
         Model model;model.message=true;
         model.code.number(effect,{0,54,0,90,0,0});
-        model.code.print(1);
-        model.code.present(1);
+        if (long_message) {
+            model.code.add({6,command,0x22220002U,0,1,0});
+            model.code.number(0x3333001bU,{2,2}); // STARTMESSAGE nextWindow=2 retains the original window.
+        } else model.code.print(1);
+        model.code.present(draw_frames);
         model.code.number(0x33330011U,{});
         model.code.number(effect,{0,54,0,0,0,90});
         model.code.number(0x22220005U,{0,2});
@@ -4068,7 +4201,7 @@ int main(){
         mailbox->push(first.data(),4,1,1,game.expected_plane_key());
         require(compositor.present(game,true,true,submit)==Outcome::Presented,"first PRINT not presented");
         scene::InputState click;click.advance=true;
-        require(game.step_frame(0,click).wait==scene::Wait::Draw && game.state().remaining_frames==1,
+        require(game.step_frame(0,click).wait==scene::Wait::Draw && game.state().remaining_frames==draw_frames,
             "short DRAW not reached");
         require(compositor.present(game,false,true,submit)==Outcome::SkippedPending && compositor.waiting_for_draw(game),
             "old Dialogue plane must not authorize the retained DRAW timer");
@@ -4078,8 +4211,11 @@ int main(){
             compositor.waiting_for_draw(game),"failed surface submission acknowledged the short DRAW");
         require(compositor.present(game,false,true,submit)==Outcome::Presented && !compositor.waiting_for_draw(game),
             "ready DRAW did not release the presentation wait");
+        if (draw_frames==2)
+            require(game.step_frame(game.frame_ms()).wait==scene::Wait::Draw,"two-frame DRAW consumed its final tick early");
         require(game.step_frame(game.frame_ms()).wait==scene::Wait::Overlap && game.surface().rgb==Bytes({0,0,200}),
             "PREPAREOVERRAP lost the displayed short DRAW");
+        }
     });
     suite.test("PlaneMailbox replaces, removes and resizes the floating plane",[]{
         scene::PlaneMailbox mailbox;

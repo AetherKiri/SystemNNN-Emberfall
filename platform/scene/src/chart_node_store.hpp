@@ -1,6 +1,7 @@
 #pragma once
 
 #include "chart_node_save.hpp"
+#include "legacy_chart.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -34,13 +35,26 @@ public:
             file=nnn::game_config::find_file(directory,relative.filename().string());
         }
         if (file.empty()) return {};
-        return parse_chart_node(read_exact(file,max_node_bytes),graph);
+        const auto bytes=read_exact(file,max_node_bytes);
+        return graph.variant()==nnn::chart::Variant::LegacyChart ? legacy_chart::parse_node(bytes,graph) : parse_chart_node(bytes,graph);
     }
 
     void write(nnn::Value slot,const ChartNodeSave& state,const nnn::chart::Graph& graph) const {
         if (private_.empty()) throw std::runtime_error("Chart node storage has no private directory");
         const auto file=private_/checked_path(slot,graph);
-        const auto bytes=write_chart_node(state,graph);
+        const auto bytes=graph.variant()==nnn::chart::Variant::LegacyChart ? legacy_chart::write_node(state,graph) : write_chart_node(state,graph);
+        write_atomic(file,bytes);
+    }
+
+    nnn::chart::Progress legacy_progress(const nnn::chart::Graph& graph) const {
+        auto result=graph.global_defaults();
+        const bool old=graph.variant()==nnn::chart::Variant::LegacyChart;
+        read_flags(old ? "mushiex/mita.dat" : "mita.dat",result.seen,old);
+        read_flags(old ? "mushiex/tsuka.dat" : "tsuka.dat",result.traversed,old);
+        return result;
+    }
+private:
+    static void write_atomic(const std::filesystem::path& file,const nnn::snapshot::Bytes& bytes) {
         std::filesystem::create_directories(file.parent_path());
         const auto serial=sequence_.fetch_add(1,std::memory_order_relaxed);
         const auto clock=std::chrono::steady_clock::now().time_since_epoch().count();
@@ -61,18 +75,10 @@ public:
         }
     }
 
-    nnn::chart::Progress legacy_progress(const nnn::chart::Graph& graph) const {
-        auto result=graph.global_defaults();
-        read_flags("mita.dat",result.seen);
-        read_flags("tsuka.dat",result.traversed);
-        return result;
-    }
-
-private:
     static std::filesystem::path checked_path(nnn::Value slot,const nnn::chart::Graph& graph) {
         auto name=graph.legacy_slot_path(slot);
         if (name.empty()) throw std::runtime_error("Unknown chart node");
-        return name;
+        return graph.variant()==nnn::chart::Variant::LegacyChart ? std::filesystem::path("mushiex")/name : std::filesystem::path(name);
     }
     static nnn::snapshot::Bytes read_exact(const std::filesystem::path& file,std::size_t limit) {
         const auto size=std::filesystem::file_size(file);
@@ -83,9 +89,16 @@ private:
             in.peek()!=std::char_traits<char>::eof() || in.bad()) throw std::runtime_error("Cannot read complete chart data");
         return bytes;
     }
-    void read_flags(const char* name,std::vector<nnn::Byte>& target) const {
-        if (original_.empty()) return;
-        const auto file=nnn::game_config::find_file(original_,name);
+    void read_flags(const char* name,std::vector<nnn::Byte>& target,bool prefer_private) const {
+        const std::filesystem::path relative(name);
+        auto file=prefer_private && !private_.empty() ? private_/relative : std::filesystem::path{};
+        if (file.empty() || !std::filesystem::exists(file)) {
+            if (original_.empty()) return;
+            const auto directory=relative.parent_path().empty() ? original_ :
+                nnn::resource::find_directory(original_,relative.parent_path().string());
+            if (directory.empty()) return;
+            file=nnn::game_config::find_file(directory,relative.filename().string());
+        }
         if (file.empty()) return;
         auto bytes=read_exact(file,target.size());
         if (bytes.size()!=target.size()) throw std::runtime_error("Invalid legacy chart flag count");

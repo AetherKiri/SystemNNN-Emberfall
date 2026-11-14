@@ -64,6 +64,7 @@ struct Setup {
 };
 
 struct AtlasSlice { std::string asset; Rect source; };
+enum class Variant { SelectChart, LegacyChart };
 
 // These arrays follow one playthrough and are captured in each node slot.
 struct RunState { std::vector<Byte> move_road; std::vector<Word> can_select; };
@@ -113,26 +114,28 @@ void restore_variables(const SavedVariables& saved,Write&& write) {
 class Graph {
 public:
     Graph(const std::filesystem::path& root,Value logical_width,Value logical_height,
-        const resource::FilenameEncoder& encode={}) {
-        const auto path=game_config::find(root,"init","selectchart.xtx",encode);
+        const resource::FilenameEncoder& encode={},Variant variant=Variant::SelectChart) : variant_(variant) {
+        const bool legacy=variant==Variant::LegacyChart;
+        const auto path=game_config::find(root,"init",legacy ? "chart.xtx" : "selectchart.xtx",encode);
         if (path.empty()) return;
         const auto config=game_config::read_text(path);
         const game_config::NameListSetup list(config);
-        const auto page_count=list.integer("chartListNumber",1);
-        const auto block_size=list.integer("chartBlockSize",1000);
-        const auto slots=chart_slot_capacity(page_count,block_size);
+        const auto encrypted=list.integer("chartAngouFlag",0)!=0;
+        const auto directory=resource::find_directory(root,"chart",encode);
+        const auto page_count=legacy ? legacy_pages(list,directory,encrypted,encode) : list.integer("chartListNumber",1);
+        const auto block_size=legacy ? 1000 : list.integer("chartBlockSize",1000);
+        const auto slots=legacy ? legacy_slot_capacity : chart_slot_capacity(page_count,block_size);
         if (logical_width<=0 || logical_height<=0 || logical_width>max_coord || logical_height>max_coord)
             throw std::runtime_error("Invalid chart canvas dimensions");
         setup_.block_size=block_size;
-        setup_.basic_charts=std::clamp(list.integer("basicChartNumber",page_count),Value{0},page_count);
+        const auto basic_limit=legacy ? std::min(page_count,8) : page_count;
+        setup_.basic_charts=std::clamp(list.integer("basicChartNumber",basic_limit),Value{0},basic_limit);
         setup_.width=logical_width;
         setup_.height=logical_height;
         read_setup(list,page_count);
         (void)atlas_name(0,0);
-        const auto encrypted=list.integer("chartAngouFlag",0)!=0;
         const auto desc_limit=std::clamp(list.integer("chartDescMax",3),Value{0},Value{128});
-        const auto bottom_space=bounded(list.integer("bottomSpace",60));
-        const auto directory=resource::find_directory(root,"chart",encode);
+        const auto bottom_space=legacy ? 0 : bounded(list.integer("bottomSpace",60));
         pages_.reserve(static_cast<std::size_t>(page_count));
         slot_indices_.assign(slots,-1);
         for (Value id=0;id<page_count;++id) {
@@ -149,6 +152,7 @@ public:
     }
 
     bool configured() const noexcept { return !pages_.empty(); }
+    Variant variant() const noexcept { return variant_; }
     const Setup& setup() const noexcept { return setup_; }
     const std::vector<Page>& pages() const noexcept { return pages_; }
     const Page* page(Value id) const noexcept {
@@ -172,7 +176,7 @@ public:
         if (!item || first_width<setup_.slot_width || first_height<setup_.slot_height ||
             first_width>max_coord || first_height>max_coord) return {};
         const auto columns=first_width/setup_.slot_width,rows=first_height/setup_.slot_height;
-        const auto cell=slot-item->page*setup_.block_size;
+        const auto cell=slot-(item->page+(variant_==Variant::LegacyChart ? 1 : 0))*setup_.block_size;
         const auto sheet=static_cast<Value>(cell/(std::int64_t{columns}*rows));
         return AtlasSlice{atlas_name(item->page,sheet),
             {(cell%columns)*setup_.slot_width,((cell/columns)%rows)*setup_.slot_height,setup_.slot_width,setup_.slot_height}};
@@ -180,20 +184,27 @@ public:
 
     Value scroll_limit(Value page_id) const noexcept {
         const auto* item=page(page_id);
-        return item ? std::max(Value{0},item->extent-setup_.height) : 0;
+        return item ? std::max(Value{0},item->extent-(variant_==Variant::LegacyChart ? 300 : setup_.height)) : 0;
     }
+    Value scroll_min(Value page_id) const noexcept { return page(page_id) && variant_==Variant::LegacyChart ? -300 : 0; }
     Point screen_point(Point center,Value scroll_y) const noexcept {
         return {saturate(std::int64_t{center.x}+setup_.slot_area.x),
             saturate(std::int64_t{center.y}+setup_.slot_area.y-scroll_y)};
     }
     Value background_y(Value page_id,Value scroll_y) const noexcept {
         const auto* item=page(page_id);
+        // The original legacy callback uses literal 300/600/1200 constants,
+        // not half of the configured game canvas or a rescaled PC window.
+        if (variant_==Variant::LegacyChart)
+            return item ? static_cast<Value>(-(std::int64_t{scroll_y}+300)*600/item->extent) : 0;
         const auto range=scroll_limit(page_id);
         if (!item || range==0 || item->back_extent<=setup_.height) return 0;
         return static_cast<Value>(-(std::int64_t{item->back_extent-setup_.height}*std::clamp(scroll_y,Value{0},range))/range);
     }
     Value center_y(Value page_id,Value scroll_y,Value texture_height) const noexcept {
         const auto* item=page(page_id);
+        if (variant_==Variant::LegacyChart)
+            return item && texture_height>0 ? static_cast<Value>((-(std::int64_t{scroll_y}+300)*1200/item->extent)%600) : 0;
         const auto range=scroll_limit(page_id);
         if (!item || range==0 || texture_height<=0 || item->back_extent<=setup_.height) return 0;
         const auto shift=std::int64_t{item->back_extent-setup_.height}*setup_.center_multiplier*
@@ -202,21 +213,24 @@ public:
     }
 
     Progress global_defaults() const {
-        return {std::vector<Byte>(aligned(slot_capacity(),4U)),std::vector<Byte>(slot_capacity())};
+        return {std::vector<Byte>(seen_size()),std::vector<Byte>(slot_capacity())};
     }
     RunState run_defaults() const {
         return {std::vector<Byte>(move_road_bytes(slot_capacity())),
-            std::vector<Word>(selection_words(slot_capacity()),UINT32_MAX)};
+            std::vector<Word>(selection_size(),UINT32_MAX)};
     }
     bool valid(const Progress& progress) const noexcept {
-        return progress.seen.size()==aligned(slot_capacity(),4U) && progress.traversed.size()==slot_capacity();
+        return progress.seen.size()==seen_size() && progress.traversed.size()==slot_capacity();
     }
     bool valid(const RunState& run) const noexcept {
         return run.move_road.size()==move_road_bytes(slot_capacity()) &&
-            run.can_select.size()==selection_words(slot_capacity());
+            run.can_select.size()==selection_size();
     }
     void new_game(RunState& run) const {
-        if (valid(run)) std::fill(run.move_road.begin(),run.move_road.end(),Byte{0});
+        if (valid(run)) {
+            std::fill(run.move_road.begin(),run.move_road.end(),Byte{0});
+            if (variant_==Variant::LegacyChart) std::fill(run.can_select.begin(),run.can_select.end(),UINT32_MAX);
+        }
     }
 
     bool mark_route(Progress& progress,Value slot,Value one_based_route=0) const noexcept {
@@ -282,6 +296,10 @@ public:
 
     bool page_open(Value page_id,const ReadVariable& read={}) const {
         if (!page(page_id)) return false;
+        if (variant_==Variant::LegacyChart) {
+            if (page_id!=8) return page_id<setup_.basic_charts;
+            return variable(read,"\x82\x6e\x82\x6f\x82\x64\x82\x6d\x81\x45\x83\x60\x83\x83\x81\x5b\x83\x67\x83\x7d\x83\x62\x83\x76\x82\x58").value_or(0)!=0;
+        }
         if (page_id<setup_.basic_charts) return true;
         const auto bits=variable(read,setup_.open_var);
         return !bits || (static_cast<Word>(*bits)&(Word{1}<<static_cast<unsigned>(page_id-setup_.basic_charts)))!=0;
@@ -300,6 +318,12 @@ public:
         const ReadVariable& read={}) const {
         const auto* item=page(page_id);
         if (!item || !page_open(page_id,read)) return false;
+        if (variant_==Variant::LegacyChart) {
+            if (page_id==8) return true;
+            std::string name="\x82\x6e\x82\x6d\x81\x45\x83\x60\x83\x83\x81\x5b\x83\x67\x83\x7d\x83\x62\x83\x76\x82";
+            name.push_back(static_cast<char>(0x50+page_id));
+            return variable(read,name).value_or(0)!=0;
+        }
         return std::any_of(item->slots.begin(),item->slots.end(),[&](Value slot) {
             return gate(run,slot,read) && (edge_index(current,slot) || seen(progress,slot));
         });
@@ -317,7 +341,9 @@ public:
         const auto* item=node(current);
         if (!item) return {};
         const auto stored=variable(read,setup_.display_page_var);
-        const auto selected=stored && page(*stored) ? *stored : item->page;
+        const auto stored_page=stored && (variant_!=Variant::LegacyChart || *stored>0) ?
+            *stored-(variant_==Variant::LegacyChart ? 1 : 0) : -1;
+        const auto selected=page(stored_page) ? stored_page : item->page;
         return {current,selected,visit_scroll(*item,selected,retained_scroll)};
     }
     bool change_page(Visit& visit,Value target,const Progress& progress,const RunState& run,
@@ -469,6 +495,19 @@ public:
     }
 
 private:
+    static Value legacy_pages(const game_config::NameListSetup& list,const std::filesystem::path& directory,
+        bool encrypted,const resource::FilenameEncoder& encode) {
+        Value found=0;
+        for (Value page=1;page<=9;++page) {
+            const auto file=resource::find_file(directory,"chart"+std::to_string(page)+(encrypted ? ".fxf" : ".xtx"),encode);
+            if (!file.empty()) found=page;
+        }
+        const auto count=list.integer("chartListNumber",found);
+        if (count<1 || count>9) throw std::runtime_error("Legacy chart pages exceed the verified slot storage");
+        return count;
+    }
+    std::size_t seen_size() const noexcept { return variant_==Variant::LegacyChart ? legacy_seen_bytes : aligned(slot_capacity(),4U); }
+    std::size_t selection_size() const noexcept { return variant_==Variant::LegacyChart ? legacy_selection_words : selection_words(slot_capacity()); }
     static constexpr Value max_coord=16*1024*1024,max_tiles=1024;
     static std::size_t aligned(std::size_t n,std::size_t alignment) noexcept { return (n+alignment-1U)&~(alignment-1U); }
     static Value bounded(std::int64_t n) {
@@ -501,7 +540,8 @@ private:
     }
     void read_setup(const game_config::NameListSetup& list,Value page_count) {
         auto& setup=setup_;
-        setup.slot_area.x=bounded(list.integer("slotAreaStartX",200));
+        const bool legacy=variant_==Variant::LegacyChart;
+        setup.slot_area.x=bounded(list.integer("slotAreaStartX",legacy ? 0 : 200));
         setup.slot_area.y=bounded(list.integer("slotAreaStartY",0));
         setup.slot_area.w=bounded(list.integer("slotAreaSizeX",setup.width-setup.slot_area.x));
         setup.slot_area.h=bounded(list.integer("slotAreaSizeY",setup.height-setup.slot_area.y));
@@ -537,6 +577,14 @@ private:
         setup.complete_var=list.field("checkCompVarName").value_or("answer");
         if (list.integer("newMarkPrintFlag",0)!=0)
             setup.new_mark_var=list.field("newMarkVarName").value_or("newchartflag");
+        if (legacy) {
+            setup.slot_var="\x83\x58\x83\x8d\x83\x62\x83\x67\x94\xd4\x8d\x86";
+            setup.work_var="\x8d\xc5\x8f\x49\x91\x49\x91\xf0\x92\x6e";
+            setup.display_page_var="\x8d\xa1\x95\x5c\x8e\xa6\x82\xb5\x82\xc4\x82\xa2\x82\xe9\x83\x7d\x83\x62\x83\x76";
+            setup.open_var.clear();
+            setup.new_mark_var.clear();
+            return; // Legacy callbacks have their own function and checkpoint contract.
+        }
         struct CommandKey { Function type; const char* enable; const char* alias; const char* name; Value standard; };
         constexpr std::array<CommandKey,6> keys{{
             {Function::SetRoute,"useSetRouteFunction","setRouteFunctionName","setroute",1},
@@ -581,6 +629,13 @@ private:
         page.minimap_area={bounded(std::int64_t{page.minimap_base.x}+value("miniMapPrintX",0)),
             bounded(std::int64_t{page.minimap_base.y}+value("miniMapPrintY",30)),
             value("miniMapSizeX",120),value("miniMapSizeY",180)};
+        if (variant_==Variant::LegacyChart) {
+            // Legacy DrawMiniMap uses base(18,369), x/10 and y*180/extent.
+            // For the existing centered-dot renderer these offsets produce
+            // its original 12x3 pixel dot positions without moving the base.
+            page.minimap_base={18,369};
+            page.minimap_area={19,370,setup_.width/10,180};
+        }
         return page;
     }
     void parse_page(Page& page,std::string_view text,Value desc_limit,Value bottom_space) {
@@ -595,7 +650,7 @@ private:
             Node item;
             item.slot=numeric(field->substr(1));
             item.page=page.id;
-            if (item.slot<0 || item.slot/setup_.block_size!=page.id || node(item.slot))
+            if (item.slot<0 || item.slot/setup_.block_size!=page.id+(variant_==Variant::LegacyChart ? 1 : 0) || node(item.slot))
                 throw std::runtime_error("Invalid or duplicate chart slot");
             item.routes=std::max(Value{1},integer());
             if (item.routes>8) throw std::runtime_error("Chart internal route count exceeds flag byte");
@@ -655,13 +710,14 @@ private:
         return dx>=0 && dx<w && dy>=0 && dy<h;
     }
     Value visit_scroll(const Node& current,Value page_id,Value retained_scroll) const noexcept {
-        const auto y=current.page==page_id ? current.center.y-setup_.height/2 : retained_scroll;
-        return std::clamp(y,Value{0},scroll_limit(page_id));
+        const auto y=current.page==page_id ? current.center.y-(variant_==Variant::LegacyChart ? 300 : setup_.height/2) : retained_scroll;
+        return std::clamp(y,scroll_min(page_id),scroll_limit(page_id));
     }
     Checkpoint checkpoint(Value slot,Value previous,RuntimeMode mode) const {
         const auto edge=edge_index(previous,slot);
         return {slot,slot,slot,std::nullopt,edge ? std::optional<Road>{{previous,*edge}} : std::nullopt,mode};
     }
+    Variant variant_=Variant::SelectChart;
     Setup setup_;
     std::string slot_tag_,back_tag_,center_tag_;
     std::vector<Page> pages_;

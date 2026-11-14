@@ -123,9 +123,9 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         return chart_progress_;
     }
-    bool set_chart_progress(chart::Progress progress) {
+    bool set_chart_progress(chart::Progress progress,chart::StorageLayout layout=chart::StorageLayout::Standard) {
         const auto nodes=progress.traversed.size();
-        if (nodes>chart::max_progress_slots || progress.seen.size()!=((nodes+3U)&~std::size_t{3})) return false;
+        if (!chart::valid_progress_extent(nodes,progress.seen.size(),layout)) return false;
         std::lock_guard<std::mutex> lock(mutex_);
         if (chart_progress_ && chart_progress_->seen==progress.seen && chart_progress_->traversed==progress.traversed) return true;
         chart_progress_=std::make_shared<const chart::Progress>(std::move(progress));
@@ -137,8 +137,9 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         return chart_selection_;
     }
-    void set_chart_selection(std::size_t slots,const std::vector<Word>& selection) {
-        if (slots==0 || slots>chart::max_progress_slots || selection.size()!=chart::selection_words(slots)) return;
+    void set_chart_selection(std::size_t slots,const std::vector<Word>& selection,
+        chart::StorageLayout layout=chart::StorageLayout::Standard) {
+        if (!chart::valid_selection_extent(slots,selection.size(),layout)) return;
         std::lock_guard<std::mutex> lock(mutex_);
         if (chart_selection_ && chart_selection_->slots==slots && chart_selection_->enabled==selection) return;
         chart_selection_=std::make_shared<const chart::SelectionSeed>(chart::SelectionSeed{slots,selection});

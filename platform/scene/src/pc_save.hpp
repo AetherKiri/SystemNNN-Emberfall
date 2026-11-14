@@ -232,6 +232,6 @@ std::vector<nnn::Byte> write_okikae(const std::vector<std::string>& replacements
 // A chart checkpoint starts with this standalone code 2 block. Read both
 // original widths and write the current 8112-byte layout.
 Status parse_status_block(const nnn::Byte* bytes,std::size_t size);
-std::vector<nnn::Byte> write_status_block(const Status& status);
+std::vector<nnn::Byte> write_status_block(const Status& status,std::size_t status_bytes=preview_status_bytes);
 
 } // namespace emberfall::scene::pc

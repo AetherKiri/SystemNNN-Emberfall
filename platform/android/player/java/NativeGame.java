@@ -63,6 +63,9 @@ final class NativeGame {
     // Each row contributes a raw label, asset name and detail string.
     static native byte[][] modalRows(long handle);
     static native int[] chartGeometry(long handle);
+    static native boolean legacyChart(long handle);
+    static native boolean legacyChartDirectory(byte[] root);
+    static native boolean validateChartFile(byte[] root,byte[] relativePath,byte[] data);
     static native byte[][] chartText(long handle);
     static native void setChartStorage(long handle,byte[] path);
     static native byte[][][] statusOverlays(long handle,int mode);

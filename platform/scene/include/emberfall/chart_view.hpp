@@ -17,7 +17,7 @@ struct ChartRoadView { int x1=0,y1=0,x2=0,y2=0,style=0; };
 struct ChartTileView { int y=0; std::string asset; };
 
 struct ChartView {
-    int scroll=0,limit=0,extent=0,back_extent=0,center_y=0;
+    int scroll=0,limit=0,extent=0,back_extent=0,center_y=0,min_scroll=0,current_page=-1;
     int slot_x=0,slot_y=0,slot_area_width=0,slot_area_height=0,slot_width=0,slot_height=0;
     int mini_x=0,mini_y=0,mini_width=0,mini_height=0,mini_base_x=0,mini_base_y=0;
     int pointer_y=-1,pending=-1,page_percent=0,total_percent=0;
