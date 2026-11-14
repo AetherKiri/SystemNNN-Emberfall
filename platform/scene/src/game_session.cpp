@@ -3923,7 +3923,7 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         return id<vars.size() ? vars[id] : 0;
     }
     nnn::Value GetVarData(nnn::Word id) override { return variable_value(id); }
-    int script_year() { return year_id==variable_count ? 2000 : GetVarData(year_id); }
+    int script_year() const { return year_id==variable_count ? 2000 : variable_value(year_id); }
     ScriptClockSample clock_value(bool script) {
         if (script && sampled_clock) return *sampled_clock;
         if (script && input.recorded_clock && !input.clock_sample)
@@ -4113,6 +4113,11 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
     }
     void capture_pc_status(pc::Status& status,nnn::RuntimeMode mode) const {
         status.saved_at=current_pc_time();
+        // The PC reads an unbound date index (-1) as the encoded literal 0x7fff.
+        const auto date=date_id==variable_count ? 0x7fff : variable_value(date_id);
+        status.game_month=date/100;
+        status.game_day=date%100;
+        status.game_weekday=weekday(script_year(),date);
         status.game_mode=static_cast<int>(mode);
         status.run_mode=static_cast<int>(vm->ActiveMode());
         status.frame_ms=static_cast<int>(period);status.remaining=30;
