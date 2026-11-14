@@ -35,8 +35,11 @@ final class RuntimeSettingsAdapter {
 
     /** Only explicit, game-scoped raw overrides. No display values become factory defaults. */
     static int[] persistedOverrides(SharedPreferences preferences,File game){
+        return persistedOverrides(preferences,game,true);
+    }
+    static int[] persistedOverrides(SharedPreferences preferences,File game,boolean includeAutoMode){
         String prefix=namespace(game);Map<String,?> all=preferences.getAll();List<Integer> result=new ArrayList<>();
-        for(int id=0;id<572;id++)if(supported(id)){
+        for(int id=0;id<572;id++)if(supported(id)&&(includeAutoMode||id!=6)){
             Integer value=integer(all,prefix+id);if(value!=null){result.add(id);result.add(value);}
         }
         // Migration TODO: old global eight-setting values used different units

@@ -932,7 +932,7 @@ API jbyteArray JNICALL FN(snapshot)(JNIEnv* env,jclass,jlong handle) {
         __android_log_print(ANDROID_LOG_WARN,"SystemNNN","Save journal only: %s",e.what());return nullptr;
     }
 }
-API void JNICALL FN(restorePcSave)(JNIEnv* env,jclass,jlong handle,jbyteArray raw,jintArray meta) {
+API void JNICALL FN(restorePcSave)(JNIEnv* env,jclass,jlong handle,jbyteArray raw,jintArray meta,jlong previous) {
     try {
         if (!raw || !meta || env->GetArrayLength(meta)<7) throw std::invalid_argument("Missing PC save data");
         const auto size=env->GetArrayLength(raw);
@@ -942,7 +942,7 @@ API void JNICALL FN(restorePcSave)(JNIEnv* env,jclass,jlong handle,jbyteArray ra
         if (env->ExceptionCheck()) return;
         auto& p=player(handle);
         // The Java runner commits this player only after the slot loads.
-        p.game->load_pc_save_candidate(data);
+        p.game->load_pc_save_candidate(data,previous ? player(previous).game.get() : nullptr);
         p.published_screen_layer.reset();
         p.compositor.reset_present_state();
         frame_meta(env,p,meta);

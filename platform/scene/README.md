@@ -12,6 +12,10 @@ Read-only skip is checked at STARTMESSAGE with the same script/serial identity a
 
 `set_ctrl_skip()` tracks the held Ctrl key. `CANNOTSKIP` blocks Ctrl-driven text advancement, and script audio evaluates Ctrl with the current skip settings and the message ID supplied by `STARTMESSAGE`. The script's `MOUSENUMBER` is exposed as `FrameState::script_mouse` and uses the original pointer field in a PC story save.
 
+PC story loads are staged in a candidate session. A save with a `LOG` block replaces the backlog, including an explicitly empty log. Without `LOG`, an in-game load retains the previous session's complete history and owned jump checkpoints. Pass that story session to `load_pc_save_candidate`; a load from the title keeps the new session's configured `firstMessage` and `barMessage` entries instead. The host must prepare its message-plane and runtime references before retiring the previous owner. Failed validation leaves the previous session usable. `clearAutoAfterLoad` controls whether a successful load clears auto and skip.
+
+Current-message voice replay state survives the end of PCM playback. Its original per-channel lifetime advances on PRINT, LPRINT and APPEND, and `playLoadVoiceFlag` replays a one-shot voice only when loading a message. Native snapshots with this voice state use version 17; readers retain compatibility with older snapshots. PC save layout is unchanged.
+
 Build and run the desktop framebuffer capture from the repository root.
 
 ```sh

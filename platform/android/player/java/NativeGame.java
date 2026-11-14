@@ -35,7 +35,7 @@ final class NativeGame {
     static native boolean musicWave(long handle,float[] wave);
     static native byte[] snapshot(long handle);
     static native boolean inspectSaveSnapshot(ByteBuffer data,int length,int wait,int word,int line,byte[][] content);
-    static native void restorePcSave(long handle,byte[] save,int[] meta);
+    static native void restorePcSave(long handle,byte[] save,int[] meta,long previous);
     static native int[] currentPcSystemSaveFormat(long gameHandle);
     static native Object[] saveLayoutConfig(byte[] gameDirectory,boolean regenerate);
     static native byte[] exportPcSave(long handle,int[] pixels,int width,int height);

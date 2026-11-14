@@ -2006,6 +2006,74 @@ int main(){
         catch (const std::runtime_error&) { rejected=true; }
         require(rejected && live.state().dialogue.sequence==2,"in-place candidate loading accepted an active session");
     });
+    suite.test("backlog starts with configured messages and respects both visibility flags",[]{
+        Model model;model.message=true;model.code.print(1);model.code.end();TempGame temp(model);
+        temp.text("init/backlog.xtx","firstMessageNumber 2\nfirstMessage1 #WOpening\nfirstMessage2 continued\nbarMessage #R---\n");
+        scene::GameSession game(temp.root,test_options());
+        require(game.backlog().size()==2 && game.backlog()[0].text=="#WOpeningcontinued" &&
+            game.backlog()[1].text=="#R---" && game.backlog()[0].configuration_text &&
+            game.backlog()[0].color==0xffffff && game.backlog()[0].jump_id==0,
+            "configured opening text, decoding owner or separator missing");
+        temp.text("init/backlog.xtx","firstMessagePrintFlag 0\nfirstBarPrintFlag 0\n");
+        scene::GameSession disabled(temp.root,test_options());
+        require(disabled.backlog().empty(),"disabled initial rows were still inserted");
+        temp.text("init/backlog.xtx","");
+        scene::GameSession defaults(temp.root,test_options());
+        require(defaults.backlog().size()==2 && !defaults.backlog()[0].text.empty() &&
+            defaults.backlog()[1].text.size()==46,"PC default initial history is absent");
+    });
+    suite.test("PC loads without LOG preserve owned history, jumps and voice names",[]{
+        Model model;model.message=true;model.code.print(1);model.code.print(2);model.code.end();TempGame temp(model);
+        temp.text("init/game.xtx","saveLog 0\nJumpFlag 1\n");
+        temp.text("init/backlog.xtx","firstMessagePrintFlag 0\nfirstBarPrintFlag 0\n");
+        const auto options=test_options();
+        auto live=std::make_unique<scene::GameSession>(temp.root,options);
+        require(live->step_frame(0).wait==scene::Wait::Dialogue,"initial dialogue");
+        live->capture_backlog_jump(5);const auto first=live->backlog().back().jump_id;
+        const auto slot=live->export_pc_save();
+        require(!scene::pc::parse_save(slot).log,"fixture unexpectedly contains LOG");
+        scene::InputState advance;advance.advance=true;live->step_frame(0,advance);
+        live->capture_backlog_jump(8);const auto second=live->backlog().back().jump_id;
+        const auto original=live->snapshot();
+        auto bad=slot;le32(bad,32,0x7fffffffU);
+        bool rejected=false;try{live->restore_pc_save(bad);}catch(const std::runtime_error&){rejected=true;}
+        require(rejected && live->snapshot()==original && live->backlog_jump(first).journal_cursor==5,
+            "rejected no-LOG load damaged existing history or checkpoints");
+        auto candidate_options=options;candidate_options.runtime=live->runtime()->fork();
+        scene::GameSession candidate(temp.root,candidate_options);
+        candidate.load_pc_save_candidate(slot,live.get());
+        require(live->snapshot()==original && candidate.backlog().size()==2 &&
+            candidate.backlog_jump(second).journal_cursor==8,"candidate did not inherit isolated complete history");
+        live.reset();
+        candidate.runtime()->set_system_variable(5,23);
+        require(candidate.restore_backlog_jump(first,5) && candidate.state().dialogue.message_id==1 &&
+            candidate.backlog().size()==1 && candidate.backlog_jump(second).journal_cursor==0 && candidate.variable(205)==23,
+            "inherited jump depended on its destroyed owner or rolled back global progress");
+        candidate.step_frame(0,advance);candidate.capture_backlog_jump(11);
+        require(candidate.backlog().back().jump_id>second,"inherited checkpoint identity was reused");
+        auto with_log=scene::pc::parse_save(slot);with_log.log.emplace();with_log.log->voice_count=1;
+        scene::pc::LogEntry row;row.text="Saved history";row.color=0x123456;row.voices[0]="old_voice";
+        with_log.log->entries.push_back(row);
+        scene::GameSession replacement(temp.root,candidate_options);
+        replacement.load_pc_save_candidate(scene::pc::write_save(with_log),&candidate);
+        require(replacement.backlog().size()==1 && replacement.backlog()[0].text=="Saved history" &&
+            replacement.backlog()[0].voices[0]=="old_voice" && replacement.backlog()[0].color==0x123456 &&
+            replacement.backlog_jump(first).journal_cursor==0,"LOG did not replace history and revoke previous jumps");
+        with_log.log->entries.clear();replacement.restore_pc_save(scene::pc::write_save(with_log));
+        require(replacement.backlog().empty(),"an empty LOG retained initial or previous rows");
+    });
+    suite.test("clearAutoAfterLoad controls PC load auto and skip state",[]{
+        for(int clear:{0,1}) {
+            Model model;model.message=true;model.code.print(1);model.code.end();TempGame temp(model);
+            temp.text("init/game.xtx","clearAutoAfterLoad "+std::to_string(clear)+"\n");
+            scene::GameSession game(temp.root,test_options());game.step_frame(0);
+            const auto slot=game.export_pc_save();
+            game.runtime()->set_skip_active(true);game.set_system_parameter(nnn::NNNPARAM_AUTOMODE,1);
+            game.restore_pc_save(slot);
+            require(game.runtime()->skip_active()==(clear==0) &&
+                game.get_system_parameter(nnn::NNNPARAM_AUTOMODE)==(clear==0?1:0),"load ignored clearAutoAfterLoad");
+        }
+    });
     suite.test("backlog jump validates the cursor and truncates future dialogue",[]{
         Model model;model.message=true;model.code.print(1);model.code.print(2);model.code.end();
         TempGame temp(model);temp.text("init/game.xtx","JumpFlag 1\n");
@@ -2024,7 +2092,7 @@ int main(){
                 game.state().dialogue.message_id==2,"invalid cursor changed current dialogue");
         game.runtime()->set_system_variable(5,23);
         require(game.restore_backlog_jump(jump,5) && game.state().dialogue.message_id==1 &&
-                game.backlog().size()==1 && game.backlog_jump(future).journal_cursor==0 &&
+                game.backlog().size()==3 && game.backlog_jump(future).journal_cursor==0 &&
                 game.variable(205)==23,"rewind retained future rows or rolled back global progress");
     });
     suite.test("timed selection records a hidden CASE without recoloring the visible option",[]{
@@ -2620,6 +2688,83 @@ int main(){
         game.restore_snapshot(saved);
         require(game.surface().rgb==first&&game.stats().decodes==decodes,"compact snapshot missed cached layer");
         require(game.runtime()==owner && &game.audio()==audio,"restore replaced a live owner");
+    });
+    suite.test("finished current-line voices remain replayable through PC and native saves",[]{
+        Model model;model.message=true;model.code.voice();model.code.print(1);model.code.print(2);model.code.end();
+        TempGame temp(model);temp.text("init/game.xtx","saveLog 0\nplayLoadVoiceFlag 1\n");
+        temp.write("cdvaw/aa/aa_voice.vaw",pcm_vaw(1,44100,8,{188,198,208,218}));
+        scene::GameSession game(temp.root,test_options());
+        require(game.step_frame(0).wait==scene::Wait::Dialogue && game.audio().pc_state().voice_exist_count[0]==1,
+            "VOICE/PRINT did not establish the PC current-message counter");
+        std::array<std::int16_t,32> pcm{};game.audio().pull(pcm.data(),pcm.size()/2);
+        require(!game.audio().state().voices[0].active,"short fixture voice did not finish");
+        nnn::SystemEvent control;control.opcode=nnn::audio::set_voice_flag;control.parameters={3};
+        game.audio().submit(control); // Reclaim the finished PCM, retaining only replay metadata.
+        const auto native=game.snapshot();
+        nnn::snapshot::Reader inspected(native);scene::GameSession::inspect_snapshot(inspected);
+        const auto slot=game.export_pc_save();
+        const auto saved=scene::pc::parse_save(slot);
+        require(saved.status.voice_exist_count[0]==1 && saved.status.loop_voice_names[0]=="aa_voice" &&
+            saved.status.loop_voice[0][0]==0,"a naturally finished voice disappeared from GAMESTATUS");
+        scene::GameSession restored(temp.root,test_options());restored.restore_snapshot(native);
+        require(!restored.audio().state().voices[0].active && restored.audio().pc_state().voice_names[0]=="aa_voice" &&
+            restored.audio().pc_state().voice_exist_count[0]==1,"native snapshot resumed PCM or lost finished-voice metadata");
+        restored.restore_pc_save(slot);
+        require(restored.audio().state().voices[0].active && restored.audio().state().voices[0].source_frame==0,
+            "playLoadVoiceFlag did not replay the saved current line");
+        scene::InputState advance;advance.advance=true;restored.step_frame(0,advance);
+        require(restored.audio().pc_state().voice_exist_count[0]==0,"the following PRINT retained an expired current-line voice");
+        const auto later=restored.export_pc_save();restored.restore_pc_save(later);
+        require(!restored.audio().state().voices[0].active,"a later unvoiced line replayed an expired one-shot");
+    });
+    suite.test("voice stop and message boundaries preserve distinct PC replay and loop state",[]{
+        Model model;model.code.end();TempGame temp(model);
+        temp.write("cdvaw/li/line.vaw",pcm_vaw(1,44100,8,{188,198,208,218}));
+        nnn::audio::GameAudio audio(temp.root);
+        nnn::SystemEvent event;event.opcode=nnn::audio::voice;event.text="line";event.parameters={0,2,0,1};
+        require(audio.submit(event).empty(),"loop voice fixture failed");audio.message_started();
+        event.parameters={-1,2};require(audio.submit(event).empty(),"stop voice failed");
+        const auto stopped=audio.pc_state();
+        require(stopped.voice_names[2]=="line" && stopped.voice_exist_count[2]==1 && stopped.voices[2][0]==0,
+            "ordinary VOICE stop erased replay metadata or left a loop armed");
+        audio.message_started();require(audio.pc_state().voice_exist_count[2]==0,"message counter did not expire");
+        audio.stop_script_audio();require(!audio.has_pc_voice_state(),"stop-all retained prior script voice metadata");
+    });
+    suite.test("completed voice fades disarm saved loops before and after PCM retirement",[]{
+        Model model;model.code.end();TempGame temp(model);
+        temp.write("cdvaw/li/line.vaw",pcm_vaw(1,44100,8,{188,198,208,218}));
+        nnn::audio::GameAudio audio(temp.root);
+        nnn::SystemEvent event;event.opcode=nnn::audio::voice;event.text="line";event.parameters={0,2,0,1};
+        require(audio.submit(event).empty(),"loop voice fixture failed");
+        event.opcode=nnn::audio::next_fade_voice;event.parameters={1};require(audio.submit(event).empty(),"fade setup failed");
+        event.opcode=nnn::audio::volume_voice;event.parameters={2,-100};require(audio.submit(event).empty(),"fade volume failed");
+        require(audio.pc_state().voices[2][0]==1,"a pending fade stopped its loop early");
+        std::array<std::int16_t,9600> pcm{};audio.pull(pcm.data(),pcm.size()/2);
+        require(!audio.state().voices[2].active && audio.pc_state().voices[2][0]==0,"completed fade retained saved loop flag");
+        event.opcode=nnn::audio::set_voice_flag;event.parameters={3};audio.submit(event);
+        require(audio.pc_state().voices[2][0]==0 && audio.pc_state().voice_names[2]=="line",
+            "PCM retirement lost the completed stop or current-message voice name");
+    });
+    suite.test("muted voices retain the same PC role-adjusted replay parameters",[]{
+        Model model;model.code.end();TempGame temp(model);
+        temp.text("spt/charaname.xtx","0,header\naa,Character\n");
+        temp.write("cdvaw/aa/aa_voice.vaw",pcm_vaw(1,44100,8,{188,198,208,218}));
+        nnn::SystemEvent voice;voice.opcode=nnn::audio::voice;voice.text="aa_voice";voice.parameters={0,0,-3,0};
+        nnn::audio::GameAudio reference(temp.root);reference.set_character_slider("aa",-4);
+        require(reference.submit(voice).empty(),"reference voice failed");
+        const auto expected=reference.pc_state();require(expected.voices[0][2]!=-3,"fixture omitted character gain");
+        for (const bool role_muted:{false,true}) {
+            nnn::audio::GameAudio muted(temp.root);
+            if(role_muted)muted.set_character_volume(0,-4,false);
+            else {
+                nnn::RuntimeParameters params;params.set(nnn::NNNPARAM_VOICESWITCH,0);muted.apply_runtime_parameters(params);
+                muted.set_character_slider("aa",-4);
+            }
+            require(muted.submit(voice).empty() && !muted.state().voices[0].active,"muted voice unexpectedly played");
+            const auto actual=muted.pc_state();
+            require(actual.voices[0]==expected.voices[0] && actual.voice_names[0]==expected.voice_names[0] &&
+                actual.voice_exist_count[0]==2,"muted voice lost its role-adjusted PC replay state");
+        }
     });
     suite.test("backlog replay leaves script loops available to restart",[]{
         Model m;m.code.end();TempGame temp(m);
@@ -3306,7 +3451,7 @@ int main(){
         model.code.add({6,command,0x22220002U,0U,1,0});
         model.code.add({6,command,0x22220003U,1U,2,0});
         model.code.add({6,command,0x22220003U,2U,3,0});
-        model.code.number(0x33330055U,{2}); // SCRIPTMOUSE exercises highest snapshot_version (16).
+        model.code.number(0x33330055U,{2}); // SCRIPTMOUSE needs version 16 without voice replay metadata.
         model.code.add({6,command,0x22220003U,3U,4,0});
         model.code.end();
         TempGame temp(model);
@@ -3319,8 +3464,8 @@ int main(){
         require(first.wait==scene::Wait::Dialogue && first.dialogue.layout_command==0x22220002U &&
             first.dialogue.display_bytes=="Row1\r\nRow2\r\nRow3" && game.append_prefix().empty(),
             "initial overflow LPRINT did not scroll to the last fullMessageNumber rows");
-        require(game.backlog().size()==1 &&
-            game.backlog().front().text=="Alice\r\nRow1\r\nRow2\r\nRow3",
+        require(game.backlog().size()==3 &&
+            game.backlog().back().text=="Alice\r\nRow1\r\nRow2\r\nRow3",
             "backlog lost scrolled-off top rows from LPRINT");
         const auto pc1=game.export_pc_save();
         const auto parsed1=scene::pc::parse_save(pc1);
@@ -3364,11 +3509,11 @@ int main(){
         nnn::snapshot::Reader snap16_reader(snap16);
         std::uint32_t magic16=0,version16=0;
         snap16_reader(magic16,version16);
-        require(version16==16U,"highest snapshot_version must remain 16");
+        require(version16==16U,"SCRIPTMOUSE-only snapshot must retain version 16");
         scene::GameSession from_snap(temp.root,test_options());
         from_snap.restore_snapshot(snap1);
         require(from_snap.step_frame(0,click).dialogue.display_bytes=="Row2\r\nRow3Tail\r\nRow4" &&
-            from_snap.backlog().front().text=="Alice\r\nRow1\r\nRow2\r\nRow3Tail\r\nRow4",
+            from_snap.backlog().back().text=="Alice\r\nRow1\r\nRow2\r\nRow3Tail\r\nRow4",
             "snapshot roundtrip broke LPRINT APPEND continuation or full backlog");
     });
     suite.test("PC save inspection exposes GAMEVAR and resolves in-game date and weekday",[]{
