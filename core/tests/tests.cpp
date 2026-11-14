@@ -3,6 +3,7 @@
 #include "nnn/inventory_catalog.hpp"
 #include "nnn/optional_catalog.hpp"
 #include "nnn/progress_views.hpp"
+#include "nnn/runtime_text.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -405,6 +406,34 @@ int main() {
         require(nnn::expand_text_replacements("#\x90\xa9/#\x96\xbc/#\x82\x4f\x82\x4f\x82\x50\x82\x51/#\x83\x56\x82\x56",
             false,text.surname,text.given_name,local_at,system_at)==stored_surname+"//replace12/"+tunneled,
             "wide command grammar and bounded leading zeros");
+    });
+    suite.test("runtime summaries keep visible text and complete encoded characters",[] {
+        require(nnn::runtime_text_summary(" \r\n#RHero#[4hiiro]#W #.dots] body #c #X\tend ",40,254,true)==
+            "Hero body #X end","recognized annotations/colors must not become slot text");
+        require(nnn::runtime_text_summary("#\x90\xd4" "Body#\x81\x6d\x82\x53" "ruby\x81\x6e"
+            "#\x94\x92\x81\x40" "next#\x8b\xad" "dots\x81\x6e#\x94\x4c",40,254,false)==
+            "Body next","wide annotations, colors, symbol and space differ");
+        require(nnn::runtime_text_summary("Hero#[\x82\x53" "hiiro]",40,254,true)=="Hero" &&
+            nnn::runtime_text_summary("Body#\x81\x6d" "4ruby\x81\x6e",40,254,false)=="Body",
+            "ruby counts must accept ASCII and full-width digits in either codeByte mode");
+        require(nnn::runtime_text_summary("#[0bad] #.unfinished #X",40,254,true)=="#[0bad] #.unfinished #X" &&
+            nnn::runtime_text_summary("#R literal",40,254)=="#R literal" &&
+            nnn::runtime_text_summary("#R literal",40,254,false)=="#R literal",
+            "unknown, malformed or unconfigured commands lost literal text");
+        const std::string pair="\x81\x23"; // A canonical tunnel pair whose trail is '#'.
+        require(nnn::runtime_text_summary(pair+"R "+pair,40,254,true)==pair+"R "+pair &&
+            nnn::runtime_text_summary("abc\x81",40,254,true)=="abc" &&
+            nnn::runtime_text_summary(std::string("abc\0def",7),40,254,true)=="abc",
+            "summary interpreted a trail byte as a command or retained incomplete text");
+        require(nnn::runtime_text_summary(std::string(253,'a')+pair,300,254,true)==std::string(253,'a') &&
+            nnn::runtime_text_summary(std::string(252,'a')+pair+"b",300,254,true)==std::string(252,'a')+pair &&
+            nnn::runtime_text_summary("a b",2,254,true)=="a" &&
+            nnn::runtime_text_summary("abc",0,254,true).empty() &&
+            nnn::runtime_text_summary("abc",40,0,true).empty(),"summary byte/character limits cut a pair or left a gap");
+        std::string forty;
+        for (int i=0;i<40;++i) forty+=pair;
+        require(nnn::runtime_text_summary(forty+pair,40,254,true)==forty,
+            "summary counted tunnel bytes instead of characters");
     });
     suite.test("legacy SE controls require a known archive or explicit legacy layout",[&] {
         const auto root=scratch/"sound-routing";

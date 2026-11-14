@@ -61,6 +61,7 @@ struct Model{
     Code code;
     std::vector<std::string> strings{"story","red","green","alpha","aa_voice"};
     std::vector<Word> command_adjust;
+    std::vector<Word> selection_adjust;
     bool message=false;
     std::string message_text="M";
     std::vector<std::string> extra_messages;
@@ -96,7 +97,7 @@ Bytes script(const Model& model){
         for(std::size_t b=0;b<bytes.size();b+=4U)strings.push_back(Word{bytes[b]}|(Word{bytes[b+1U]}<<8U)|(Word{bytes[b+2U]}<<16U)|(Word{bytes[b+3U]}<<24U));
     }
     words[6]=static_cast<Word>(model.strings.size());table(0x44440001U,7,strings);table(0x44440004U,18,{});table(0x44440005U,20,model.code.registry);
-    table(0x44440006U,21,{});table(0x44440007U,22,model.command_adjust);table(0x44440008U,23,{});
+    table(0x44440006U,21,model.selection_adjust);table(0x44440007U,22,model.command_adjust);table(0x44440008U,23,{});
     Bytes bytes;for(Word word:words){word^=UINT32_MAX;for(unsigned shift=0;shift<32;shift+=8)bytes.push_back(static_cast<Byte>((word>>shift)&255U));}return bytes;
 }
 struct Resources{
@@ -449,6 +450,9 @@ int main(){
         require(original.status.last_message_id==7 && original.status.message_serial==7 &&
             original.status.message_count==1 && original.messages[0]=="M",
             "Non-selection PC save discarded its retained print buffer");
+        require(original.status.large_comments[0].empty() &&
+            scene::GameSession::inspect_pc_save(scene::pc::write_save(original),0).summary.empty(),
+            "Native panel exposed inactive story text as its current summary");
         require(original.thumbnail.pixels[0]==0x6533c9U,"PC native thumbnail did not use the original panel's submitted pixels");
         game.native_panel_input(485,26,true,false);
         game.native_panel_input(700,500,false,false); // A later hover must not overwrite the click position.
@@ -712,6 +716,9 @@ int main(){
         const auto first_slot=scene::pc::parse_save(first_pc);
         require(first_slot.status.message_count==1 && first_slot.status.last_message_id==7 && first_slot.messages[0]=="M",
             "Place PC save discarded its retained print buffer");
+        require(first_slot.status.large_comments[0].empty() &&
+            scene::GameSession::inspect_pc_save(first_pc,0).summary.empty(),
+            "Place exposed inactive story text as its current summary");
         scene::InputState choose;choose.choice=1;
         require(game.step_frame(0,choose).wait==scene::Wait::Place && game.place_mode()==nnn::RuntimeMode::SelectPlace2 &&
             game.places()==std::vector<int>{0,1,2} && game.place_characters()==std::vector<int>{0,0,4} &&
@@ -1294,6 +1301,8 @@ int main(){
             pc.extensions[0].size()==11280 && pc.extensions[0][1003/8]==8,"Nonzero disabled state was not exported through EXT1");
         require(pc.status.message_count==1 && pc.status.last_message_id==1 && pc.messages[0]=="M",
             "Chart PC save discarded its retained print buffer");
+        require(scene::GameSession::inspect_pc_save(saved,0).summary.empty(),
+            "Chart exposed inactive story text as its current summary");
         auto restored_options=options;restored_options.runtime=game.runtime()->fork();
         scene::GameSession restored(temp.root,restored_options);restored.set_chart_storage(storage);
         restored.restore_pc_save(saved);
@@ -1948,7 +1957,7 @@ int main(){
         require(loaded.messages[0]=="Reader" && loaded.messages[1]=="\"Second row\"",
                 "compact message rows use the wrong stride");
         const auto preview=scene::GameSession::inspect_pc_save(compact,512U*512U);
-        require(preview.summary=="Reader" && !preview.pixels.empty() && preview.pixels.front()==0xff123456U,
+        require(preview.summary=="\"Second row\"" && !preview.pixels.empty() && preview.pixels.front()==0xff123456U,
                 "compact PC slot could not be listed");
         game.restore_pc_save(compact);
         require(game.state().dialogue.display_bytes==initial &&
@@ -1961,6 +1970,90 @@ int main(){
         bool rejected=false;
         try{(void)scene::pc::parse_save(compact);}catch(const std::runtime_error&){rejected=true;}
         require(rejected,"mismatched layer blocks were accepted");
+    });
+    suite.test("PC automatic comments follow message layout without changing saved dialogue",[]{
+        struct Case { const char* config;const char* text;Word operation;const char* expected; };
+        const Case cases[]{
+            {"nameFlag 1\nautoNameWindowFlag 1\n","Alice\r\n#RFirst#[5furst]#W\r\nSecond",0x22220001U,"First Second"},
+            {"nameFlag 1\nautoNameWindowFlag 1\n","Narration\r\nSecond",0x22220001U,"Narration Second"},
+            {"nameFlag 0\nautoNameWindowFlag 1\n","Alice\r\nFirst",0x22220001U,"Alice First"},
+            {"nameFlag 1\nautoNameWindowFlag 0\n","Unlisted\r\nFirst",0x22220001U,"First"},
+            {"nameFlag 1\nautoNameWindowFlag 1\n","Alice\r\nFirst",0x22220002U,"Alice First"},
+            {"nameFlag 1\nautoNameWindowFlag 1\n","Alice",0x22220001U," "},
+            {"nameFlag 0\nautoNameWindowFlag 0\n","#R#c",0x22220001U," "}
+        };
+        for (const auto status_size:{scene::pc::classic_status_bytes,scene::pc::preview_status_bytes})
+            for (const auto& sample:cases) {
+                Model model;model.message=true;model.message_text=sample.text;
+                model.code.add({6,command,sample.operation,0,1,0});model.code.end();
+                TempGame temp(model);
+                temp.text("init/game.xtx","codeByte 1\n");
+                temp.text("init/printmessage.xtx",sample.config);
+                temp.text("spt/namecol.xtx","Alice 255 255 255\n");
+                auto options=test_options();
+                auto layout=std::make_shared<scene::pc::DirectorySaveLayout>(*options.save_layout);
+                layout->files.status_bytes=status_size;options.save_layout=layout;
+                scene::GameSession game(temp.root,options);
+                const auto before=game.step_frame(0);
+                require(before.wait==scene::Wait::Dialogue,"summary fixture did not reach dialogue");
+                const auto bytes=game.export_pc_save();
+                const auto parsed=scene::pc::parse_save(bytes);
+                require(parsed.status_bytes==status_size && parsed.status.large_comments[0]==sample.expected &&
+                    parsed.status.large_comments[1].empty() && parsed.status.mini_comment.empty() &&
+                    scene::GameSession::inspect_pc_save(bytes,0).summary==sample.expected,
+                    "automatic comment did not follow original name/layout policy");
+                require(parsed.status.message_sub_mode==static_cast<int>(sample.operation) &&
+                    parsed.messages[0]==std::string(sample.text).substr(0,std::string(sample.text).find('\r')) &&
+                    game.state().word==before.word && game.state().dialogue.display_bytes==before.dialogue.display_bytes,
+                    "automatic comment changed live or serialized dialogue");
+                scene::GameSession restored(temp.root,options);restored.restore_pc_save(bytes);
+                require(restored.state().word==before.word &&
+                    restored.state().dialogue.display_bytes==before.dialogue.display_bytes,
+                    "automatic comment changed PC restore position or text");
+            }
+    });
+    suite.test("PC automatic comments expand names and preserve APPEND body",[]{
+        Model model;model.extra_messages={"Alice\r\nHello #L"," there"};
+        model.code.print(1);model.code.add({6,command,0x22220003U,1,2,0});model.code.end();
+        TempGame temp(model);
+        temp.text("init/game.xtx","codeByte 1\n");
+        temp.text("init/printmessage.xtx","nameFlag 1\nautoNameWindowFlag 1\n");
+        temp.text("spt/namecol.xtx","Alice 255 255 255\n");
+        auto options=test_options();options.runtime=std::make_shared<nnn::RuntimeContext>(temp.root);
+        require(options.runtime->set_system_name("Reader",std::nullopt),"summary name fixture");
+        scene::GameSession game(temp.root,options);
+        require(game.step_frame(0).wait==scene::Wait::Dialogue,"summary PRINT did not start");
+        require(scene::pc::parse_save(game.export_pc_save()).status.large_comments[0]=="Hello Reader",
+            "automatic comment did not use expanded display text");
+        scene::InputState advance;advance.advance=true;
+        require(game.step_frame(0,advance).dialogue.display_bytes=="Alice\r\nHello Reader there",
+            "summary APPEND fixture did not keep its PRINT layout");
+        const auto parsed=scene::pc::parse_save(game.export_pc_save());
+        require(parsed.status.large_comments[0]=="Hello Reader there" && parsed.messages[0]=="Alice" &&
+            parsed.messages[1]=="Hello Reader there","automatic comment omitted or rewrote APPEND body");
+    });
+    suite.test("PC preview keeps original comments before joining uncommented MESSAGE rows",[]{
+        Model model;model.message=true;model.message_text="Alice\r\nFirst\r\nSecond";
+        model.code.print(1);model.code.end();TempGame temp(model);
+        scene::GameSession game(temp.root,test_options());game.step_frame(0);
+        auto saved=scene::pc::parse_save(game.export_pc_save());
+        saved.status.large_comments={"Original PC note","Second note","",""};
+        require(scene::GameSession::inspect_pc_save(scene::pc::write_save(saved),0).summary==
+            "Original PC note\nSecond note","automatic text replaced an existing PC note");
+        saved.status.large_comments={};
+        require(scene::GameSession::inspect_pc_save(scene::pc::write_save(saved),0).summary==
+            "Alice First Second","empty-note fallback returned only the name");
+        saved.status.game_mode=static_cast<int>(nnn::RuntimeMode::SelectMessage);
+        saved.status.select_count=2;saved.status.select_add_count=0;
+        saved.messages[0]="First choice";saved.messages[1]="Second choice";saved.messages[2]="Inactive tail";
+        require(scene::GameSession::inspect_pc_save(scene::pc::write_save(saved),0).summary==
+            "First choice Second choice","choice preview read inactive MESSAGE rows");
+        saved.status.game_mode=51;
+        require(scene::GameSession::inspect_pc_save(scene::pc::write_save(saved),0).summary.empty(),
+            "a non-message mode used its retained MESSAGE buffer as current text");
+        saved.status.large_comments[0]="Original panel note";
+        require(scene::GameSession::inspect_pc_save(scene::pc::write_save(saved),0).summary=="Original panel note",
+            "non-message mode lost an existing PC note");
     });
     suite.test("PC executable selects first-save layer records for a classic game",[]{
         Model model;model.message=true;model.code.print(1);model.code.end();
@@ -2085,7 +2178,8 @@ int main(){
             game.state().dialogue.display_bytes=="First\r\nSecond","CUTIN did not apply the row style and suppress the speaker row");
         const auto cutin_save=game.export_pc_save();
         const auto cutin_blocks=scene::pc::parse_save(cutin_save);
-        require(cutin_blocks.cutin && (*cutin_blocks.cutin)[0]==1 && (*cutin_blocks.cutin)[1]==2 &&
+        require(cutin_blocks.status.large_comments[0]=="First Second" &&
+            cutin_blocks.cutin && (*cutin_blocks.cutin)[0]==1 && (*cutin_blocks.cutin)[1]==2 &&
             cutin_blocks.cutin->back()==1 && cutin_blocks.messages[0]=="First","CUTIN mode or row words were not written");
         const auto snapshot=game.snapshot();
         nnn::snapshot::Reader inspected(snapshot);
@@ -2097,6 +2191,8 @@ int main(){
         visuals=game.dialogue_visuals();
         require(visuals.rows.size()==4 && visuals.rows[2].window_image=="sys/ta_cutinwindow2" &&
             game.append_prefix()=="First\r\nSecond","CUTIN APPEND lost the previous group or image window");
+        require(scene::pc::parse_save(game.export_pc_save()).status.large_comments[0]=="First Second First Second",
+            "CUTIN APPEND summary removed an already prepared body row");
         game.step_frame(0,advance);
         visuals=game.dialogue_visuals();
         require(!visuals.cutin && visuals.portraits.size()==2 &&
@@ -2391,7 +2487,7 @@ int main(){
     });
     suite.test("timed selection records a hidden CASE without recoloring the visible option",[]{
         Model model;model.message=true;
-        model.code.add({11,command,0x22220006U,1,0,0,3,0,2,50,0});
+        model.selection_adjust.push_back(model.code.add({11,command,0x22220006U,1,0,0,3,0,2,50,0}));
         model.code.add({4,control,0x55560008U,1});model.code.end();
         model.code.add({4,control,0x55560008U,2});model.code.print(2);model.code.end();
         TempGame temp(model);
@@ -2399,6 +2495,9 @@ int main(){
         const auto& choice=game.step_frame(0);
         require(choice.wait==scene::Wait::Choice && choice.selection->options.size()==1 &&
                 choice.choice_remaining_ms==50,"single visible timed option");
+        const auto choice_save=scene::pc::parse_save(game.export_pc_save());
+        require(choice_save.status.large_comments[0]=="story" && choice_save.messages[0]=="story" &&
+            game.state().choice_remaining_ms==50,"choice summary changed or treated the visible option as a name");
         require(game.step_frame(49).wait==scene::Wait::Choice,"timed option selected early");
         const auto& after=game.step_frame(1);
         require(after.wait==scene::Wait::Dialogue && after.choice_timed_out && after.dialogue.message_id==2 &&
@@ -4228,7 +4327,8 @@ int main(){
             scene::pc::read_okikae(parsed.extensions[0]).at(0)=="Hero",
             "legacy 5024-byte GameSession export did not write code=9 EXT1 okikae");
         const auto preview=scene::GameSession::inspect_pc_save(exported,64*1024);
-        require(preview.summary=="LegacyRow1" && preview.vars.size()==1024U && preview.width>0,
+        require(preview.summary=="LegacyRow1 LegacyRow2" && preview.vars.size()==1024U && preview.width>0 &&
+            parsed.status.large_comments[0].empty() && parsed.status.mini_comment.empty(),
             "inspect_pc_save failed on 5024-byte GAMESTATUS + code=9 EXT1 save");
         scene::GameSession restored(temp.root,initialization_options());
         restored.restore_pc_save(exported);

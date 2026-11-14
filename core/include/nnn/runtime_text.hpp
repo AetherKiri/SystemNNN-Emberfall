@@ -4,6 +4,7 @@
 
 #include <array>
 #include <cstddef>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -42,6 +43,72 @@ inline std::string bound_runtime_text(std::string_view bytes, std::size_t limit)
         }
     }
     return std::string(bytes.substr(0,end));
+}
+
+// A one-line preview of already expanded message bytes. Without a known
+// codeByte setting, keep commands literal (e.g. an old PC save preview).
+// Walk whole CP932/tunnel pairs: their second byte may itself be '#'.
+inline std::string runtime_text_summary(std::string_view bytes, std::size_t character_limit,
+    std::size_t byte_limit, std::optional<bool> one_byte_text=std::nullopt) {
+    const auto width=[&](std::size_t at) -> std::size_t {
+        if (at>=bytes.size() || bytes[at]=='\0') return 0;
+        if (!resource::cp932_lead(static_cast<unsigned char>(bytes[at]))) return 1;
+        return at+1<bytes.size() && bytes[at+1]!='\0' ? 2 : 0;
+    };
+    const bool single=one_byte_text.value_or(false);
+    const auto ruby=single ? std::string_view("[") : std::string_view("\x81\x6d");
+    const auto emphasis=single ? std::string_view(".") : std::string_view("\x8b\xad");
+    const auto close=single ? std::string_view("]") : std::string_view("\x81\x6e");
+    const auto symbol=single ? std::string_view("c") : std::string_view("\x94\x4c");
+    constexpr std::array<std::string_view,9> colors{{"\x8d\x95","\x90\xc2","\x90\xd4",
+        "\x8e\x87","\x97\xce","\x90\x85","\x89\xa9","\x94\x92","\x9e\xf2"}};
+    std::string result;
+    result.reserve(bytes.size()<byte_limit ? bytes.size() : byte_limit);
+    std::size_t characters=0;
+    bool space=false;
+    for (std::size_t at=0;at<bytes.size();) {
+        const auto size=width(at);
+        if (!size) break;
+        if (one_byte_text && bytes[at]=='#' && at+1<bytes.size()) {
+            const auto command=bytes.substr(at+1,single ? 1 : 2);
+            bool color=single && std::string_view("BURPGCYWO").find(command)!=std::string_view::npos;
+            if (!single) for (const auto item:colors) if (command==item) color=true;
+            if (color || command==symbol || command==close) {at+=1+command.size();continue;}
+            if (command==ruby || command==emphasis) {
+                std::size_t label=at+1+command.size();
+                bool valid=command==emphasis;
+                if (!valid && label<bytes.size()) {
+                    if (bytes[label]>='1' && bytes[label]<='9') {++label;valid=true;}
+                    else if (bytes.substr(label,1)=="\x82" && label+1<bytes.size() &&
+                        static_cast<unsigned char>(bytes[label+1])>=0x50U &&
+                        static_cast<unsigned char>(bytes[label+1])<=0x58U) {label+=2;valid=true;}
+                }
+                if (valid) {
+                    std::size_t end=label,glyphs=0;
+                    while (end<bytes.size() && glyphs<100 && bytes[end]!='\r' && bytes[end]!='\n' &&
+                        bytes.substr(end,close.size())!=close) {
+                        const auto next=width(end);
+                        if (!next) break;
+                        end+=next;++glyphs;
+                    }
+                    // Keep malformed/unknown markup rather than deleting text.
+                    if (glyphs>0 && glyphs<100 && bytes.substr(end,close.size())==close) {
+                        at=end+close.size();continue;
+                    }
+                }
+            }
+        }
+        const auto unit=bytes.substr(at,size);
+        if ((size==1 && (bytes[at]==' ' || bytes[at]=='\t' || bytes[at]=='\r' || bytes[at]=='\n')) ||
+            unit=="\x81\x40") {
+            space=!result.empty();at+=size;continue;
+        }
+        const std::size_t gap=space ? 1 : 0;
+        if (size+gap>byte_limit-result.size() || 1+gap>character_limit-characters) break;
+        if (space) {result+=' ';++characters;space=false;}
+        result.append(unit);++characters;at+=size;
+    }
+    return result;
 }
 
 // CMyMessage::GetCommand recognizes names and local/system replacements here.

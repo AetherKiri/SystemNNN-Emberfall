@@ -645,6 +645,7 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
     bool one_byte_text=false;
     bool standalone_script=false;
     bool append_skip_name=true;
+    bool print_name=true,auto_name_window=false;
     int layout_width=1280,layout_height=720;
     std::size_t window_message_max=4,full_message_max=4;
     int message_font_size=24;
@@ -836,6 +837,8 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         auto init=nnn::game_config::read(root,"init","game.xtx");
         auto print_config=nnn::game_config::read(root,"init","printmessage.xtx");
         append_skip_name=config_int(print_config,"appendSkipName",1)!=0;
+        print_name=config_int(print_config,"nameFlag",1)!=0;
+        auto_name_window=config_int(print_config,"autoNameWindowFlag",0)!=0;
         message_font_size=std::clamp(config_int(print_config,"fontSize",24),1,72);
         print_x=config_int(print_config,"printX",100);
         print_y=config_int(print_config,"printY",100);
@@ -4806,6 +4809,32 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         }
         if ((!native && !place && !chart && rows.empty()) || rows.size()>saved.messages.size())
             throw std::runtime_error("Invalid PC save message rows");
+        if (saved.status_bytes>=pc::classic_status_bytes &&
+            (frame.wait==Wait::Dialogue || frame.wait==Wait::Choice)) {
+            std::string choice_text;
+            std::string_view body=frame.dialogue.display_bytes;
+            if (frame.wait==Wait::Choice) {
+                choice_text=replace_dialogue(join_message_rows(rows));
+                body=choice_text;
+            } else if (!cutins.active() && frame.dialogue.layout_command==print && print_name) {
+                const auto end=body.find_first_of("\r\n");
+                const auto name=body.substr(0,end);
+                if (!auto_name_window || speaker_names.find(std::string(name))!=speaker_names.end()) {
+                    if (end==std::string_view::npos) body={};
+                    else {
+                        auto start=end+1;
+                        if (body[end]=='\r' && start<body.size() && body[start]=='\n') ++start;
+                        body.remove_prefix(start);
+                    }
+                }
+            }
+            // PC largeComment has 256 bytes and reserves two terminators.
+            // Keep MESSAGE intact: this is slot metadata, never restore text.
+            status.large_comments[0]=nnn::runtime_text_summary(body,40,254,one_byte_text);
+            // A valid blank PC comment keeps an intentionally empty body from
+            // falling back to the old file's speaker/formatting-only MESSAGE.
+            if (status.large_comments[0].empty()) status.large_comments[0]=" ";
+        }
         if (saved.status_bytes==pc::preview_status_bytes && !native && !place && !chart) {
             status.log_messages=loaded_pc_preview;
             if (std::none_of(status.log_messages.begin(),status.log_messages.end(),[](const auto& row){return !row.empty();})) {
@@ -5827,7 +5856,21 @@ GameSession::PcSavePreview GameSession::inspect_pc_save(const std::vector<nnn::B
         if (!result.summary.empty()) result.summary+='\n';
         result.summary+=comment;
     }
-    if (result.summary.empty()) result.summary=saved.messages[0];
+    if (result.summary.empty() && (status.game_mode==static_cast<int>(nnn::RuntimeMode::PrintMessage) ||
+        status.game_mode==static_cast<int>(nnn::RuntimeMode::SelectMessage))) {
+        // Older files have no automatic comment. MESSAGE has separate rows,
+        // and row zero can be a name; without the game's layout keep all rows.
+        // Other modes retain inactive print bytes, not current visible text.
+        const auto count=static_cast<std::size_t>(std::clamp(
+            status.game_mode==static_cast<int>(nnn::RuntimeMode::SelectMessage)
+                ? status.select_count : status.message_count,0,static_cast<int>(saved.messages.size())));
+        std::string text;
+        for (std::size_t i=0;i<count;++i) if (!saved.messages[i].empty()) {
+            if (!text.empty()) text+=' ';
+            text+=saved.messages[i];
+        }
+        result.summary=nnn::runtime_text_summary(text,40,254);
+    }
     const auto& thumbnail=saved.thumbnail;
     if (thumbnail.width<=512 && thumbnail.height<=512 && thumbnail.pixels.size()<=picture_budget) {
         result.width=thumbnail.width;result.height=thumbnail.height;
