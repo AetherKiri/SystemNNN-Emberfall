@@ -113,7 +113,11 @@ final class PcSystemSave {
         return SYSTEM_NAME.matcher(name).matches();
     }
     static boolean isResultFile(String name){return "result.sav".equalsIgnoreCase(name);}
-    static boolean isChartFile(String name){return "mita.dat".equalsIgnoreCase(name)||"tsuka.dat".equalsIgnoreCase(name);}
+    static boolean isChartFile(String name){
+        if(name==null)return false;
+        for(int i=0;i<name.length();i++)if(name.charAt(i)>127)return false;
+        return "mita.dat".equalsIgnoreCase(name)||"tsuka.dat".equalsIgnoreCase(name);
+    }
 
     static boolean valid(File file) throws IOException {
         String name=file.getName().toLowerCase(Locale.ROOT);
@@ -528,11 +532,19 @@ final class PcSystemSave {
     }
 
     private static final class ChartFiles {
-        private final Path seen,roads;
+        private final Path directory,seen,roads;
         private final int seenBytes,roadBytes;
-        ChartFiles(File directory,int slots,boolean legacy){
+        ChartFiles(File directory,int slots,boolean legacy) throws IOException {
+            this.directory=directory.toPath();
+            validateDirectory();
             seen=path(directory,"mita.dat");roads=path(directory,"tsuka.dat");
             seenBytes=legacy?10004:(slots+3)&~3;roadBytes=slots;
+        }
+        private void validateDirectory() throws IOException {
+            try {
+                if(!Files.readAttributes(directory,BasicFileAttributes.class,LinkOption.NOFOLLOW_LINKS).isDirectory())
+                    throw new InvalidFile(directory,null);
+            }catch(NoSuchFileException absent){ /* Created only when progress is written. */ }
         }
         private boolean matches(byte[] flags){
             if(flags==null||flags.length!=8+seenBytes+roadBytes)return false;
@@ -549,6 +561,7 @@ final class PcSystemSave {
             catch(InvalidFile invalid){LOG.warning(invalid.getMessage());return null;}
         }
         byte[] restore(byte[] fallback) throws IOException {
+            validateDirectory();
             byte[] pcSeen=importFlags(seen,seenBytes),pcRoads=importFlags(roads,roadBytes);
             if(pcSeen==null&&pcRoads==null)return fallback;
             byte[] flags=matches(fallback)?fallback.clone():
@@ -565,7 +578,9 @@ final class PcSystemSave {
         }
         void write(byte[] flags) throws IOException {
             if(!matches(flags))return;
-            Files.createDirectories(seen.getParent());
+            validateDirectory();
+            Files.createDirectories(directory);
+            validateDirectory();
             writeFlags(seen,Arrays.copyOfRange(flags,8,8+seenBytes));
             writeFlags(roads,Arrays.copyOfRange(flags,8+seenBytes,flags.length));
         }

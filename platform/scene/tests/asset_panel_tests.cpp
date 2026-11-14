@@ -33,7 +33,8 @@ bool same_draw(const Output& a,const Output& b) {
         const auto& x=a.blits[i];const auto& y=b.blits[i];
         if (x.asset!=y.asset || x.x!=y.x || x.y!=y.y || x.source_x!=y.source_x || x.source_y!=y.source_y ||
             x.width!=y.width || x.height!=y.height || x.alpha!=y.alpha || x.opacity_percent!=y.opacity_percent ||
-            x.add_red!=y.add_red || x.add_green!=y.add_green || x.add_blue!=y.add_blue || x.additive!=y.additive) return false;
+            x.add_red!=y.add_red || x.add_green!=y.add_green || x.add_blue!=y.add_blue || x.additive!=y.additive ||
+            x.translucent!=y.translucent) return false;
     }
     return true;
 }
@@ -186,6 +187,11 @@ void result_contract() {
     }
     check(opening_sounds==1,"original result-start sound occurs only at the initial count-zero update");
     auto bad=result.state();bad.result_count=INT32_MAX;check(!AreaAssignment::restore(bad),"malformed result counter rejected");
+    multi_values.gain[5]=400000000;auto large=*AreaAssignment::enter(52,multi_values,multi_memory);
+    bad=large.state();bad.result_hold=true;bad.result_count=1000000000;
+    check(!AreaAssignment::restore(bad),"large gain cannot extend the fixed result hold phase");
+    bad.result_hold=false;bad.result_flash=true;
+    check(!AreaAssignment::restore(bad),"large gain cannot extend the fixed result flash phase");
 }
 void recognition_contract() {
     std::vector<int> sizes={116,36,36,16,16,1};

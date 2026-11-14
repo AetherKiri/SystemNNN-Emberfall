@@ -71,9 +71,9 @@ template<std::size_t N> void decode(const std::vector<std::uint8_t>& bytes,std::
         std::memcpy(&data[i],&word,4);
     }
 }
-void blit(std::vector<Blit>& out,std::string asset,Rect rect,int sx=0,int sy=0,int opacity=100,int add=0,bool additive=false) {
+void blit(std::vector<Blit>& out,std::string asset,Rect rect,int sx=0,int sy=0,int opacity=100,int add=0,bool additive=false,bool translucent=false) {
     if (rect.width<=0 || rect.height<=0) return;
-    out.push_back({std::move(asset),rect.x,rect.y,sx,sy,rect.width,rect.height,true,opacity,add,add,add,additive});
+    out.push_back({std::move(asset),rect.x,rect.y,sx,sy,rect.width,rect.height,true,opacity,add,add,add,additive,translucent});
 }
 int pingpong(int phase,int frames) { return phase>=frames?frames*2-1-phase:phase; }
 int coordinate(std::int64_t value,int extent) {
@@ -225,7 +225,12 @@ std::optional<AreaAssignment> AreaAssignment::restore(const State& s) {
             s.values.character_state[id]<1 || s.values.character_state[id]>3) return std::nullopt;
         previous=row.character;
     }
-    const int count_limit=s.result_index<s.results.size()?std::max(60,s.results[s.result_index].gain*5):60;
+    int count_limit=s.area_hold?40:59;
+    if (s.result_index<s.results.size()) {
+        if (s.result_hold && s.result_flash) return std::nullopt;
+        count_limit=s.result_flash?19:s.result_hold?49:s.results[s.result_index].gain*5-1;
+        if ((s.result_flash || s.result_hold) && s.result_count<0) return std::nullopt;
+    } else if (s.result_flash) return std::nullopt;
     if (s.result_count>count_limit) return std::nullopt;
     for (const int value:s.result_area_state) if (value<0 || value>6) return std::nullopt;
     if (s.mode==selection_mode) for (std::size_t i=0;i<9;++i)
@@ -441,15 +446,15 @@ Output AreaAssignment::render() const {
             const int add=s.result_flash && s.result_count<10?(s.result_count+1)*25:0;
             if (s.result_flash && s.result_count>=10) {
                 blit(out.blits,asset(now),character,0,0,100,255);
-                blit(out.blits,asset(now),character,0,0,(s.result_count-9)*10);
-            } else blit(out.blits,asset(s.result_hold?now:old),character,0,0,alpha,add);
+                blit(out.blits,asset(now),character,0,0,(s.result_count-9)*10,0,false,true);
+            } else blit(out.blits,asset(s.result_hold?now:old),character,0,0,alpha,add,false,s.result_hold && s.result_count>=40);
             const int pulse=pingpong(std::max(0,s.result_pulse),8);
             const bool growing=!s.result_hold && !s.result_flash;
             const auto units=std::min<std::int64_t>(100,static_cast<std::int64_t>(row.base)+(growing?s.result_count/5:row.gain));
             const int height=static_cast<int>(units)*3;
             const Rect bar{257,421-height,63,height};
-            if (s.result_flash && s.result_count>=10) blit(out.blits,"sys/ta_resultbar01",bar,pulse*63,300-height,(s.result_count-9)*10);
-            else blit(out.blits,"sys/ta_resultbar01",bar,pulse*63,300-height,alpha,add);
+            if (s.result_flash && s.result_count>=10) blit(out.blits,"sys/ta_resultbar01",bar,pulse*63,300-height,(s.result_count-9)*10,0,false,true);
+            else blit(out.blits,"sys/ta_resultbar01",bar,pulse*63,300-height,alpha,add,false,s.result_hold && s.result_count>=40);
             if (growing) blit(out.blits,"sys/ta_resultbar01",{257,418-height,63,3},pulse*63,297-height);
         }
     } else if (s.area_changed) draw_areas(true);

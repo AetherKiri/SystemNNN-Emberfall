@@ -10,6 +10,7 @@ namespace {
 namespace legacy=emberfall::scene::legacy_chart;
 namespace pc=emberfall::scene::pc;
 namespace chart=nnn::chart;
+using nnn::Byte;
 using Bytes=std::vector<nnn::Byte>;
 int checks=0;
 void require(bool condition,const char* message) {
@@ -49,6 +50,57 @@ bool has_write(const legacy::Action& action,const std::string& name,nnn::Value v
         return write.name==name && write.value==value;
     });
 }
+// Read-only executable corroboration is test tooling, never startup work.
+std::uint32_t u32(const std::vector<Byte>& data,std::size_t at) {
+    if (at>data.size() || data.size()-at<4) throw std::runtime_error("Truncated executable field");
+    return std::uint32_t{data[at]}|(std::uint32_t{data[at+1]}<<8U)|
+        (std::uint32_t{data[at+2]}<<16U)|(std::uint32_t{data[at+3]}<<24U);
+}
+template<std::size_t N>
+bool contains(const Byte* begin,const Byte* end,const char (&pattern)[N]) {
+    return std::search(begin,end,pattern,pattern+N-1,[](Byte a,char b){return a==static_cast<Byte>(b);})!=end;
+}
+bool verifies_executable(const std::vector<Byte>& pe) {
+    // These relocation-independent instruction sequences implement the bit
+    // polarity and the two array copies. They are not executable addresses.
+    static constexpr char enable[]=
+        "\x8b\x44\x24\x04\x53\x8b\xd0\x56\x83\xe2\x1f\x57\x8b\xb4\x91\xc0\x02\x00\x00"
+        "\x99\x83\xe2\x1f\x8b\xfe\x03\xc2\x8b\x91\x70\x03\x00\x00\xc1\xf8\x05\xf7\xd7"
+        "\x8b\x1c\x82\x8d\x14\x82\x23\xdf\x89\x1a\x8b\x54\x24\x14\x85\xd2\x75\x0b"
+        "\x8b\x89\x70\x03\x00\x00\x8d\x04\x81\x09\x30\x5f\x5e\x5b\xc2\x08\x00";
+    static constexpr char save[]=
+        "\x8b\x54\x24\x04\x8b\xc1\x56\x57\x8b\xb0\x70\x03\x00\x00\xb9\x40\x01\x00\x00"
+        "\x8b\xfa\xf3\xa5\x8b\xb0\x78\x03\x00\x00\xb9\xc4\x09\x00\x00\x8d\xba\x00\x05\x00\x00"
+        "\xb8\x01\x00\x00\x00\xf3\xa5\x5f\x5e\xc2\x04\x00";
+    static constexpr char load[]=
+        "\x8b\x54\x24\x04\x8b\xc1\x56\x57\x8b\xb8\x70\x03\x00\x00\xb9\x40\x01\x00\x00"
+        "\x8b\xf2\xf3\xa5\x8b\xb8\x78\x03\x00\x00\xb9\xc4\x09\x00\x00\x8d\xb2\x00\x05\x00\x00"
+        "\xf3\xa5\x33\xc9\x5f\x89\x88\xd4\x05\x00\x00\x89\x88\x78\x05\x00\x00\xb8\x01\x00\x00\x00\x5e\xc2\x04\x00";
+    if (pe.size()<64 || pe.size()>64U*1024U*1024U || pe[0]!='M' || pe[1]!='Z') return false;
+    try {
+        const auto offset=static_cast<std::size_t>(u32(pe,60));
+        if (offset>pe.size() || pe.size()-offset<24 || u32(pe,offset)!=0x4550U) return false;
+        const auto machine_sections=u32(pe,offset+4);
+        const auto count=machine_sections>>16U;
+        if ((machine_sections&0xffffU)!=0x14cU || count==0 || count>96U) return false;
+        const auto header=static_cast<std::size_t>(u32(pe,offset+20)&0xffffU);
+        const auto table=offset+24U+header;
+        if (table>pe.size() || count>(pe.size()-table)/40U) return false;
+        bool has_enable=false,has_save=false,has_load=false;
+        for (std::size_t i=0;i<count;++i) {
+            const auto section=table+i*40U;
+            const auto size=static_cast<std::size_t>(u32(pe,section+16));
+            const auto raw=static_cast<std::size_t>(u32(pe,section+20));
+            if (raw>pe.size() || size>pe.size()-raw) return false;
+            if ((u32(pe,section+36)&0x20000000U)==0) continue;
+            const auto* begin=pe.data()+raw;
+            const auto* end=begin+size;
+            has_enable|=contains(begin,end,enable);has_save|=contains(begin,end,save);has_load|=contains(begin,end,load);
+        }
+        return has_enable && has_save && has_load;
+    } catch (const std::runtime_error&) { return false; }
+}
+
 void behavior() {
     Fixture fixture;
     require(legacy::recognizes(fixture.root),"Configuration contract requires neither nine pages nor every unused function");
@@ -153,7 +205,7 @@ void codecs() {
     chart::restore_variables(restored.vars,[&](std::size_t i,nnn::Value value){variables[i]=value;});
     require(variables[199]==5 && variables[200]==99 && variables[300]==7 && variables[1000]==77,
         "Node restore changed live system variables or absent high variables");
-    require(!legacy::verifies_executable({}) && !legacy::verifies_executable(Bytes(64,0)),"Malformed executable was recognized");
+    require(!verifies_executable({}) && !verifies_executable(Bytes(64,0)),"Malformed executable was recognized");
 }
 void real_contract(const std::filesystem::path& root) {
     require(legacy::recognizes(root),"Installed game's configuration contract was not recognized");
@@ -162,7 +214,7 @@ void real_contract(const std::filesystem::path& root) {
     for (const auto* name:{"mushiai.exe","mushiai_chs.exe"}) {
         std::ifstream in(root/name,std::ios::binary);
         Bytes bytes{std::istreambuf_iterator<char>(in),std::istreambuf_iterator<char>()};
-        require(legacy::verifies_executable(bytes),"Original/translated executable algorithm evidence was not recognized");
+        require(verifies_executable(bytes),"Original/translated executable algorithm evidence was not recognized");
     }
 }
 }

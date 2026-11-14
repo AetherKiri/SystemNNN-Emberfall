@@ -1,6 +1,7 @@
 #include "emberfall/scene.hpp"
 #include "emberfall/game_session.hpp"
 #include "emberfall/story_compositor.hpp"
+#include "emberfall/area_assignment.hpp"
 #include "nnn/player_behavior.hpp"
 #include "nnn/snapshot.hpp"
 #include "fixtures/generated_cases.hpp"
@@ -316,6 +317,50 @@ scene::SessionOptions test_options(){
     options.save_layout=std::move(layout);
     return options;
 }
+scene::SessionOptions assignment_fixture(TempGame& temp) {
+    namespace panel=scene::panel;
+    temp.text("init/game.xtx","extSaveDataNumber 6\nframeTime 20\nvarType 0\nslowPattern 1\n");
+    temp.text("spt/command.xtx","selectplace,d\nresult,d\nprintdate,d\n");
+    std::string names;
+    for (unsigned i=0;i<300;++i) names+="var"+std::to_string(i)+',';
+    for (const auto& name:panel::assignment_variable_names()) names+=name+',';
+    Bytes encoded(names.begin(),names.end());for (auto& byte:encoded) byte^=255U;
+    temp.write("spt/var.fxf",encoded);
+    // These small original-format fixtures exercise routing and capture, not
+    // replacement art or an acceptance rendering of the private game's UI.
+    for (const auto& name:panel::assignment_assets()) temp.write("dwq/"+name+".dwq",asset("lower"));
+    // HitTest reads each of the action button's three 160-pixel states.
+    // A one-row BMP strip supplies those source positions, with a black color key.
+    Bytes action(118+480*3,0);std::fill_n(action.begin(),64,' ');std::copy_n("BMP",3,action.begin());
+    std::copy_n("PACKTYPE=0",10,action.begin()+48);
+    le32(action,32,static_cast<Word>(action.size()-64));le32(action,36,480);le32(action,40,1);
+    action[64]='B';action[65]='M';le32(action,66,static_cast<Word>(action.size()-64));
+    le32(action,74,54);le32(action,78,40);le32(action,82,480);le32(action,86,1);
+    action[90]=1;action[92]=24;le32(action,98,480*3);
+    std::fill(action.begin()+121,action.end(),255);temp.write("dwq/sys/ta_action_bt1.dwq",action);
+    temp.write("dwq/red.dwq",asset("tiny_red"));
+    auto options=test_options();options.width=800;options.height=600;options.frame_ms=20;options.audio.enabled=false;
+    auto layout=std::make_shared<scene::pc::DirectorySaveLayout>(*options.save_layout);
+    layout->extension_code_base=200; // Capability behavior must not depend on the sample EXE's block base.
+    layout->files.layer_records=16;layout->files.message_width=scene::pc::classic_message_width;
+    layout->files.registers_okikae=false;layout->extension_sizes.emplace();
+    for (const auto size:panel::assignment_block_sizes)
+        layout->extension_sizes->push_back({static_cast<int>(size),scene::pc::ExtensionSizeSource::GameFiles});
+    options.save_layout=std::move(layout);return options;
+}
+void assignment_variables(scene::GameSession& game) {
+    const auto& names=scene::panel::assignment_variable_names();
+    const auto set=[&](std::size_t i,int value){require(game.set_story_variable(names.at(i),value),"missing assignment fixture variable");};
+    set(0,1);set(1,50);set(2,1);set(3,25);
+    std::size_t at=4;
+    for (int place:{1,2,3}) {set(at++,1);set(at++,place);set(at++,0);}
+    for (unsigned area=0;area<9;++area) {
+        set(at++,1);set(at++,area==1?5:0);
+        if (area>=1 && area<=4) set(at++,1);
+    }
+    for (unsigned person=0;person<8;++person) {set(at++,1);set(at++,30);set(at++,0);}
+    require(at==names.size(),"fixture did not populate the complete variable contract");
+}
 void manually_resolve_fixture_ext(TempGame& temp,const scene::SessionOptions& options,unsigned code=100) {
     bool blocked=false;
     try { scene::GameSession unresolved(temp.root,options); }
@@ -345,6 +390,150 @@ struct Suite{int passed=0,failed=0;void test(const std::string& name,const std::
 
 int main(){
     Suite suite;
+    suite.test("Native date card owns presentation and resumes only after the final submitted frame",[]{
+        Model model;model.message=true;model.code.image(0,1);model.code.number(effect,{0,0});
+        model.code.user(2);model.code.print(1);model.code.end();
+        TempGame temp(model);const auto options=assignment_fixture(temp);
+        scene::GameSession game(temp.root,options);assignment_variables(game);
+        require(game.stats().decodes==0,"Native capability recognition decoded its asset list");
+        require(game.step_frame(0).wait==scene::Wait::NativePanel && game.native_panel_mode()==50 &&
+            !game.native_panel_can_save() && !game.needs_message_plane() && !game.story_draws_screen_layer(),
+            "Date command did not enter its explicit native rendering mode");
+        const auto layer_count=game.layers()[0].count;
+        const auto native=game.snapshot();require(native[4]==18,"Assignment snapshot did not use its state-bearing version");
+        nnn::snapshot::Reader inspect(native);scene::GameSession::inspect_snapshot(inspect);
+        game.restore_snapshot(native);
+        bool rejected=false;try {(void)game.export_pc_save();} catch (const std::runtime_error&) {rejected=true;}
+        require(rejected,"Date card was exposed as a PC save position");
+        require(game.step_frame(20*53).wait==scene::Wait::NativePanel && game.native_panel_mode()==50 &&
+            game.state().dialogue.sequence==0 && game.layers()[0].count==layer_count,
+            "Date callback advanced script/layer state before presentation");
+        scene::StoryCompositor compositor;
+        require(compositor.present(game,true,true,[](const auto&){return false;})==
+                scene::StoryCompositor::PresentOutcome::SubmitFailed && game.state().wait==scene::Wait::NativePanel,
+            "Failed native frame submission resumed the suspended script");
+        require(compositor.present(game,true,true,[](const auto& image){
+                return std::all_of(image.rgb.begin(),image.rgb.end(),[](Byte v){return v==0;});})==
+                scene::StoryCompositor::PresentOutcome::Presented && game.state().wait==scene::Wait::Running &&
+                game.native_panel_mode()==0,"Final native exit frame was not committed before returning");
+        require(game.step_frame(0).wait==scene::Wait::Dialogue && game.state().dialogue.message_id==1,
+            "Date command did not resume its actual caller");
+        std::filesystem::remove(temp.root/"dwq/sys/ta_day_moon10.dwq");
+        scene::GameSession missing(temp.root,options);assignment_variables(missing);
+        require(missing.step_frame(0).wait==scene::Wait::Dialogue && missing.native_panel_mode()==0,
+            "Incomplete original asset contract enabled a private capability");
+    });
+    suite.test("Native assignment saves real EXT state, queues input and resumes original menus",[]{
+        Model model;model.message=true;model.code.image(0,1);model.code.number(effect,{0,0});
+        model.code.print(7);
+        model.code.user(0);model.code.print(1);model.code.user(1);model.code.print(2);model.code.end();
+        TempGame temp(model);auto options=assignment_fixture(temp);options.audio.enabled=true;
+        temp.text("spt/bgmlist.xtx","first,First\n");
+        temp.write("wgq/first.wgq",read_file(fixtures/"assets/tone_first.wgq"));
+        scene::GameSession game(temp.root,options);assignment_variables(game);
+        nnn::SystemEvent music;music.opcode=nnn::audio::music;music.parameters={1,-1,-6,0,0};
+        require(game.audio().submit(music).empty(),"Negative-repeat map BGM did not start");
+        scene::InputState next;next.advance=true;
+        require(game.step_frame(0).wait==scene::Wait::Dialogue,"Map retained-message fixture did not reach its preceding PRINT");
+        require(game.step_frame(0,next).wait==scene::Wait::NativePanel && game.native_panel_mode()==51 && game.native_panel_can_save(),
+            "Assignment command did not enter original mode 51");
+        const auto unpresented=scene::GameSession::inspect_pc_save(game.export_presented_pc_save(),64*1024);
+        require(!unpresented.pixels.empty() && unpresented.pixels[0]==0xff000000U,
+            "Unpresented native screen reused the previous story thumbnail");
+        game.step_frame(200);game.after_present();
+        const auto original=scene::pc::parse_save(game.export_presented_pc_save());
+        require(original.status.game_mode==51 && original.status.bgm_plays==-1 && original.status.bgm_volume==84 &&
+            original.extension_code_base==200 && original.extensions.size()==6 &&
+            original.extensions[3][0]==1 && original.extensions[4][4]==2 && original.extensions[5][0]==1,
+            "PC save did not use configured block base and actual six-block assignment state");
+        require(original.status.last_message_id==7 && original.status.message_serial==7 &&
+            original.status.message_count==1 && original.messages[0]=="M",
+            "Non-selection PC save discarded its retained print buffer");
+        require(original.thumbnail.pixels[0]==0x6533c9U,"PC native thumbnail did not use the original panel's submitted pixels");
+        game.native_panel_input(485,26,true,false);
+        game.native_panel_input(700,500,false,false); // A later hover must not overwrite the click position.
+        game.step_frame(0);require(!game.native_panel_can_save(),"Pending native input was incorrectly called idle");
+        game.step_frame(20);require(!game.native_panel_can_save() && !game.request_native_panel_menu(13),
+            "Queued click was lost or system menu opened while moving a character");
+        bool rejected=false;try {(void)game.export_pc_save();} catch (const std::runtime_error&) {rejected=true;}
+        require(rejected,"Mid-selection assignment exported a PC save");
+        const auto dragging=game.snapshot();game.restore_snapshot(dragging);
+        require(!game.native_panel_can_save(),"Native snapshot lost the in-progress character assignment");
+        game.native_panel_input(700,500,false,true);game.step_frame(20);
+        require(game.native_panel_can_save(),"Right click did not cancel only the active drag");
+        game.native_panel_input(485,26,true,false);game.step_frame(20);
+        game.native_panel_input(150,163,true,false);game.step_frame(20);
+        require(game.native_panel_can_save(),"Dropping on the original area did not finish character selection");
+        const auto assigned=scene::pc::parse_save(game.export_pc_save());
+        require(assigned.extensions[4][0]==3 && game.named_variable(std::string(scene::panel::assignment_destination_name(0)),false,-1)==0,
+            "Destination was not retained privately until action confirmation");
+        require(game.request_native_panel_menu(13),"Idle assignment refused its original system menu");
+        game.step_frame(260);game.after_present();
+        require(game.take_native_panel_menu()==13 && game.take_native_panel_menu()==0 && game.native_panel_can_save(),
+            "Native system menu request was lost, repeated or made the suspended map unsavable");
+        const auto paused=game.snapshot();game.step_frame(2000);
+        require(game.snapshot()==paused,"Suspended map consumed animation time behind a system menu");
+        require(game.resume_native_panel() && game.native_panel_can_save() &&
+            scene::pc::parse_save(game.export_pc_save()).extensions==assigned.extensions,
+            "Menu return replaced the existing destinations or entry baseline");
+        const auto pending_preview=scene::GameSession::inspect_pc_save(game.export_presented_pc_save(),64*1024);
+        require(!pending_preview.pixels.empty() && pending_preview.pixels[0]==0xff000000U,
+            "Menu return reused a native thumbnail before the resumed frame was submitted");
+        game.restore_snapshot(paused);
+        require(game.native_panel_mode()==51 && game.native_panel_can_save() && game.take_native_panel_menu()==0 &&
+            !game.resume_native_panel(),"Saved menu state restored a frozen or duplicate external menu");
+        game.restore_pc_save(scene::pc::write_save(assigned));
+        require(game.state().wait==scene::Wait::NativePanel && game.native_panel_mode()==51 &&
+            game.audio().pc_state().music_plays==-1 && !game.audio().state().bgm.looping &&
+            game.state().dialogue.raw_bytes.empty() && game.state().dialogue.display_bytes.empty() && !game.needs_message_plane() &&
+            scene::pc::parse_save(game.export_pc_save()).extensions==assigned.extensions,
+            "PC mode51 did not restore all six value blocks and the actual pending command");
+        game.native_panel_input(641,470,true,false);game.step_frame(20);game.step_frame(180);
+        require(!game.native_panel_can_save() && game.named_variable(std::string(scene::panel::assignment_destination_name(0)),false,-1)==3,
+            "Original action did not commit selected destinations before its fade");
+        game.step_frame(240);require(game.state().wait==scene::Wait::NativePanel,"Map exited before its final frame was presented");
+        game.after_present();require(game.step_frame(0).wait==scene::Wait::Dialogue,"Map action did not resume the caller");
+        const auto dialogue_pc=scene::pc::parse_save(game.export_pc_save());
+        require(dialogue_pc.status.game_mode==10 && dialogue_pc.extensions[4][0]==3 && dialogue_pc.extensions[5][0]==0,
+            "Ordinary dialogue save lost its previous private extension state");
+        const auto dialogue_native=game.snapshot();game.restore_snapshot(dialogue_native);
+        require(scene::pc::parse_save(game.export_pc_save()).extensions==dialogue_pc.extensions,
+            "Ordinary native snapshot lost assignment state between private commands");
+        game.restore_pc_save(scene::pc::write_save(dialogue_pc));
+        scene::InputState click;click.advance=true;
+        require(game.step_frame(0,click).wait==scene::Wait::NativePanel && game.native_panel_mode()==52 && !game.native_panel_can_save(),
+            "Result command was replaced by a generic modal or skipped after load");
+        const auto result=game.snapshot();game.restore_snapshot(result);
+        game.step_frame(20*53);game.after_present();
+        require(game.step_frame(0).wait==scene::Wait::Dialogue && game.state().dialogue.message_id==2,
+            "Restored result did not return at the original hold/fade boundary");
+    });
+    suite.test("Native extension and snapshot candidates reject corruption without changing the live map",[]{
+        Model model;model.message=true;model.code.user(0);model.code.print(1);model.code.end();
+        TempGame temp(model);const auto options=assignment_fixture(temp);
+        scene::GameSession game(temp.root,options);assignment_variables(game);game.step_frame(0);game.after_present();
+        const auto saved=scene::pc::parse_save(game.export_pc_save());const auto before=game.snapshot();
+        auto broken=saved;broken.extensions[2].pop_back();bool rejected=false;
+        try {game.restore_pc_save(scene::pc::write_save(broken));} catch (const std::runtime_error&) {rejected=true;}
+        require(rejected && game.snapshot()==before,"Failed six-EXT candidate mutated the original map");
+        broken=saved;broken.extensions[4][0]=10;rejected=false;
+        try {game.restore_pc_save(scene::pc::write_save(broken));} catch (const std::runtime_error&) {rejected=true;}
+        require(rejected && game.snapshot()==before,"Invalid EXT destination was published to a live session");
+        Bytes memory;for (const auto& block:saved.extensions) memory.insert(memory.end(),block.begin(),block.end());
+        memory.push_back(0);memory.push_back(0); // Native-only resume and suppress-entrance flags.
+        auto invalid=before;
+        const auto found=std::search(invalid.begin(),invalid.end(),memory.begin(),memory.end());
+        require(found!=invalid.end(),"Native snapshot omitted its typed persistent assignment memory");
+        invalid[static_cast<std::size_t>(found-invalid.begin())+memory.size()]=3;rejected=false;
+        try {game.restore_snapshot(invalid);} catch (const std::runtime_error&) {rejected=true;}
+        require(rejected && game.snapshot()==before,"Unknown native panel tag replaced the current session");
+        Bytes dimension(12);le32(dimension,0,800);le32(dimension,4,600);le32(dimension,8,800*600*3);
+        invalid=before;const auto surface=std::search(invalid.begin(),invalid.end(),dimension.begin(),dimension.end());
+        require(surface!=invalid.end(),"Native snapshot omitted its actual presented surface");
+        le32(invalid,static_cast<std::size_t>(surface-invalid.begin()),8193);rejected=false;
+        try {game.restore_snapshot(invalid);} catch (const std::runtime_error&) {rejected=true;}
+        require(rejected && game.snapshot()==before,"Invalid native presentation dimensions escaped candidate validation");
+    });
     suite.test("script input waits at the return PC and commits the original name and replacement state",[]{
         Model model;model.message=true;model.message_text="#L/#F, #02/#S03";
         model.code.print(1);model.code.user(0);model.code.print(2);
@@ -499,7 +688,7 @@ int main(){
         }
     });
     suite.test("both place classes keep independent rules across a native save and decorative preview",[]{
-        Model model;model.message=true;model.code.user(0);model.code.user(1);model.code.print(1);model.code.end();
+        Model model;model.message=true;model.code.print(7);model.code.user(0);model.code.user(1);model.code.print(1);model.code.end();
         TempGame temp(model);
         temp.text("init/game.xtx","SelectPlaceIsDefault 1\nSelectPlace2IsDefault 1\n");
         temp.text("spt/command.xtx","SELECTPLACE,0\nSELECTPLACE2,0\n");
@@ -514,10 +703,15 @@ int main(){
             "selectFlag 1\nplaceSelectOkVarName3 enabled\ncharaFlag 1\nplaceCharaVarName3 chara\n");
         auto options=test_options();
         scene::GameSession game(temp.root,options);
-        require(game.step_frame(0).wait==scene::Wait::Place && game.place_mode()==nnn::RuntimeMode::SelectPlace &&
+        scene::InputState advance;advance.advance=true;
+        require(game.step_frame(0).wait==scene::Wait::Dialogue,"Place retained-message fixture did not reach its preceding PRINT");
+        require(game.step_frame(0,advance).wait==scene::Wait::Place && game.place_mode()==nnn::RuntimeMode::SelectPlace &&
             game.places()==std::vector<int>{2} && game.place_characters()==std::vector<int>{0},"first class setup");
         const auto first=game.snapshot();
         const auto first_pc=game.export_pc_save();
+        const auto first_slot=scene::pc::parse_save(first_pc);
+        require(first_slot.status.message_count==1 && first_slot.status.last_message_id==7 && first_slot.messages[0]=="M",
+            "Place PC save discarded its retained print buffer");
         scene::InputState choose;choose.choice=1;
         require(game.step_frame(0,choose).wait==scene::Wait::Place && game.place_mode()==nnn::RuntimeMode::SelectPlace2 &&
             game.places()==std::vector<int>{0,1,2} && game.place_characters()==std::vector<int>{0,0,4} &&
@@ -555,7 +749,8 @@ int main(){
         temp.text("spt/varinitdata.xtx","0\n77\n1\n0\n4\n0\n0\n");
         scene::GameSession empty(temp.root,test_options());
         choose.choice=1;
-        require(empty.step_frame(0).wait==scene::Wait::Place && empty.step_frame(0,choose).wait==scene::Wait::Dialogue &&
+        require(empty.step_frame(0).wait==scene::Wait::Dialogue && empty.step_frame(0,advance).wait==scene::Wait::Place &&
+            empty.step_frame(0,choose).wait==scene::Wait::Dialogue &&
             empty.variable(1)==77,"a place2 panel without legal choices must resume without a fabricated selection");
     });
     suite.test("hint and zukan modal actions stay in the native menu until the original return path",[]{
@@ -1036,6 +1231,7 @@ int main(){
     });
     suite.test("legacy chart callbacks, original checkpoints and nonzero PC state round trip",[]{
         Model model;model.message=true;
+        model.code.number(nnn::audio::music,{1,bits(-1),0,0,0});
         model.code.add({5,0x66660004U,0,1,0x900003e9U}); // genzaichi(1001)
         model.code.add({6,0x66660004U,1,2,0x900003ebU,0x90000000U}); // eraberu(1003,0)
         model.code.print(1);
@@ -1045,6 +1241,8 @@ int main(){
         model.command_adjust.push_back(model.code.add({5,0x66660003U,0,0,1}));
         model.code.print(3);model.code.end();
         TempGame temp(model);
+        temp.text("spt/bgmlist.xtx","first,First\n");
+        temp.write("wgq/first.wgq",read_file(fixtures/"assets/tone_first.wgq"));
         temp.text("init/game.xtx","extSaveDataNumber 1\nextSaveDataSize1 11280\n");
         temp.text("init/chart.xtx","chartListNumber 1\nbasicChartNumber 1\nslotSizeX 1\nslotSizeY 1\n");
         temp.text("chart/chart1.xtx","1800 @1001 1 100 100 1002 1003 First @1002 1 200 200 Second @1003 1 300 300 Locked\n");
@@ -1071,7 +1269,8 @@ int main(){
         nnn::chart::Graph graph(temp.root,800,600,{},nnn::chart::Variant::LegacyChart);
         const auto checkpoint_bytes=read_file(storage/"mushiex/chart1/slot1001.dat");
         const auto checkpoint=scene::legacy_chart::parse_node(checkpoint_bytes,graph);
-        require(checkpoint.status.game_mode==51 && checkpoint.status.adjust_version==0 && checkpoint.vars[0]==1001,
+        require(checkpoint.status.game_mode==51 && checkpoint.status.adjust_version==0 && checkpoint.vars[0]==1001 &&
+            checkpoint.status.bgm_plays==-1,
             "Old node checkpoint did not retain raw function continuation and private PC mode");
         require(scene::GameSession::validate_chart_file(temp.root,"MUSHIEX/CHART1/SLOT1001.DAT",checkpoint_bytes),
             "Archive validation rejected a canonical original node with case-insensitive PC spelling");
@@ -1093,6 +1292,8 @@ int main(){
         const auto saved=game.export_pc_save();const auto pc=scene::pc::parse_save(saved);
         require(pc.status.game_mode==51 && pc.status_bytes==scene::pc::legacy_status_bytes && pc.extensions.size()==1 &&
             pc.extensions[0].size()==11280 && pc.extensions[0][1003/8]==8,"Nonzero disabled state was not exported through EXT1");
+        require(pc.status.message_count==1 && pc.status.last_message_id==1 && pc.messages[0]=="M",
+            "Chart PC save discarded its retained print buffer");
         auto restored_options=options;restored_options.runtime=game.runtime()->fork();
         scene::GameSession restored(temp.root,restored_options);restored.set_chart_storage(storage);
         restored.restore_pc_save(saved);
@@ -1116,7 +1317,8 @@ int main(){
             restored.act_modal(restored.state().modal->request,4,1)==4 &&
             restored.act_modal(restored.state().modal->request,8,0)==2,"Legacy revisit failed its original confirmation flow");
         require(restored.variable(0)==1001 && restored.variable(1)==1001 && restored.step_frame(0).wait==scene::Wait::Dialogue &&
-            restored.state().dialogue.message_id==1,"Old checkpoint did not resume after genzaichi with the selected node intact");
+            restored.state().dialogue.message_id==1 && restored.audio().pc_state().music_plays==-1 &&
+            !restored.audio().state().bgm.looping,"Old checkpoint did not resume after genzaichi with its selected node and BGM intact");
         require(std::none_of(restored.warnings().begin(),restored.warnings().end(),[](const auto& warning){
             return warning.find("Unsupported user function")!=std::string::npos || warning.find("Legacy chart checkpoint:")!=std::string::npos;
         }),"A private callback advanced only through an unsupported fallback");
@@ -2802,6 +3004,47 @@ int main(){
         game.restore_snapshot(saved);
         require(game.surface().rgb==first&&game.stats().decodes==decodes,"compact snapshot missed cached layer");
         require(game.runtime()==owner && &game.audio()==audio,"restore replaced a live owner");
+    });
+    suite.test("BGM repeat counts retain PC metadata and distinguish whole-program from MML loops",[]{
+        Model model;model.message=true;model.code.print(1);model.code.end();TempGame temp(model);
+        temp.text("spt/bgmlist.xtx","first,First\nloop,Loop\n");
+        temp.write("wgq/first.wgq",read_file(fixtures/"assets/tone_first.wgq"));
+        temp.text("wgq/loop.mml","[0: first]\n");
+        nnn::audio::Settings settings;settings.record_events=true;
+        std::uint64_t duration=0;
+        for (const int count:{INT32_MIN,-3,-1,0,1,2}) {
+            nnn::audio::GameAudio audio(temp.root,settings);
+            nnn::SystemEvent cue;cue.opcode=nnn::audio::music;cue.parameters={1,count,0,0,0};
+            require(audio.submit(cue).empty() && audio.state().bgm.active,"BGM count fixture did not start");
+            const auto clip=audio.stats().log.back().clips.at(0);
+            duration=(clip.frames*audio.sample_rate()+clip.rate-1)/clip.rate;
+            require(duration>1 && audio.pc_state().music_plays==count,"BGM normalized its saved PC loop count");
+            audio.skip_frames(duration-1);require(audio.state().bgm.active,"BGM stopped before its first program ended");
+            audio.skip_frames(1);
+            require(audio.state().bgm.active==(count==0 || count>1),"BGM whole-program repeat condition differs from PC");
+            audio.skip_frames(duration);
+            require(audio.state().bgm.active==(count==0),"Finite BGM repeat count did not end after its final pass");
+            require(audio.pc_state().music_plays==count,"Natural BGM EOF erased the original repeat request");
+        }
+        nnn::audio::GameAudio loop(temp.root,settings);
+        nnn::SystemEvent cue;cue.opcode=nnn::audio::music;cue.parameters={2,-1,0,0,0};
+        require(loop.submit(cue).empty(),"MML loop fixture did not start");
+        loop.skip_frames(duration*3);
+        require(loop.state().bgm.active && loop.state().bgm.looping && loop.pc_state().music_plays==-1,
+            "Negative whole-program repeat count disabled MML's internal loop");
+        cue.parameters={1,-1,0,0,0};require(loop.submit(cue).empty(),"One-pass restart fixture did not start");
+        loop.skip_frames(1);nnn::snapshot::Writer saved;loop.save_snapshot(saved);
+        nnn::snapshot::Reader reader(saved.bytes);loop.load_snapshot(reader,false,{},false,true);
+        require(reader.remaining()==0 && loop.state().bgm.source_frame==0 && !loop.state().bgm.looping &&
+            loop.pc_state().music_plays==-1,"Quick-load BGM restart changed the saved negative repeat contract");
+        loop.skip_frames(duration);require(!loop.state().bgm.active,"Quick-load restart treated negative count as infinite");
+        loop.play_music_preview("first",-1,80);loop.skip_frames(duration);
+        require(!loop.state().bgm.active,"Music preview treated negative count as infinite");
+        scene::GameSession game(temp.root,test_options());game.step_frame(0);
+        require(game.audio().submit(cue).empty(),"Story BGM fixture did not start");
+        const auto pc=game.export_pc_save();game.restore_pc_save(pc);
+        require(game.audio().pc_state().music_plays==-1 && !game.audio().state().bgm.looping,
+            "Dialogue PC load rejected or changed a legal negative BGM repeat count");
     });
     suite.test("menu music inheritance retains both crossfade tracks without script audio",[]{
         Model model;model.code.end();TempGame temp(model);

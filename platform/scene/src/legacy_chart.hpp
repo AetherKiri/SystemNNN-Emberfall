@@ -14,9 +14,7 @@ enum class Function { Mark, Enable, Complete, Enabled, Event, Position, Refresh 
 std::optional<Function> function(std::string_view name);
 
 // Configuration-only recognition: does not open any executable or save.
-// The host may corroborate it during its existing EXE-analysis/cache workflow.
 bool recognizes(const std::filesystem::path& root,const nnn::resource::FilenameEncoder& encode={});
-bool verifies_executable(const std::vector<nnn::Byte>& pe);
 
 struct Write { std::string name; nnn::Value value; };
 struct Action {

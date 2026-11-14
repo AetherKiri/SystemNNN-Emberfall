@@ -30,6 +30,12 @@ int level(int base,int delta,std::int64_t adjustment=0) {
 int parameter(const std::vector<Value>& a,std::size_t index,int fallback=0) {
     return index<a.size() ? a[index] : fallback;
 }
+int music_plays(int requested) {
+    // CWaveMusic repeats a completed MML only for zero or a positive count
+    // greater than one. Negative counts still play its first pass; MML's own
+    // loop remains independent. Keep the raw request in last_music for PC saves.
+    return requested<0 ? 1 : requested;
+}
 int config_number(const std::string& text,const std::string& wanted,int fallback) {
     std::istringstream lines(text);
     for (std::string line;std::getline(lines,line);) {
@@ -426,7 +432,7 @@ struct GameAudio::Impl {
         target={};
         if (!saved || !settings.enabled || !total_on || !music_on) return;
         auto program=std::make_shared<Program>(files.bgm(saved->first));
-        target.start(std::move(program),saved->second,gain_curve(volume-settings.music_volume,0,true),
+        target.start(std::move(program),music_plays(saved->second),gain_curve(volume-settings.music_volume,0,true),
                      settings.music_volume,fade(settings.default_music_fade_in));
         target.source_number=saved->first;
     }
@@ -481,7 +487,7 @@ struct GameAudio::Impl {
         muted_music_volume.reset();
         outgoing=std::move(song);
         outgoing.stop(fade(out<0 ? next_music.value_or(settings.default_music_fade_out) : out));
-        song.start(std::move(p),parameter(a,1),vol,settings.music_volume,fade(in<0 ? next_music.value_or(settings.default_music_fade_in) : in));
+        song.start(std::move(p),music_plays(parameter(a,1)),vol,settings.music_volume,fade(in<0 ? next_music.value_or(settings.default_music_fade_in) : in));
         song.source_number=id;
         next_music.reset(); ++totals.plays;
     }
@@ -811,7 +817,7 @@ void GameAudio::play_music_preview(const std::string& name,int plays,int volume)
     impl_->last_music.reset();
     impl_->current_music=0;
     impl_->outgoing={};
-    impl_->song.start(std::move(program),plays,gain_curve(0),percent(volume),0);
+    impl_->song.start(std::move(program),music_plays(plays),gain_curve(0),percent(volume),0);
 }
 void GameAudio::pause_music_preview(bool paused) {
     std::lock_guard<std::mutex> mix(impl_->mixer);
