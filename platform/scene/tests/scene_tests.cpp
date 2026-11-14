@@ -4062,6 +4062,11 @@ int main(){
             scene::GameSession::game_weekday(2026,11,14)==6 &&
             scene::GameSession::game_weekday(2026,11,15)==0,
             "game_weekday differed from upstream CCalcuWeek::CalcuWeek");
+        const auto check_status_date=[](const Bytes& raw,int month,int day,int weekday) {
+            const auto status=scene::pc::parse_save(raw).status;
+            require(status.game_month==month && status.game_day==day && status.game_hour==0 &&
+                status.game_weekday==weekday,"PC GAMESTATUS date did not match the script calendar");
+        };
         for (const bool extended:{false,true}) {
             Model model;model.message=true;
             // Assign var[2] = 2026 (year), var[3] = 1113 (date).
@@ -4081,6 +4086,7 @@ int main(){
                 "year/date variable index lookup failed");
             require(game.step_frame(0).wait==scene::Wait::Dialogue,"fixture did not reach dialogue");
             const auto raw=game.export_pc_save();
+            check_status_date(raw,11,13,5);
             const auto preview=scene::GameSession::inspect_pc_save(raw,0);
             require(preview.vars.size()==(extended ? 2224U : 1024U) &&
                 preview.vars[2]==2026 && preview.vars[3]==1113,
@@ -4089,9 +4095,20 @@ int main(){
             require(info.valid && info.year==2026 && info.date==1113 &&
                 info.month==11 && info.day==13 && info.weekday==5,
                 "inspect_pc_save_game_date returned wrong year/month/day/weekday");
+            auto leap=scene::pc::parse_save(raw);
+            leap.vars[2]=2000;leap.vars[3]=229;
+            game.restore_pc_save(scene::pc::write_save(leap));
+            check_status_date(game.export_pc_save(),2,29,2);
+            leap.vars[3]=301;
+            game.restore_pc_save(scene::pc::write_save(leap));
+            check_status_date(game.export_pc_save(),3,1,3);
             temp.text("init/game.xtx",std::string(extended ? "varType 1\n" : "varType 0\n")+"notUseYearVar 1\n");
             const auto no_year_meta=scene::GameSession::pc_save_date_variables(temp.root);
             require(no_year_meta[0]==-1 && no_year_meta[1]==3,"notUseYearVar did not suppress year variable");
+            scene::GameSession no_year(temp.root,test_options());
+            require(no_year.step_frame(0).wait==scene::Wait::Dialogue && no_year.variable(2)==2026,
+                "Disabled year binding did not leave the script variable available");
+            check_status_date(no_year.export_pc_save(),11,13,1);
             const auto fallback_year=scene::GameSession::inspect_pc_save_game_date(raw,no_year_meta[0],no_year_meta[1]);
             require(fallback_year.valid && fallback_year.year==2000 && fallback_year.month==11 &&
                 fallback_year.day==13 && fallback_year.weekday==1,
@@ -4106,6 +4123,11 @@ int main(){
                 !scene::GameSession::inspect_pc_save_game_date(raw,-1,9999).valid,
                 "invalid or out-of-range year/date variable indices must return !valid");
         }
+        Model model;model.message=true;model.code.print(1);model.code.end();
+        TempGame undated(model);
+        scene::GameSession game(undated.root,test_options());
+        require(game.step_frame(0).wait==scene::Wait::Dialogue,"Undated fixture did not reach dialogue");
+        check_status_date(game.export_pc_save(),327,67,1); // PC GetVarData(-1) reads 0x7fff.
     });
     suite.test("logical canvas uses old mainControl defaults without depending on render layers",[]{
         Model model;model.code.present();model.code.end();
