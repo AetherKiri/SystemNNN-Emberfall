@@ -6,9 +6,10 @@ import java.nio.ByteBuffer;
 
 final class NativeGame {
     static { System.loadLibrary("systemnnn"); }
-    static final int RUNNING=0, DRAW=1, OVERLAP=2, DIALOGUE=3, CHOICE=4, END=5, TITLE=6, MOVIE=7, PLACE=8, MODAL=9;
-    static final int META_SIZE=16, CLOCK_DATE=7, CLOCK_MILLISECONDS=8, SCRIPT_CURSOR=9, DRAW_MESSAGE=10,
-        TITLE_BACKGROUND_ENDED=11, PACED_MS=12, FILM_SKIP_ENABLED=13, SCRIPT_MOUSE=14, TICK_EXECUTED=15;
+    static final int RUNNING=0, DRAW=1, OVERLAP=2, DIALOGUE=3, CHOICE=4, END=5, TITLE=6, MOVIE=7, PLACE=8, MODAL=9, NATIVE_PANEL=10;
+    static final int META_SIZE=18, CLOCK_DATE=7, CLOCK_MILLISECONDS=8, SCRIPT_CURSOR=9, DRAW_MESSAGE=10,
+        TITLE_BACKGROUND_ENDED=11, PACED_MS=12, FILM_SKIP_ENABLED=13, SCRIPT_MOUSE=14, TICK_EXECUTED=15,
+        NATIVE_PANEL_MODE=16, NATIVE_PANEL_SAVABLE=17;
     static final int SELECT_PLACE_MODE=22,SELECT_PLACE2_MODE=35;
     static native long open(byte[] path, int sampleRate);
     static native long openWithRuntime(byte[] path,int sampleRate,long contextToken);
@@ -53,6 +54,10 @@ final class NativeGame {
     static native byte[][] content(long handle);
     static native void frameInfo(long handle,int[] meta);
     static native int runtimeMode(long handle);
+    static native void nativePanelInput(long handle,int x,int y,boolean click,boolean cancel);
+    static native boolean nativePanelMenu(long handle,int mode);
+    static native int takeNativePanelMenu(long handle);
+    static native boolean resumeNativePanel(long handle);
     static native long systemMenuModes(long handle,long requested);
     // Modal identity, native mode, return mode (0 resumes the script), then command parameters.
     static native int[] modalInfo(long handle);

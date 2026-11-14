@@ -214,6 +214,8 @@ jlong present(Player& p) {
             if (ANativeWindow_unlockAndPost(window)!=0) p.repaint=true;
             if (!p.repaint) queued_at=std::chrono::duration_cast<std::chrono::nanoseconds>(now).count();
         });
+        // Native-only hosts share the same successful-presentation boundary.
+        if (queued_at!=0 && p.static_title.rgb.empty()) p.game->after_present();
         return queued_at;
     }
     p.game->capture_screen_layer(false);
@@ -272,6 +274,10 @@ void frame_meta(JNIEnv* env,Player& p,jintArray meta) {
     if (env->GetArrayLength(meta)>=15) {
         const jint mouse=f.script_mouse;
         env->SetIntArrayRegion(meta,14,1,&mouse);
+    }
+    if (env->GetArrayLength(meta)>=18) {
+        const jint panel[]={p.game->native_panel_mode(),p.game->native_panel_can_save()?1:0};
+        env->SetIntArrayRegion(meta,16,2,panel);
     }
 }
 emberfall::scene::Wait step_title(Player& p,std::optional<unsigned> elapsed_ms={}) {
@@ -721,6 +727,26 @@ API void JNICALL FN(frameInfo)(JNIEnv* env,jclass,jlong handle,jintArray meta) {
 }
 API jint JNICALL FN(runtimeMode)(JNIEnv*,jclass,jlong handle) {
     return player(handle).game->mode();
+}
+API void JNICALL FN(nativePanelInput)(JNIEnv* env,jclass,jlong handle,jint x,jint y,jboolean click,jboolean cancel) {
+    try { player(handle).game->native_panel_input(x,y,click==JNI_TRUE,cancel==JNI_TRUE); }
+    catch (const std::exception& e) { fail(env,e.what()); }
+}
+API jboolean JNICALL FN(nativePanelMenu)(JNIEnv* env,jclass,jlong handle,jint mode) {
+    try { return player(handle).game->request_native_panel_menu(mode)?JNI_TRUE:JNI_FALSE; }
+    catch (const std::exception& e) { fail(env,e.what());return JNI_FALSE; }
+}
+API jint JNICALL FN(takeNativePanelMenu)(JNIEnv* env,jclass,jlong handle) {
+    try { return player(handle).game->take_native_panel_menu(); }
+    catch (const std::exception& e) { fail(env,e.what());return 0; }
+}
+API jboolean JNICALL FN(resumeNativePanel)(JNIEnv* env,jclass,jlong handle) {
+    try {
+        auto& p=player(handle);
+        if (!p.game->resume_native_panel()) return JNI_FALSE;
+        p.repaint=true;
+        return JNI_TRUE;
+    } catch (const std::exception& e) { fail(env,e.what());return JNI_FALSE; }
 }
 API jobjectArray JNICALL FN(debugSnapshot)(JNIEnv* env,jclass,jlong handle) {
     try {

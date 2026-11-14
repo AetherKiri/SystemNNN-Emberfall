@@ -25,6 +25,14 @@ public final class DialogueLayoutTest {
         return fields;
     }
     public static void main(String[] args)throws Exception{
+        check(PlayerActivity.pointerCoordinate(500,100,800,1600,false)==200,"native panel pointer uses stage origin and scale");
+        check(PlayerActivity.pointerCoordinate(99.5f,100,800,1600,false)==-1&&
+            PlayerActivity.pointerCoordinate(1700,100,800,1600,false)==800,"native panel keeps either outside edge invalid for hit testing");
+        check(PlayerActivity.pointerCoordinate(99.5f,100,800,1600,true)==0&&
+            PlayerActivity.pointerCoordinate(1700,100,800,1600,true)==799,"ordinary story keeps its original canvas clamp");
+        check(PlayerActivity.pointerCoordinate(Float.MAX_VALUE,Integer.MIN_VALUE,800,1,false)==Integer.MAX_VALUE&&
+            PlayerActivity.pointerCoordinate(-Float.MAX_VALUE,Integer.MAX_VALUE,800,1,false)==Integer.MIN_VALUE,
+            "extreme native pointer coordinates saturate without overflowing into the canvas");
         Map<String,String> cursor=new HashMap<>();
         check(DialogueLayout.cursorName(cursor,0,0,0).equals("mes_cur"),"cursor default asset");
         put(cursor,"filenameCursor1","base");put(cursor,"filenameCursor2","automatic");

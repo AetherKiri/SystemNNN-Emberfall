@@ -1,6 +1,8 @@
 # SystemNNN-Emberfall
 
-当前源码版本为 **0.6.18（versionCode 79）**，要求 Android 8.0 及以上、ARM64。独立安装包的默认构建路径为 `build/tyranor/SystemNNN-Emberfall-0.6.18-arm64.apk`。
+当前源码版本为 **0.6.21（versionCode 82）**，要求 Android 8.0 及以上、ARM64。独立安装包的默认构建路径为 `build/tyranor/SystemNNN-Emberfall-0.6.21-arm64.apk`。
+
+已识别的旧流程图和日期／地图／结算玩法通过各自的数据契约接入，使用游戏原素材。识别依据为命令、配置、变量和资源组合，不依赖游戏名；这不表示自动支持任意私有玩法。EXT 编号和长度沿用游戏配置与解析缓存。
 
 文字平面的 JNI 句柄保留完整 64 位，兼容 ARM64 地址标记；仅零值代表无句柄。EXE 解析支持从较早赋值的局部变量追踪状态块长度。已有配置仍直接读取，需手动重新生成才能更新解析来源。
 

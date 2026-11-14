@@ -324,6 +324,17 @@ public final class GameSaveTest {
             resetReplay.resultSeeds.equals(Arrays.asList(3,5))&&Arrays.equals(resetReplay.galleryKeys,unlocks),
             "rewind removes future clock samples and applies the next baseline");
         byte[] snapshot={1,4,8,15,16,23,42};
+        int[] panelPosition=POSITION.clone();panelPosition[0]=NativeGame.NATIVE_PANEL;
+        GameSave.Metadata panelMetadata=GameSave.metadata(0,1,SCRIPT,panelPosition,"","");
+        GameSave panelHistory=new GameSave();panelHistory.append(20,12,34,false,0);panelHistory.recordNativeBoundary(45,67);
+        GameSave.Loaded panelSlot=read(write(panelHistory,panelMetadata,snapshot));
+        check(panelSlot.metadata.wait==NativeGame.NATIVE_PANEL&&panelSlot.save.requiresSnapshot()&&
+            Arrays.equals(panelSlot.nativeSnapshot,snapshot)&&panelSlot.save.lastInput().x==45,
+            "native asset panels preserve their required snapshot and pointer without a fake dialogue journal");
+        invalid(()->read(write(history,panelMetadata,snapshot)),"native panel with a replay-only journal");
+        invalid(()->write(panelHistory,panelMetadata,null),"native panel without its snapshot");
+        byte[] brokenPanel=write(panelHistory,panelMetadata,snapshot);brokenPanel[brokenPanel.length-1]^=1;
+        invalid(()->read(brokenPanel),"native panel with a damaged snapshot");
         byte[] damaged=write(history,metadata,snapshot);damaged[damaged.length-1]^=1;
         GameSave.Loaded damagedFull=read(damaged);
         Engine recovered=new Engine();GameSave.replay(damagedFull,recovered,new int[7]);

@@ -18,7 +18,7 @@
 namespace emberfall::scene {
 namespace pc { struct DirectorySaveLayout; }
 
-enum class Wait { Running, Draw, Overlap, Dialogue, Choice, Ended, Error, Movie, Place, Modal };
+enum class Wait { Running, Draw, Overlap, Dialogue, Choice, Ended, Error, Movie, Place, Modal, NativePanel };
 enum class EndReason { None, End, Next, Exit, ReplayComplete };
 enum class DrawMessage { None, Window, RetainedMessage, LongBackground };
 struct ScriptClockSample {
@@ -156,6 +156,12 @@ public:
     int act_modal(int request,int action,int value);
     void advance_modal(int request,unsigned frames);
     bool modal_savable() const;
+    int native_panel_mode() const noexcept;
+    bool native_panel_can_save() const noexcept;
+    void native_panel_input(int x,int y,bool click,bool cancel);
+    bool request_native_panel_menu(int mode);
+    int take_native_panel_menu() noexcept;
+    bool resume_native_panel();
     bool open_modal(nnn::RuntimeMode mode,nnn::RuntimeMode back_mode,bool from_title=false);
     bool menu_extension_enabled(nnn::RuntimeMode mode) const;
     std::optional<ScriptModal> status_overlay(nnn::RuntimeMode type,nnn::RuntimeMode mode,bool prefer_story=false);

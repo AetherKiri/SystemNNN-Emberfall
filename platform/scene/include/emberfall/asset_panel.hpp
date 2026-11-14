@@ -25,6 +25,7 @@ struct Blit {
     int opacity_percent=100;
     int add_red=0,add_green=0,add_blue=0;
     bool additive=false; // CPicture::AddBlt, after any preceding masked image.
+    bool translucent=false; // CPicture::TransLucentBlt2, including its 100% endpoint.
 };
 struct Input {
     unsigned frames=1;

@@ -27,6 +27,16 @@ struct Texture {
 };
 
 void paint_texture(Surface& out,const Texture& texture,Rect source,Point origin,int opacity=100);
+enum class PictureBlend { Standard, PcColorAdd, PcTranslucent };
+struct PictureStyle {
+    int opacity=100;
+    std::array<int,3> add{};
+    bool alpha=true,color_key=false,additive=false;
+    PictureBlend blend=PictureBlend::Standard;
+};
+// CPicture's masked/color-add/additive asset operations share the layer painter.
+void paint_texture(Surface& out,const Texture& texture,Rect source,Point origin,const PictureStyle& style);
+void paint_rectangle(Surface& out,Rect bounds,std::array<int,3> color,int opacity);
 
 struct Layer {
     std::shared_ptr<const Texture> texture;

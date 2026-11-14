@@ -1,4 +1,5 @@
 #include "emberfall/game_session.hpp"
+#include "emberfall/area_assignment.hpp"
 #include "chart_node_store.hpp"
 #include "legacy_chart.hpp"
 #include "chart_view_model.hpp"
@@ -46,7 +47,7 @@ constexpr nnn::Word cutin_mode=0x3333005bU, cutin_click=0x3333005cU, face_type=0
 constexpr nnn::Word set_term=0x3333006dU;
 constexpr unsigned variable_count=32768;
 constexpr unsigned first_system_variable=200;
-constexpr std::uint32_t snapshot_magic=0x31534e4eU, snapshot_version=17;
+constexpr std::uint32_t snapshot_magic=0x31534e4eU, snapshot_version=18;
 constexpr int default_next_message_type=3;
 constexpr int heroine_limit=12,object_limit=1024;
 constexpr std::size_t backlog_capacity=100;
@@ -64,6 +65,88 @@ template<class A,class D> void dialogue_fields(A& a,D& d) {
 template<class A,class L> void backlog_fields(A& a,L& l) { a(l.speaker,l.text,l.voices,l.color,l.configuration_text); }
 template<class A,class S> void skip_fields(A& a,S& s) {
     a(s.skip_f4_mode,s.skip_f5_mode,s.skip_next_command,s.skip_effect_command,s.skip_to_film_end);
+}
+template<class A,class M> void assignment_fields(A& a,M& m) {
+    a(m.previous_character_state,m.previous_area_state,m.area_target,m.origin,m.destination,
+      m.choosing,m.resume,m.suppress_entrance);
+}
+template<class A,class V> void date_values_fields(A& a,V& v) { a(v.moon,v.remaining_days,v.easy,v.power); }
+template<class A,class S> void date_panel_fields(A& a,S& s) {
+    date_values_fields(a,s.values);a(s.count,s.fade_in,s.fade_out,s.exit_delay,s.pulse,s.finished);
+}
+template<class A,class B> void panel_button_fields(A& a,B& b) { a(b.state,b.phase,b.activated_count,b.activated,b.ready); }
+template<class A,class S> void assignment_panel_fields(A& a,S& s) {
+    a(s.mode);assignment_fields(a,s.memory);date_values_fields(a,s.values.date);
+    a(s.values.slow_pattern,s.values.character_visible,s.values.position,s.values.area_visible,
+      s.values.area_target,s.values.area_state,s.values.character_state,s.values.submission,s.values.gain);
+    for (auto& b:s.characters) panel_button_fields(a,b);
+    for (auto& b:s.areas) panel_button_fields(a,b);
+    for (auto& b:s.symbols) panel_button_fields(a,b);
+    panel_button_fields(a,s.action);panel_button_fields(a,s.menu);
+    a(s.selected,s.pointer_x,s.pointer_y,s.pulse,s.area_frame,s.result_pulse,s.result_count,s.fade_in,
+      s.fade_out,s.exit_delay,s.pending_system_mode,s.suppress_fade,s.finished,s.system_dispatched);
+    a.records(s.results,24,[](auto& ar,auto& row){ar(row.character,row.base,row.gain);});
+    a(s.result_index,s.result_hold,s.result_flash,s.area_changed,s.area_hold,s.result_area_state);
+}
+struct NativePanelRun {
+    panel::AssignmentMemory memory;
+    std::optional<panel::DateCard> date;
+    std::optional<panel::AreaAssignment> area;
+    nnn::Value previous_mode=static_cast<nnn::Value>(nnn::RuntimeMode::PrintMessage);
+    nnn::Word command=0;
+    std::uint32_t argument_count=0;
+    int x=-1,y=-1,menu=0;
+    bool paused=false,dirty=true,needs_present=true;
+    std::deque<panel::Input> input;
+    render::Surface surface,presented;
+    int mode() const noexcept {return date ? 50 : area ? area->state().mode : 0;}
+    panel::Output output() const {return date ? date->render() : area ? area->render() : panel::Output{};}
+};
+void write_native_panel(nnn::snapshot::Writer& out,const NativePanelRun& n) {
+    assignment_fields(out,n.memory);
+    const auto kind=static_cast<std::uint8_t>(n.date?1:n.area?2:0);
+    out(kind,n.previous_mode,n.command,n.argument_count,n.x,n.y,n.menu,n.paused);
+    if (n.date) date_panel_fields(out,n.date->state());
+    if (n.area) assignment_panel_fields(out,n.area->state());
+    out.size(n.input.size(),1024);
+    for (const auto& event:n.input) out(event.pointer_x,event.pointer_y,event.click,event.cancel,event.system_mode);
+    out(n.presented.width,n.presented.height,n.presented.rgb);
+}
+NativePanelRun read_native_panel(nnn::snapshot::Reader& in) {
+    NativePanelRun n;assignment_fields(in,n.memory);
+    if (!panel::import_assignment(panel::export_assignment(n.memory))) nnn::snapshot::invalid("Invalid assignment memory");
+    std::uint8_t kind=0;
+    in(kind,n.previous_mode,n.command,n.argument_count,n.x,n.y,n.menu,n.paused);
+    if (kind>2 || n.argument_count>65536 || n.previous_mode<0 || n.previous_mode>255 ||
+        (n.menu!=0 && n.menu!=5 && n.menu!=6 && n.menu!=12 && n.menu!=13))
+        nnn::snapshot::invalid("Invalid native panel header");
+    if (kind==1) {
+        panel::DateCard::State state;date_panel_fields(in,state);n.date=panel::DateCard::restore(state);
+        if (!n.date) nnn::snapshot::invalid("Invalid date card state");
+    }
+    if (kind==2) {
+        panel::AreaAssignment::State state;assignment_panel_fields(in,state);n.area=panel::AreaAssignment::restore(state);
+        if (!n.area || panel::export_assignment(n.area->memory())!=panel::export_assignment(n.memory) ||
+            n.area->memory().resume!=n.memory.resume || n.area->memory().suppress_entrance!=n.memory.suppress_entrance)
+            nnn::snapshot::invalid("Invalid assignment panel state");
+    }
+    const auto count=in.size(1024);
+    for (std::size_t i=0;i<count;++i) {
+        panel::Input event;in(event.pointer_x,event.pointer_y,event.click,event.cancel,event.system_mode);
+        if (event.system_mode!=0 && event.system_mode!=5 && event.system_mode!=6 && event.system_mode!=12 && event.system_mode!=13)
+            nnn::snapshot::invalid("Invalid native panel input");
+        n.input.push_back(event);
+    }
+    in(n.presented.width,n.presented.height,n.presented.rgb);
+    if (n.presented.width>render::max_dimension || n.presented.height>render::max_dimension ||
+        static_cast<std::uint64_t>(n.presented.width)*n.presented.height>render::max_pixels ||
+        n.presented.rgb.size()!=static_cast<std::uint64_t>(n.presented.width)*n.presented.height*3 ||
+        ((!n.presented.width)!=(!n.presented.height)) ||
+        ((n.paused || n.menu!=0) && (n.mode()!=51 || !n.area->state().system_dispatched)) ||
+        (n.area && n.area->state().system_dispatched!=n.paused) ||
+        (!n.mode() && (!n.input.empty() || !n.presented.rgb.empty())))
+        nnn::snapshot::invalid("Invalid native panel presentation");
+    return n;
 }
 
 std::string file_text(const fs::path& path) { return nnn::game_config::read_text(path); }
@@ -573,6 +656,10 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
     std::optional<pc::OmakeWords> omake;
     std::array<std::optional<nnn::status_party::Visit>,2> attached_status;
     PcExtensions pc_extensions;
+    bool assignment_available=false;
+    int assignment_slow_pattern=1;
+    std::unordered_map<nnn::Word,int> native_panel_commands;
+    NativePanelRun native_panel;
     std::array<std::string,4> loaded_pc_preview;
     struct InactivePcLayer { pc::Effect effect; std::string filename; };
     std::array<std::optional<InactivePcLayer>,pc::layer_count> inactive_pc_layers;
@@ -943,6 +1030,7 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         }
         movie_count=std::min<std::size_t>(4096,fields(file_text(assets.config("movielist.xtx"))).size()/2);
         const auto commands=file_text(assets.config("command.xtx"));
+        configure_assignment(init,commands);
         const auto registered_command_id=[&](const std::string& name) -> std::optional<nnn::Word> {
             std::size_t cursor=0;
             for (nnn::Word index=0;const auto token=nnn::game_config::name_token(commands,cursor);++index)
@@ -3720,6 +3808,9 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
     void PreReceiveScriptData(nnn::Word,nnn::Value,const std::string&) override {}
     void ReceiveUserCommand0(nnn::Word command,const std::vector<nnn::Value>& args) override {
         if (ui_mode) return;
+        if (const auto found=native_panel_commands.find(command);found!=native_panel_commands.end()) {
+            enter_native_panel(found->second,command,static_cast<std::uint32_t>(args.size()));return;
+        }
         if (select_place.command==command) { begin_place(nnn::RuntimeMode::SelectPlace,select_place);return; }
         if (select_place2.command==command) { begin_place(nnn::RuntimeMode::SelectPlace2,select_place2);return; }
         if (const auto found=modal_commands.find(command);found!=modal_commands.end()) {
@@ -3931,7 +4022,7 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
             if (!error.empty()) warn("PC save audio: "+error);
         };
         if (status.bgm_number>=0) {
-            if (status.bgm_number==INT32_MAX || status.bgm_plays<0 || status.bgm_volume<0 || status.bgm_volume>100)
+            if (status.bgm_number==INT32_MAX || status.bgm_volume<0 || status.bgm_volume>100)
                 throw std::runtime_error("Invalid PC save BGM");
             int bgm_number=status.bgm_number;
             if (adjust_load_bgm_enabled && static_cast<std::size_t>(bgm_number)<adjust_load_bgm_table.size()) {
@@ -4097,7 +4188,7 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
                 throw std::runtime_error("Invalid chart checkpoint mode");
             if ((nnn::chart::restores_variable(slot) && node->vars[slot]!=checkpoint) ||
                 status.frame_ms<0 || status.frame_ms>1000 ||
-                (status.bgm_number>=0 && (status.bgm_number==INT32_MAX || status.bgm_plays<0 ||
+                (status.bgm_number>=0 && (status.bgm_number==INT32_MAX ||
                  status.bgm_volume<0 || status.bgm_volume>100)) ||
                 !nnn::valid_runtime_text(status.surname,nnn::runtime_name_bytes) ||
                 !nnn::valid_runtime_text(status.given_name,nnn::runtime_name_bytes))
@@ -4195,6 +4286,144 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
             throw std::runtime_error("EXT_START_UNRESOLVED: This game requires EXT save blocks. Enable the EXE parser and manually regenerate emberfall-system.cfg; no EXT starting code was inferred.");
     }
 
+    void configure_assignment(const std::string& init,const std::string& commands) {
+        if (decorative_preview || !replay_films.empty() || !save_layout->extension_sizes) return;
+        std::vector<int> sizes;
+        for (const auto& size:*save_layout->extension_sizes) sizes.push_back(size.bytes);
+        std::vector<std::string> names;
+        std::size_t cursor=0;
+        for (unsigned token=0;const auto name=nnn::game_config::name_token(commands,cursor);++token)
+            if ((token&1U)==0) names.push_back(fold_cp932(std::string(*name)));
+        const auto order=pc_extension_order(save_layout->registers_okikae());
+        if (order.size()!=6 || !std::all_of(order.begin(),order.end(),[](auto kind){return kind==PcExtension::Game;})) return;
+        assignment_available=panel::recognize_assignment_contract(names,config_int(init,"extSaveDataNumber",0),sizes,
+            [&](std::string_view name){return variable_id(std::string(name))<variable_count;},
+            [&](std::string_view name){return assets.has_image(std::string(name));});
+        if (!assignment_available) return;
+        assignment_slow_pattern=config_int(init,"slowPattern",1);
+        if (assignment_slow_pattern<=0 || assignment_slow_pattern>INT32_MAX/32)
+            throw std::runtime_error("Invalid area assignment slowPattern");
+        for (std::size_t i=0;i<names.size();++i) {
+            const int mode=names[i]=="printdate"?50:names[i]=="selectplace"?51:names[i]=="result"?52:0;
+            if (mode) native_panel_commands.emplace(static_cast<nnn::Word>(i),mode);
+        }
+    }
+    panel::ReadVariable native_panel_variables(const std::array<nnn::Value,variable_count>* locals=nullptr) {
+        return [this,locals](std::string_view name) -> std::optional<std::int32_t> {
+            const auto id=variable_id(std::string(name));
+            if (id>=variable_count) return {};
+            return locals && !system_variable(id) ? (*locals)[id] : GetVarData(id);
+        };
+    }
+    bool native_panel_can_save() const noexcept {
+        return !ui_mode && replay_films.empty() && frame.wait==Wait::NativePanel && native_panel.area &&
+            native_panel.area->can_save() && native_panel.input.empty();
+    }
+    bool native_hit(std::string_view name,int x,int y) {
+        const auto art=assets.image(std::string(name));
+        if (!art) throw std::runtime_error("Missing native panel image: "+std::string(name));
+        const auto sx=static_cast<std::int64_t>(x)-art->content.x,sy=static_cast<std::int64_t>(y)-art->content.y;
+        if (sx<0 || sy<0 || sx>=art->content.width || sy>=art->content.height || art->pixels.rgba.empty()) return false;
+        const auto offset=(static_cast<std::size_t>(sy)*art->pixels.width+static_cast<std::size_t>(sx))*4;
+        const auto* pixel=art->pixels.rgba.data()+offset;
+        if (art->has_mask) return pixel[3]!=0;
+        return pixel[0]!=art->pixels.rgba[0] || pixel[1]!=art->pixels.rgba[1] || pixel[2]!=art->pixels.rgba[2];
+    }
+    void paint_native_panel(NativePanelRun& run) {
+        if (!run.mode() || !run.dirty) return;
+        const auto out=run.output();
+        render::Surface painted{renderer->width(),renderer->height(),{}};
+        painted.rgb.resize(static_cast<std::size_t>(painted.width)*painted.height*3);
+        for (const auto& part:out.blits) {
+            const auto art=assets.image(part.asset);
+            if (!art) throw std::runtime_error("Missing native panel image: "+part.asset);
+            render::PictureStyle style;
+            style.opacity=part.opacity_percent;style.add={part.add_red,part.add_green,part.add_blue};
+            style.alpha=part.alpha && !part.additive;
+            style.color_key=style.alpha && !art->has_mask;style.additive=part.additive;
+            style.blend=part.translucent ? render::PictureBlend::PcTranslucent :
+                part.add_red || part.add_green || part.add_blue ? render::PictureBlend::PcColorAdd : render::PictureBlend::Standard;
+            render::paint_texture(painted,*art,{part.source_x,part.source_y,part.width,part.height},{part.x,part.y},style);
+        }
+        if (out.black_percent) render::paint_rectangle(painted,{0,0,800,600},{0,0,0},out.black_percent);
+        run.surface=std::move(painted);run.dirty=false;run.needs_present=true;
+    }
+    bool enter_native_panel(int mode,nnn::Word command,std::uint32_t argument_count) {
+        if (!assignment_available || ui_mode) return false;
+        NativePanelRun candidate;
+        candidate.memory=native_panel.memory;candidate.previous_mode=shared_runtime->mode();
+        candidate.command=command;candidate.argument_count=argument_count;
+        if (mode==50) {
+            const auto values=panel::read_date_values(native_panel_variables());
+            if (values) candidate.date=panel::DateCard::create(*values);
+            candidate.memory.resume=false;
+        } else {
+            const auto values=panel::read_assignment_values(native_panel_variables(),assignment_slow_pattern);
+            if (values) candidate.area=panel::AreaAssignment::enter(mode,*values,candidate.memory);
+            if (candidate.area) candidate.memory=candidate.area->memory();
+        }
+        if (!candidate.mode()) throw std::runtime_error("Invalid native panel variables or extension state");
+        paint_native_panel(candidate);
+        location();native_panel=std::move(candidate);frame.wait=Wait::NativePanel;
+        frame.remaining_frames=0;frame.selection.reset();frame.modal.reset();
+        has_presented_pc_thumbnail=false;
+        ClearSkipFlags();shared_runtime->set_skip_active(false);
+        set_mode(static_cast<nnn::RuntimeMode>(mode));
+        remainder=0;pacing.clear();
+        return true;
+    }
+    void queue_native_input(int x,int y,bool click,bool cancel,int system_mode=0) {
+        if (frame.wait!=Wait::NativePanel || native_panel.paused) return;
+        native_panel.x=x;native_panel.y=y;
+        if (!click && !cancel && !system_mode) return;
+        if (native_panel.input.size()>=1024) throw std::runtime_error("Native panel input queue exceeds capacity");
+        panel::Input event;event.pointer_x=x;event.pointer_y=y;event.click=click;event.cancel=cancel;event.system_mode=system_mode;
+        native_panel.input.push_back(event);
+    }
+    bool request_native_menu(int mode) {
+        if (mode!=5 && mode!=6 && mode!=12 && mode!=13) return false;
+        if (frame.wait!=Wait::NativePanel || native_panel.paused || !native_panel.area ||
+            !native_panel.area->can_open_system_menu() || !native_panel.input.empty()) return false;
+        queue_native_input(native_panel.x,native_panel.y,false,false,mode);return true;
+    }
+    bool resume_native_panel() {
+        if (frame.wait!=Wait::NativePanel || !native_panel.paused || native_panel.mode()!=51) return false;
+        const auto values=panel::read_assignment_values(native_panel_variables(),assignment_slow_pattern);
+        const auto area=values ? panel::AreaAssignment::enter(51,*values,native_panel.memory) : std::nullopt;
+        if (!area) throw std::runtime_error("Invalid resumed native panel variables");
+        auto candidate=native_panel;candidate.area=area;candidate.memory=area->memory();
+        candidate.input.clear();candidate.x=candidate.y=-1;candidate.paused=false;candidate.menu=0;candidate.dirty=true;
+        paint_native_panel(candidate);native_panel=std::move(candidate);
+        input.advance=input.held=false;input.choice=0;remainder=0;pacing.clear();
+        has_presented_pc_thumbnail=false;
+        set_mode(static_cast<nnn::RuntimeMode>(51));return true;
+    }
+    void advance_native_panel(unsigned frames) {
+        for (unsigned i=0;i<frames && !native_panel.paused && !native_panel.output().finished;++i) {
+            panel::Input event;event.pointer_x=native_panel.x;event.pointer_y=native_panel.y;
+            if (!native_panel.input.empty()) {event=native_panel.input.front();native_panel.input.pop_front();}
+            panel::Output out;
+            if (native_panel.date) {native_panel.date->advance(event);out=native_panel.date->render();}
+            else if (native_panel.area) {
+                out=native_panel.area->advance(event,[this](auto name,int x,int y){return native_hit(name,x,y);});
+                native_panel.memory=native_panel.area->memory();
+            }
+            for (const auto& write:out.writes) {
+                const auto id=variable_id(write.name);
+                if (id>=variable_count) throw std::runtime_error("Missing native panel result variable");
+                SetVarData(id,write.value);
+            }
+            for (const auto sound:out.sounds) if (sound>=0) {
+                const auto error=playback.play_system_se(static_cast<unsigned>(sound));
+                if (!error.empty()) warn(error);
+            }
+            if (out.system_mode) {native_panel.menu=out.system_mode;native_panel.paused=true;native_panel.input.clear();}
+            native_panel.dirty=true;
+            has_presented_pc_thumbnail=false;
+        }
+        paint_native_panel(native_panel);
+    }
+
     std::vector<PcExtension> pc_extension_order(bool automatic_okikae) const {
         auto order=pc_extensions.order(automatic_okikae);
         if (order.size()>pc::max_extensions) throw std::runtime_error("Too many PC extensions");
@@ -4209,6 +4438,16 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
             order=pc_extension_order(okikae);
         }
         if (order.size()!=payloads.size()) throw std::runtime_error("PC extension count differs from this game");
+        std::optional<panel::AssignmentMemory> assignment;
+        if (assignment_available) {
+            panel::AssignmentBlocks blocks;std::size_t at=0;
+            for (std::size_t i=0;i<order.size();++i) if (order[i]==PcExtension::Game) {
+                if (at>=blocks.size()) throw std::runtime_error("Too many assignment extensions");
+                blocks[at++]=payloads[i];
+            }
+            if (at!=blocks.size() || !(assignment=panel::import_assignment(blocks)))
+                throw std::runtime_error("Invalid assignment extension state");
+        }
         std::size_t game_index=0;
         for (std::size_t i=0;i<order.size();++i) {
             const auto& payload=payloads[i];
@@ -4235,6 +4474,7 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
                 faces.restore_pc(payload);
                 break;
             case PcExtension::Game:
+                if (assignment_available) {++game_index;break;}
                 if (!legacy_chart_active || game_index++!=0 || !configure_chart())
                     throw std::runtime_error("Unsupported game-defined PC extension");
                 chart_run=legacy_chart::parse_extension(payload,*chart_graph);
@@ -4242,10 +4482,12 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
                 break;
             }
         }
+        if (assignment) native_panel.memory=std::move(*assignment);
     }
 
     void save_pc_extensions(pc::Save& saved) {
         std::size_t game_index=0;
+        const auto assignment=assignment_available ? std::optional<panel::AssignmentBlocks>(panel::export_assignment(native_panel.memory)) : std::nullopt;
         for (auto extension:pc_extension_order(save_layout->registers_okikae())) {
             switch (extension) {
             case PcExtension::Empty:
@@ -4271,6 +4513,10 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
                 saved.extensions.push_back(faces.pc_payload());
                 break;
             case PcExtension::Game:
+                if (assignment) {
+                    if (game_index>=assignment->size()) throw std::runtime_error("Too many assignment extensions");
+                    saved.extensions.push_back((*assignment)[game_index++]);break;
+                }
                 if (!legacy_chart_active || game_index++!=0 || !configure_chart())
                     throw std::runtime_error("Unsupported game-defined PC extension");
                 saved.extensions.push_back(legacy_chart::write_extension(current_chart_run(),*chart_graph));
@@ -4296,17 +4542,18 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         const bool relocate=static_cast<unsigned>(saved.info.version)<game_version;
         const auto& status=saved.status;
         const auto mode=internal_pc_mode(status.game_mode);
-        const auto* place=place_config(status.game_mode);
+        const bool native=assignment_available && status.game_mode==51;
+        const auto* place=native ? nullptr : place_config(status.game_mode);
         const bool chart=mode==nnn::RuntimeMode::SelectChart;
-        if (!place && !chart && mode!=nnn::RuntimeMode::PrintMessage && mode!=nnn::RuntimeMode::SelectMessage)
+        if (!native && !place && !chart && mode!=nnn::RuntimeMode::PrintMessage && mode!=nnn::RuntimeMode::SelectMessage)
             throw std::runtime_error("Unsupported PC save mode "+std::to_string(status.game_mode));
-        if ((place || chart) && relocate && status.adjust_version==0)
+        if ((native || place || chart) && relocate && status.adjust_version==0)
             throw std::runtime_error("PC command save needs the matching script version");
         const bool dialogue=mode==nnn::RuntimeMode::PrintMessage;
         const auto active=static_cast<std::size_t>(status.run_mode);
         const auto positions=pc_positions(status);
         const auto id=static_cast<nnn::Word>(dialogue ? status.last_message_id : status.last_select_id);
-        const auto waiting=place || chart ? nnn::PcScriptWait::Command :
+        const auto waiting=native || place || chart ? nnn::PcScriptWait::Command :
             dialogue ? nnn::PcScriptWait::Dialogue : nnn::PcScriptWait::Selection;
         const auto result=vm->restore_pc_positions(static_cast<nnn::ScriptMode>(active),positions,status.adjust_version!=0,waiting,id,relocate);
         if (!result) throw std::runtime_error(result.detail);
@@ -4370,7 +4617,15 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
             remember(std::move(line));
         }
         const auto* script=vm->GetVM(vm->ActiveMode());
-        if (chart) {
+        if (native) {
+            const auto command=script->saved_user_command();
+            const auto found=command ? native_panel_commands.find(command->command) : native_panel_commands.end();
+            if (!command || found==native_panel_commands.end() || found->second!=51 || !native_panel.memory.choosing)
+                throw std::runtime_error("PC assignment save does not match its script command");
+            if (!enter_native_panel(51,command->command,command->argument_count))
+                throw std::runtime_error("Cannot restore PC assignment panel");
+            native_panel.previous_mode=static_cast<nnn::Value>(nnn::RuntimeMode::PrintMessage);
+        } else if (chart) {
             if (!configure_chart()) throw std::runtime_error("Missing PC chart configuration");
             if (!chart_run) {
                 const auto current=chart_variables()(chart_graph->setup().slot_var);
@@ -4449,7 +4704,7 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         restore_pc_audio(status);
         const auto first_voice=std::max(playback.voice_duration_ms(0),playback.voice_duration_ms(1));
         message_has_voice=first_voice!=0;message_voice_ms=first_voice;
-        if (!place && !chart) begin_line(message_has_voice,message_voice_ms,0);
+        if (!native && !place && !chart) begin_line(message_has_voice,message_voice_ms,0);
         set_mode(mode);
         pacing.clear();
         if (clear_auto_after_load) {
@@ -4483,8 +4738,9 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
                           const render::Surface* presented_source=nullptr,bool render_preview=true) {
         const bool place=frame.wait==Wait::Place;
         const bool chart=modal_savable() && frame.modal && frame.modal->mode==nnn::RuntimeMode::SelectChart;
+        const bool native=native_panel_can_save();
         if (ui_mode || !replay_films.empty() ||
-            (!place && !chart && frame.wait!=Wait::Dialogue && frame.wait!=Wait::Choice))
+            (!native && !place && !chart && frame.wait!=Wait::Dialogue && frame.wait!=Wait::Choice))
             throw std::runtime_error("This game mode or save layout cannot be exported to the PC engine");
         pc::Save saved;
         saved.header.name=pc_save_header;saved.info.version=static_cast<int>(game_version);
@@ -4497,7 +4753,12 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         if (save_layout->extension_code_base && *save_layout->extension_code_base)
             saved.extension_code_base=*save_layout->extension_code_base;
         auto& status=saved.status;
-        if (place) {
+        if (native) {
+            const auto command=vm->GetVM(vm->ActiveMode())->saved_user_command();
+            if (!command || command->command!=native_panel.command)
+                throw std::runtime_error("No exportable native panel at the current script position");
+            status=make_pc_status(static_cast<nnn::RuntimeMode>(51),true);
+        } else if (place) {
             const auto mode=shared_runtime->mode();
             const auto* setup=place_config(mode);
             const auto command=vm->GetVM(vm->ActiveMode())->saved_user_command();
@@ -4512,10 +4773,17 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         status.remaining=save_slot_art();
         const auto* script=vm->GetVM(vm->ActiveMode());
         std::vector<std::string> rows;
-        if (frame.wait==Wait::Dialogue) {
-            const auto message=script->saved_dialogue();
-            if (!message || message->id>INT32_MAX) throw std::runtime_error("No exportable dialogue at the current script position");
-            status.last_message_id=static_cast<int>(message->id);
+        if (frame.wait==Wait::Dialogue || native || place || chart) {
+            if (frame.wait==Wait::Dialogue) {
+                const auto message=script->saved_dialogue();
+                if (!message || message->id>INT32_MAX) throw std::runtime_error("No exportable dialogue at the current script position");
+                status.last_message_id=static_cast<int>(message->id);
+            } else {
+                // GetMessageForSave uses the retained print buffer in every
+                // non-selection mode. This is inactive text, not a message
+                // wait or evidence that the current command points at PRINT.
+                status.last_message_id=static_cast<int>(frame.dialogue.message_id&0xffffU);
+            }
             status.message_serial=static_cast<int>(frame.dialogue.message_id);
             status.message_sub_mode=static_cast<int>(frame.dialogue.layout_command);
             // A complete script message can be saved as original bytes, so PC
@@ -4524,7 +4792,7 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
             const bool raw_complete=!cutins.active() && frame.dialogue.command!=append && replace_dialogue(raw)==frame.dialogue.display_bytes;
             rows=message_rows(raw_complete ? raw : frame.dialogue.display_bytes);
             status.message_count=static_cast<int>(rows.size());
-        } else if (!place && !chart) {
+        } else if (!native && !place && !chart) {
             const auto id=script->saved_selection_id();
             if (!id || *id>INT32_MAX || !frame.selection) throw std::runtime_error("No exportable choice at the current script position");
             const auto& choice=*frame.selection;
@@ -4536,9 +4804,9 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
             rows.insert(rows.end(),choice.options.begin(),choice.options.end());
             status.select_count=static_cast<int>(rows.size());
         }
-        if ((!place && !chart && rows.empty()) || rows.size()>saved.messages.size())
+        if ((!native && !place && !chart && rows.empty()) || rows.size()>saved.messages.size())
             throw std::runtime_error("Invalid PC save message rows");
-        if (saved.status_bytes==pc::preview_status_bytes && !place && !chart) {
+        if (saved.status_bytes==pc::preview_status_bytes && !native && !place && !chart) {
             status.log_messages=loaded_pc_preview;
             if (std::none_of(status.log_messages.begin(),status.log_messages.end(),[](const auto& row){return !row.empty();})) {
                 const auto display=frame.wait==Wait::Dialogue ? message_rows(frame.dialogue.display_bytes) : rows;
@@ -4600,7 +4868,8 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
                 thumb.pixels.push_back(pixels[offset]&0x00ffffffU);
             }
         } else if (presented_source || render_preview) {
-            const auto& image=presented_source ? *presented_source : renderer->surface();
+            if (native && !presented_source) paint_native_panel(native_panel);
+            const auto& image=presented_source ? *presented_source : native ? native_panel.surface : renderer->surface();
             for (unsigned y=0;y<height;++y) for (unsigned x=0;x<width;++x) {
                 const auto offset=(static_cast<std::size_t>(y)*image.height/height*image.width+
                     static_cast<std::size_t>(x)*image.width/width)*3;
@@ -4652,18 +4921,19 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         const bool save_place=external_place();
         const auto wait=save_place ? Wait::Place : frame.wait;
         const bool pending_modal=!save_place && modal_savable();
-        if (ui_mode || !replay_films.empty() || (wait>Wait::Choice && wait!=Wait::Place && !pending_modal))
+        const bool pending_native=wait==Wait::NativePanel && assignment_available && native_panel.mode()!=0;
+        if (ui_mode || !replay_films.empty() || (wait>Wait::Choice && wait!=Wait::Place && !pending_modal && !pending_native))
             nnn::snapshot::invalid("Cannot snapshot this game mode");
         const bool decorated_overlap=renderer->has_overlap_decoration();
         const bool voice_format=playback.has_pc_voice_state();
-        const bool script_mouse_format=frame.script_mouse!=0 || voice_format;
+        const bool script_mouse_format=frame.script_mouse!=0 || voice_format || assignment_available;
         const bool script_controls=rename_layers || film_skip_enabled || next_message_effect || frame.dialogue.effect_type ||
             script_mouse_format;
         const bool optional_classes=faces.enabled() || cutins.enabled() || omake.has_value() || script_controls;
         const bool draw_message_format=decorated_overlap || optional_classes || next_message_type!=default_next_message_type;
         const bool cursor_format=frame.script_cursor!=0 || draw_message_format;
         const bool chart_format=chart_available || cursor_format;
-        out(snapshot_magic,voice_format ? snapshot_version : script_mouse_format ? 16U : script_controls ? 15U : optional_classes ? 14U : decorated_overlap ? 13U :
+        out(snapshot_magic,assignment_available ? snapshot_version : voice_format ? 17U : script_mouse_format ? 16U : script_controls ? 15U : optional_classes ? 14U : decorated_overlap ? 13U :
             draw_message_format ? 12U : cursor_format ? 11U : chart_format ? 10U : 9U,
             static_cast<std::uint8_t>(last_heroine));
         if (cursor_format) out(frame.script_cursor);
@@ -4714,6 +4984,7 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         }
         if (script_controls) out(rename_layers,film_skip_enabled,next_message_effect,frame.dialogue.effect_type);
         if (script_mouse_format) out(frame.script_mouse);
+        if (assignment_available) write_native_panel(out,native_panel);
         behavior->save_snapshot(out);
         vm->save_snapshot(out,chart_format,!save_place);
         renderer->save_snapshot(out,decorated_overlap);
@@ -4754,6 +5025,7 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         nnn::Value mode=0,return_mode=0,automatic=0;
         bool skip=false;
         ScriptModal saved_modal;
+        std::optional<NativePanelRun> native_panel;
         nnn::SkipFlags flags;
     };
 
@@ -4773,8 +5045,9 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         if (version>=12) in(next.next_message_type);
         in(frame_period,waiting,next.frame.script,next.frame.word,next.frame.remaining_frames);
         const bool pending_modal=version>=9 && waiting==static_cast<std::uint8_t>(Wait::Modal);
+        const bool pending_native=version>=18 && waiting==static_cast<std::uint8_t>(Wait::NativePanel);
         if (!frame_period || (game && frame_period!=game->default_period) ||
-            (!pending_modal && waiting>static_cast<std::uint8_t>(Wait::Choice) &&
+            (!pending_native && !pending_modal && waiting>static_cast<std::uint8_t>(Wait::Choice) &&
              (version<4 || waiting!=static_cast<std::uint8_t>(Wait::Place))))
             invalid("Unsupported native session snapshot");
         next.frame.wait=static_cast<Wait>(waiting);
@@ -4889,6 +5162,19 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
                 invalid("Invalid snapshot message effect");
         }
         if (version>=16) in(next.frame.script_mouse);
+        if (version>=18) {
+            if (game && !game->assignment_available) invalid("Snapshot native panel capability differs from this game");
+            next.native_panel=read_native_panel(in);
+            const auto& n=*next.native_panel;
+            if (pending_native!=(n.mode()!=0) || (pending_native && next.mode!=n.mode() &&
+                (!n.paused || (next.mode!=5 && next.mode!=6 && next.mode!=12 && next.mode!=13))))
+                invalid("Snapshot native panel mode differs from runtime");
+            if (game && n.area && n.area->state().values.slow_pattern!=game->assignment_slow_pattern)
+                invalid("Snapshot native panel animation setting differs");
+            if (game && !n.presented.rgb.empty() &&
+                (n.presented.width!=game->renderer->width() || n.presented.height!=game->renderer->height()))
+                invalid("Snapshot native panel canvas differs");
+        } else if (game && game->assignment_available) invalid("Snapshot lacks required game extension state");
         return staged;
     }
 
@@ -4911,6 +5197,8 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         if (saved->frame.wait==Wait::Modal && (saved->mode!=static_cast<nnn::Value>(saved->saved_modal.mode) ||
             active.path!=saved->frame.script || active.pc!=saved->frame.word))
             invalid("Invalid snapshot modal mode");
+        if (saved->frame.wait==Wait::NativePanel &&
+            (active.path!=saved->frame.script || active.pc!=saved->frame.word)) invalid("Invalid snapshot native panel position");
         if (verify && !verify(saved->frame)) invalid("Native snapshot does not match the save position");
         const auto remaining=render::Layers::inspect_snapshot(in,version>=2,version>=3,version>=5,
             version>=6,version>=7,saved->decorated_overlap);
@@ -4952,6 +5240,23 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
             }
         } else if (next.frame.choice_limit_ms || next.choice_appear_remaining) invalid("Unexpected selection clock");
         bool consume_modal=false;
+        if (position.wait==Wait::NativePanel) {
+            auto& n=*next.native_panel;
+            const auto command=active->saved_user_command();
+            const auto found=command ? native_panel_commands.find(command->command) : native_panel_commands.end();
+            if (!command || command->command!=n.command || command->argument_count!=n.argument_count ||
+                active->Identity()!=position.script || active->GetPC()!=position.word ||
+                found==native_panel_commands.end() || found->second!=n.mode())
+                invalid("Snapshot native panel does not match its script command");
+            if (n.paused) {
+                const auto values=panel::read_assignment_values(native_panel_variables(&next.vars),assignment_slow_pattern);
+                const auto area=values ? panel::AreaAssignment::enter(51,*values,n.memory) : std::nullopt;
+                if (!area) invalid("Invalid saved assignment menu return");
+                n.area=area;n.memory=area->memory();n.input.clear();n.x=n.y=-1;n.paused=false;n.menu=0;
+                mode=51;
+            }
+            paint_native_panel(n); // Decode/validate before the audio or live session commit.
+        }
         if (pending_modal) {
             const auto command=active->saved_user_command();
             const auto mapping=command ? modal_commands.find(command->command) : modal_commands.end();
@@ -5086,6 +5391,8 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         last_heroine=next.last_heroine;
         result_visit.reset();shop_visit.reset();status_visit.reset();modal_caller.reset();suspended_modal.reset();
         chart_run=std::move(next.chart_run);chart_visit=std::move(next.chart_visit);chart_scroll=next.chart_scroll;
+        native_panel=next.native_panel ? std::move(*next.native_panel) : NativePanelRun{};
+        has_presented_pc_thumbnail=false;
         chart_title_story.reset();
         if (chart_run) shared_runtime->set_chart_selection(chart_graph->slot_capacity(),chart_run->can_select,chart_storage_layout());
         mode_before_modal=next.suspended_mode;wait_before_modal=Wait::Running;
@@ -5118,6 +5425,13 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         if (!resume_movie) sampled_clock.reset();
         frame.choice_timed_out=false;
         apply_parameters();
+        if (frame.wait==Wait::NativePanel) {
+            if (in.advance) queue_native_input(in.mouse_x,in.mouse_y,true,false);
+            if (native_panel.paused) return frame;
+            const auto time=static_cast<std::uint64_t>(remainder)+timing.animation_ms;
+            const auto ticks=static_cast<unsigned>(time/period);remainder=static_cast<unsigned>(time%period);
+            advance_native_panel(ticks);return frame;
+        }
         if (frame.wait==Wait::Ended || frame.wait==Wait::Error || frame.wait==Wait::Modal) return frame;
         if (frame.wait!=Wait::Overlap) renderer->resume_overlap_scene();
         if (initial_calendar) {
@@ -5220,7 +5534,7 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
             remaining-=std::min(remaining,result.work_used);
             counters.file_transfers+=result.transitions;
             if (result.transitions) continue;
-            if (frame.wait==Wait::Place || frame.wait==Wait::Modal) return frame;
+            if (frame.wait==Wait::Place || frame.wait==Wait::Modal || frame.wait==Wait::NativePanel) return frame;
             if (frame.movie) {
                 if (input.play_movies) { frame.wait=Wait::Movie; set_mode(nnn::RuntimeMode::PrintMovie); return frame; }
                 frame.movie=0;
@@ -5333,6 +5647,12 @@ std::uint32_t GameSession::pace(std::uint32_t elapsed_ms) { return data_->pace(e
 bool GameSession::film_skip_available() const { return data_->film_skip_available(); }
 bool GameSession::request_film_skip() { return data_->request_film_skip(); }
 bool GameSession::complete_minigame(unsigned number) { return data_->complete_minigame(number); }
+int GameSession::native_panel_mode() const noexcept { return data_->native_panel.mode(); }
+bool GameSession::native_panel_can_save() const noexcept { return data_->native_panel_can_save(); }
+void GameSession::native_panel_input(int x,int y,bool click,bool cancel) { data_->queue_native_input(x,y,click,cancel); }
+bool GameSession::request_native_panel_menu(int mode) { return data_->request_native_menu(mode); }
+int GameSession::take_native_panel_menu() noexcept { return std::exchange(data_->native_panel.menu,0); }
+bool GameSession::resume_native_panel() { return data_->resume_native_panel(); }
 const FrameState& GameSession::state() const { return data_->frame; }
 bool GameSession::complete_modal(int id,bool accepted,unsigned elapsed_frames,const std::vector<std::string>& values) {
     if (!data_->complete_modal(id,accepted,elapsed_frames,values)) return false;
@@ -5611,7 +5931,7 @@ std::vector<nnn::Byte> GameSession::export_presented_pc_save() {
     if (d.has_presented_pc_thumbnail && d.presented_pc_thumbnail_position.matches(expected_plane_key(),d.frame)) {
         if (d.pc_thumbnail_without_message())
             return export_pc_save(d.presented_pc_thumbnail,d.pc_thumbnail_width,d.pc_thumbnail_height);
-        return pc::write_save(d.make_pc_save({},0,0,&d.renderer->presented_surface(),false));
+        return pc::write_save(d.make_pc_save({},0,0,&presented_surface(),false));
     }
     return pc::write_save(d.make_pc_save({},0,0,nullptr,false));
 }
@@ -5667,8 +5987,13 @@ void GameSession::trim_replayed_backlog(unsigned keep) {
     if (keep==0 || keep>backlog_capacity || keep>data_->backlog.size()) nnn::snapshot::invalid("Invalid replayed backlog limit");
     data_->trim_backlog(keep);
 }
-const render::Surface& GameSession::surface() { return data_->renderer->surface(); }
-const render::Surface& GameSession::scene_surface() { return data_->renderer->scene_surface(); }
+const render::Surface& GameSession::surface() {
+    if (data_->frame.wait==Wait::NativePanel) {data_->paint_native_panel(data_->native_panel);return data_->native_panel.surface;}
+    return data_->renderer->surface();
+}
+const render::Surface& GameSession::scene_surface() {
+    return data_->frame.wait==Wait::NativePanel ? surface() : data_->renderer->scene_surface();
+}
 void GameSession::set_message_plane(std::shared_ptr<const render::MessagePlane> plane) {
     render::Layers::MessageDecoration backdrop;
     const bool long_dialogue=!data_->ui_mode && data_->frame.wait==Wait::Dialogue &&
@@ -5711,6 +6036,21 @@ GameSession::PlaneKey GameSession::expected_plane_key() const noexcept {
 }
 void GameSession::after_present() {
     auto& d=*data_;
+    if (d.frame.wait==Wait::NativePanel) {
+        d.paint_native_panel(d.native_panel);
+        d.native_panel.presented=d.native_panel.surface;d.native_panel.needs_present=false;
+        d.presented_pc_thumbnail_position={expected_plane_key(),d.frame.word,d.frame.script};
+        d.has_presented_pc_thumbnail=true;
+        if (d.native_panel.output().finished) {
+            const auto memory=d.native_panel.memory;const auto mode=d.native_panel.previous_mode;
+            d.native_panel={};d.native_panel.memory=memory;
+            d.renderer->set_presented_solid(0,0,0);
+            d.frame.wait=Wait::Running;d.frame.remaining_frames=0;
+            d.shared_runtime->set_mode(mode);d.input.advance=d.input.held=false;d.input.choice=0;
+            d.remainder=0;d.pacing.clear();d.has_presented_pc_thumbnail=false;
+        }
+        return;
+    }
     d.renderer->after_present();
     const auto wait=d.frame.wait;
     const bool chart=wait==Wait::Modal && d.frame.modal && d.frame.modal->mode==nnn::RuntimeMode::SelectChart;
@@ -5734,24 +6074,29 @@ void GameSession::after_present() {
             (std::uint32_t{image.rgb[offset+1]}<<8U)|image.rgb[offset+2];
     }
 }
-const render::Surface& GameSession::presented_surface() const noexcept { return data_->renderer->presented_surface(); }
-bool GameSession::screen_layer_active() const { return data_->renderer->screen_layer_active(); }
+const render::Surface& GameSession::presented_surface() const noexcept {
+    return data_->frame.wait==Wait::NativePanel ? data_->native_panel.presented : data_->renderer->presented_surface();
+}
+bool GameSession::screen_layer_active() const { return data_->frame.wait!=Wait::NativePanel && data_->renderer->screen_layer_active(); }
 bool GameSession::story_draws_screen_layer() const {
     const auto wait=data_->frame.wait;
     return wait==Wait::Dialogue || wait==Wait::Draw || (wait==Wait::Choice && data_->choice_draws_scene);
 }
 std::uint64_t GameSession::screen_layer_revision() const { return data_->renderer->composition_revision(); }
 void GameSession::capture_screen_layer(bool enable) {
+    if (data_->frame.wait==Wait::NativePanel) enable=false;
     render::Layers::OverlapDecoration backdrop;
     if (enable && draw_message()==DrawMessage::LongBackground && data_->long_background_mode)
         backdrop=[impl=data_.get()](render::Surface& out) { impl->paint_long_background(out); };
     data_->renderer->capture_screen_layer(enable,std::move(backdrop));
 }
 std::unique_ptr<render::ScreenLayerFrame> GameSession::take_screen_layer() {
+    if (data_->frame.wait==Wait::NativePanel) return {};
     data_->renderer->surface();
     return data_->renderer->take_screen_layer();
 }
 void GameSession::commit_screen_capture(render::Surface frame) {
+    if (data_->frame.wait==Wait::NativePanel) return;
     data_->renderer->commit_screen_capture(std::move(frame));
 }
 render::Layers& GameSession::chart_preview_layers() {
@@ -5759,7 +6104,9 @@ render::Layers& GameSession::chart_preview_layers() {
         throw std::logic_error("Chart layers require a SELECTCHART preview");
     return *data_->renderer;
 }
-bool GameSession::needs_redraw() const { return data_->renderer->needs_redraw(); }
+bool GameSession::needs_redraw() const {
+    return data_->frame.wait==Wait::NativePanel ? data_->native_panel.needs_present || data_->native_panel.dirty : data_->renderer->needs_redraw();
+}
 const std::array<render::Layer,32>& GameSession::layers() const { return data_->renderer->slots(); }
 std::shared_ptr<const render::Texture> GameSession::ui_texture(const std::string& name) { return data_->assets.image(name); }
 void GameSession::set_ui_variable(const std::string& name,nnn::Value value) {

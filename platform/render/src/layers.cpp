@@ -80,20 +80,25 @@ Color color(const Layer& l,std::size_t i,int def=0) {
     const int r=arg(l,i,def),g=arg(l,i+1,r);
     return {r,g,arg(l,i+2,g)};
 }
+template<unsigned scale=255U,unsigned rounding=127U>
 void tint(Surface& out,Color value,int alpha) {
     if (alpha<=0) return;
     const std::array<unsigned,3> c{channel(value[0]),channel(value[1]),channel(value[2])};
-    const unsigned a=channel(alpha);
+    const auto a=static_cast<unsigned>(std::min(alpha,static_cast<int>(scale)));
+    const auto normalize=[](unsigned value) {
+        if constexpr (scale==256U) return value>>8U;
+        else return value/scale;
+    };
     if (c[0]==c[1] && c[1]==c[2]) {
-        if (a==255) std::fill(out.rgb.begin(),out.rgb.end(),static_cast<Byte>(c[0]));
+        if (a==scale) std::fill(out.rgb.begin(),out.rgb.end(),static_cast<Byte>(c[0]));
         else {
-            const unsigned inverse=255U-a,bias=c[0]*a+127U;
-            for (auto& pixel:out.rgb) pixel=static_cast<Byte>((pixel*inverse+bias)/255U);
+            const unsigned inverse=scale-a,bias=c[0]*a+rounding;
+            for (auto& pixel:out.rgb) pixel=static_cast<Byte>(normalize(pixel*inverse+bias));
         }
         return;
     }
     for (std::size_t i=0; i<out.rgb.size(); i+=3)
-        for (unsigned j=0; j<3; ++j) out.rgb[i+j]=static_cast<Byte>((out.rgb[i+j]*(255U-a)+c[j]*a+127U)/255U);
+        for (unsigned j=0; j<3; ++j) out.rgb[i+j]=static_cast<Byte>(normalize(out.rgb[i+j]*(scale-a)+c[j]*a+rounding));
 }
 
 void copy_opaque_row(Byte* dest,const Byte* source,std::size_t count) {
@@ -115,23 +120,52 @@ void copy_opaque_row(Byte* dest,const Byte* source,std::size_t count) {
     }
 }
 
-void picture(Surface& out,const Texture& t,Rect src,Rect dst,int percent,Color add,bool use_alpha=true) {
+void picture(Surface& out,const Texture& t,Rect src,Rect dst,int percent,Color add,bool use_alpha=true,
+             bool color_key=false,bool additive=false,PictureBlend blend=PictureBlend::Standard) {
     if (percent<=0 || src.width<=0 || src.height<=0 || dst.width<=0 || dst.height<=0) return;
     const Rect cut=t.content;
     const int x0=std::max(0,dst.x), y0=std::max(0,dst.y);
-    const int x1=std::min(static_cast<int>(out.width),dst.x+dst.width);
-    const int y1=std::min(static_cast<int>(out.height),dst.y+dst.height);
+    const int x1=static_cast<int>(std::min<std::int64_t>(out.width,std::int64_t{dst.x}+dst.width));
+    const int y1=static_cast<int>(std::min<std::int64_t>(out.height,std::int64_t{dst.y}+dst.height));
     if (x1<=x0 || y1<=y0) return;
-    if (src.width==dst.width && src.height==dst.height && percent>=100 && add==Color{} && use_alpha) {
+    color_key=color_key && !t.has_mask;
+    if (src.width==dst.width && src.height==dst.height && percent>=100 && add==Color{} && use_alpha && !color_key && !additive && blend==PictureBlend::Standard) {
         const int sx=std::max(src.x,cut.x),sy=std::max(src.y,cut.y);
-        const int ex=std::min(src.x+src.width,cut.x+cut.width),ey=std::min(src.y+src.height,cut.y+cut.height);
+        const auto ex=std::min(std::int64_t{src.x}+src.width,std::int64_t{cut.x}+cut.width);
+        const auto ey=std::min(std::int64_t{src.y}+src.height,std::int64_t{cut.y}+cut.height);
         if (ex>sx && ey>sy)
-            blit(t.pixels,out,{sx-cut.x,sy-cut.y,ex-sx,ey-sy},{dst.x+sx-src.x,dst.y+sy-src.y},BlendProfile::Source32Mmx);
+            blit(t.pixels,out,{sx-cut.x,sy-cut.y,static_cast<int>(ex-sx),static_cast<int>(ey-sy)},
+                 {dst.x+sx-src.x,dst.y+sy-src.y},BlendProfile::Source32Mmx);
         return;
     }
     const unsigned opacity=static_cast<unsigned>(std::min(100,percent));
     for (auto& delta:add) delta=std::clamp(delta,-255,255);
     const auto paint_pixel=[&](Byte* dst_pixel,const Byte* src_pixel) {
+        if (color_key && t.pixels.rgba.size()>=4 && src_pixel[0]==t.pixels.rgba[0] &&
+            src_pixel[1]==t.pixels.rgba[1] && src_pixel[2]==t.pixels.rgba[2]) return;
+        if (additive) {
+            for (unsigned c=0;c<3;++c)
+                dst_pixel[c]=static_cast<Byte>(std::min(255U,static_cast<unsigned>(dst_pixel[c])+channel(src_pixel[c]+add[c])*opacity/100U));
+            return;
+        }
+        if (blend!=PictureBlend::Standard) {
+            // The x86 CPicture routines use distinct MMX weight contracts.
+            // Keep them explicit; ordinary layer painting retains its profile.
+            const unsigned p=opacity*256U/100U,mask=use_alpha?src_pixel[3]:255U;
+            if (use_alpha && !mask) return;
+            unsigned a=p,inverse=256U-p;
+            bool copy=false;
+            if (blend==PictureBlend::PcColorAdd && use_alpha) {
+                a=p==256U?mask:(mask*p)>>8U;inverse=255U-a;copy=a==255U;
+            } else if (blend==PictureBlend::PcTranslucent && use_alpha && mask!=255U) {
+                a=(mask*p)>>8U;inverse=255U-a;
+            }
+            for (unsigned c=0;c<3;++c) {
+                const unsigned value=channel(src_pixel[c]+add[c]);
+                dst_pixel[c]=static_cast<Byte>(copy?value:(value*a+dst_pixel[c]*inverse)>>8U);
+            }
+            return;
+        }
         const unsigned a=((use_alpha ? src_pixel[3] : 255U)*opacity+50U)/100U;
         if (!a) return;
         for (unsigned c=0;c<3;++c) {
@@ -149,7 +183,7 @@ void picture(Surface& out,const Texture& t,Rect src,Rect dst,int percent,Color a
         if (left>=right || top>=bottom) return;
         const auto dest_x=static_cast<std::size_t>(left-source_x);
         const auto texture_x=static_cast<std::size_t>(left-cut.x);
-        const bool copy=!use_alpha && opacity==100 && add==Color{};
+        const bool copy=!use_alpha && opacity==100 && add==Color{} && !color_key && !additive && blend==PictureBlend::Standard;
         for (auto y=top;y<bottom;++y) {
             auto* dest=out.rgb.data()+(static_cast<std::size_t>(y-source_y)*out.width+dest_x)*3;
             const auto* pixel=t.pixels.rgba.data()+(static_cast<std::size_t>(y-cut.y)*t.pixels.width+texture_x)*4;
@@ -161,11 +195,11 @@ void picture(Surface& out,const Texture& t,Rect src,Rect dst,int percent,Color a
         return;
     }
     for (int y=y0; y<y1; ++y) {
-        const int sy=src.y+static_cast<int>((std::int64_t{y-dst.y}*src.height)/dst.height)-cut.y;
+        const auto sy=std::int64_t{src.y}+((std::int64_t{y}-dst.y)*src.height)/dst.height-cut.y;
         if (sy<0 || sy>=cut.height) continue;
         auto di=(static_cast<std::size_t>(y)*out.width+static_cast<unsigned>(x0))*3;
         for (int x=x0; x<x1; ++x,di+=3) {
-            const int sx=src.x+static_cast<int>((std::int64_t{x-dst.x}*src.width)/dst.width)-cut.x;
+            const auto sx=std::int64_t{src.x}+((std::int64_t{x}-dst.x)*src.width)/dst.width-cut.x;
             if (sx<0 || sx>=cut.width) continue;
             const auto si=(static_cast<std::size_t>(sy)*t.pixels.width+static_cast<unsigned>(sx))*4;
             paint_pixel(out.rgb.data()+di,t.pixels.rgba.data()+si);
@@ -382,6 +416,23 @@ void effects::paint(Surface& out,const Texture& tex,Rect src,Rect dst,int percen
 }
 void paint_texture(Surface& out,const Texture& texture,Rect source,Point origin,int opacity) {
     picture(out,texture,source,{origin.x,origin.y,source.width,source.height},opacity,{});
+}
+void paint_texture(Surface& out,const Texture& texture,Rect source,Point origin,const PictureStyle& style) {
+    picture(out,texture,source,{origin.x,origin.y,source.width,source.height},style.opacity,style.add,
+            style.alpha && texture.has_mask,style.alpha && style.color_key,style.additive,style.blend);
+}
+void paint_rectangle(Surface& out,Rect bounds,std::array<int,3> color,int opacity) {
+    if (opacity<=0 || bounds.width<=0 || bounds.height<=0) return;
+    if (bounds.x<=0 && bounds.y<=0 && std::int64_t{bounds.x}+bounds.width>=out.width &&
+        std::int64_t{bounds.y}+bounds.height>=out.height) {
+        // CTransBoxFill uses floor(percent*256/100), then a truncating /256.
+        // Reuse the tint loop without per-pixel texture coordinates or sampling.
+        tint<256U,0U>(out,color,std::min(opacity,100)*256/100);return;
+    }
+    Texture solid;
+    solid.content={0,0,1,1};solid.pixels={1,1,{static_cast<Byte>(channel(color[0])),
+        static_cast<Byte>(channel(color[1])),static_cast<Byte>(channel(color[2])),255}};
+    picture(out,solid,{0,0,1,1},bounds,opacity,{},false,false,false,PictureBlend::PcTranslucent);
 }
 
 Layers::Layers(int width,int height,unsigned layer_count) {

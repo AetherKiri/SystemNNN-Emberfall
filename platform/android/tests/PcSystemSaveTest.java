@@ -144,11 +144,15 @@ public final class PcSystemSaveTest {
     }
 
     static void chartLayouts() throws Exception {
+        check(PcSystemSave.isChartFile("MITA.DAT")&&PcSystemSave.isChartFile("TSUKA.DAT"),"PC chart names accept ASCII case");
+        for(String name:new String[]{"m\u0131ta.dat","t\u017fuka.dat","tsu\u212aa.dat"})
+            check(!PcSystemSave.isChartFile(name),"Unmanaged Unicode name is not a PC chart alias");
         Path directory=Files.createTempDirectory("pc-chart-test-");
         try{
             chartProgress(directory);
             legacyChartProgress(directory);
             chartWireProgress(directory);
+            chartSymbolicDirectory(directory);
         }finally{
             try(Stream<Path> files=Files.walk(directory)){
                 for(Path file:(Iterable<Path>)files.sorted(Comparator.reverseOrder())::iterator)Files.delete(file);
@@ -252,6 +256,33 @@ public final class PcSystemSaveTest {
         Files.write(extension,corrupted);
         check(store.read().chart==null,"unknown chart shape is rejected when reading an otherwise valid extension");
         check(Arrays.equals(Files.readAllBytes(base),beforeBase),"invalid extension does not damage base progress");
+    }
+
+    private static void chartSymbolicDirectory(Path directory) throws Exception {
+        Path root=Files.createDirectory(directory.resolve("linked-chart-game"));
+        Path init=Files.createDirectory(root.resolve("init")),sav=Files.createDirectory(root.resolve("sav"));
+        Files.write(init.resolve("chart.xtx"),new byte[0]);
+        Path outside=Files.createDirectory(directory.resolve("external-chart")),link=sav.resolve("mushiex");
+        byte[] seen=new byte[10004],roads=new byte[10000];Arrays.fill(seen,(byte)19);Arrays.fill(roads,(byte)23);
+        Files.write(outside.resolve("mita.dat"),seen);Files.write(outside.resolve("tsuka.dat"),roads);
+        try{Files.createSymbolicLink(link,outside.toAbsolutePath());}
+        catch(java.io.IOException|UnsupportedOperationException|SecurityException unavailable){
+            System.out.println("SKIP chart symbolic-directory checks: symbolic links unavailable");return;
+        }
+        GameUiAssets.Config game=GameUiAssets.readConfig(root.toFile(),"game"),chart=GameUiAssets.readConfig(root.toFile(),"chart");
+        boolean rejected=false;
+        try{PcSystemSave.open(root.toFile(),sav.toFile(),game,chart,new int[]{3,0},true);}
+        catch(java.io.IOException expected){rejected=true;}
+        check(rejected,"legacy chart open rejects an external symbolic directory");
+        Files.delete(link);
+        PcSystemSave save=PcSystemSave.open(root.toFile(),sav.toFile(),game,chart,new int[]{3,0},true);
+        Files.createSymbolicLink(link,outside.toAbsolutePath());
+        rejected=false;
+        try{save.write(withChart(chartFlags(10004,10000)),new int[0]);}
+        catch(java.io.IOException expected){rejected=true;}
+        check(rejected,"legacy chart write rejects a symbolic directory installed after open");
+        check(Arrays.equals(Files.readAllBytes(outside.resolve("mita.dat")),seen)&&
+            Arrays.equals(Files.readAllBytes(outside.resolve("tsuka.dat")),roads),"rejected chart operations leave external flags untouched");
     }
 
     private static byte[] chartFlags(int seen,int roads){

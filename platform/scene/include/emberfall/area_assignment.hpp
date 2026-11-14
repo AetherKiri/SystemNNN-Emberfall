@@ -9,13 +9,13 @@ namespace emberfall::scene::panel {
 // Zero-initialization here is the verified PE zero-filled data tail before any
 // map has run; enter() subsequently captures the original variable baselines.
 struct AssignmentMemory {
-    std::array<std::int32_t,29> previous_character_state{}; // EXT100, 116 bytes
-    std::array<std::int32_t,9> previous_area_state{};       // EXT101, 36 bytes
-    std::array<std::int32_t,9> area_target{};               // EXT102, 36 bytes
-    std::array<std::int32_t,4> origin{};                    // EXT103, 16 bytes
-    std::array<std::int32_t,4> destination{};               // EXT104, 16 bytes
-    bool choosing=false;                                  // EXT105, 1 byte
-    bool resume=false; // Derived from EXT105 on PC load; not another PC block.
+    std::array<std::int32_t,29> previous_character_state{}; // Game EXT block 1, 116 bytes
+    std::array<std::int32_t,9> previous_area_state{};       // Game EXT block 2, 36 bytes
+    std::array<std::int32_t,9> area_target{};               // Game EXT block 3, 36 bytes
+    std::array<std::int32_t,4> origin{};                    // Game EXT block 4, 16 bytes
+    std::array<std::int32_t,4> destination{};               // Game EXT block 5, 16 bytes
+    bool choosing=false;                                  // Game EXT block 6, 1 byte
+    bool resume=false; // Derived from block 6 on PC load; not another PC block.
     bool suppress_entrance=false; // Menu return only; PC load explicitly clears it.
 };
 using AssignmentBlocks=std::array<std::vector<std::uint8_t>,6>;

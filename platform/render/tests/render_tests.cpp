@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <functional>
+#include <utility>
 
 using namespace emberfall::render;
 namespace {
@@ -48,6 +49,52 @@ void equal_frame(Layers& layers,const std::vector<Byte>& expected,int effect,int
         require(false);
     }
     require(true);
+}
+void picture_style_tests() {
+    auto art=pattern(1,1);PictureStyle style;
+    Surface out{1,1,{20,200,180}};
+    art->pixels.rgba={250,10,100,0};style.additive=true;
+    paint_texture(out,*art,{0,0,1,1},{0,0},style);
+    require(out.rgb==std::vector<Byte>({255,210,255})); // AddBlt ignores alpha and saturates RGB.
+    style={};style.blend=PictureBlend::PcColorAdd;style.add={-120,20,90};
+    art->pixels.rgba={100,150,200,128};out.rgb={80,60,40};
+    paint_texture(out,*art,{0,0,1,1},{0,0},style);
+    require(out.rgb==std::vector<Byte>({39,114,147})); // x86 ColorAdd: clamped color, 128/127 weights.
+    style.add={};style.opacity=90;art->pixels.rgba={255,255,255,255};out.rgb={0,0,0};
+    paint_texture(out,*art,{0,0,1,1},{0,0},style);
+    require(out.rgb==std::vector<Byte>({228,228,228}));
+    style.blend=PictureBlend::PcTranslucent;out.rgb={0,0,0};
+    paint_texture(out,*art,{0,0,1,1},{0,0},style);
+    require(out.rgb==std::vector<Byte>({229,229,229})); // Its opaque-mask branch uses 230/26 directly.
+    style.opacity=50;art->pixels.rgba={255,255,255,128};out.rgb={100,100,100};
+    paint_texture(out,*art,{0,0,1,1},{0,0},style);
+    require(out.rgb==std::vector<Byte>({138,138,138}));
+    style={};style.color_key=true;style.blend=PictureBlend::PcColorAdd;style.add={1,2,3};
+    art->pixels.rgba={40,80,120,255};out.rgb={0,0,0};
+    paint_texture(out,*art,{0,0,1,1},{0,0},style);
+    require(out.rgb==std::vector<Byte>({41,82,123})); // A real mask takes precedence over equal corner RGB.
+    art=pattern(2,1);art->has_mask=false;art->pixels.rgba={40,80,120,255,200,100,50,0};
+    out={2,1,{100,100,100,100,100,100}};style={};style.color_key=true;style.opacity=50;style.blend=PictureBlend::PcTranslucent;
+    paint_texture(out,*art,{0,0,2,1},{0,0},style);
+    require(out.rgb==std::vector<Byte>({100,100,100,150,100,75})); // No-mask images use key, never stored alpha.
+    const auto previous=out.rgb;
+    paint_texture(out,*art,{0,0,2,1},{INT_MAX,INT_MAX},style);
+    paint_texture(out,*art,{INT_MAX,0,2,1},{0,0},style);
+    paint_texture(out,*art,{INT_MIN,0,INT_MAX,1},{0,0},style);
+    require(out.rgb==previous);
+    paint_rectangle(out,{INT_MIN,0,INT_MAX,1},{255,255,255},100);require(out.rgb==previous);
+    for (const auto entry:std::array<std::pair<int,std::array<Byte,3>>,3>{{
+            {10,{230,90,0}},{50,{127,50,0}},{90,{25,10,0}}}}) {
+        out={2,1,{255,100,1,255,100,1}};
+        paint_rectangle(out,{-1,-1,4,3},{0,0,0},entry.first);
+        require(out.rgb==std::vector<Byte>({entry.second[0],entry.second[1],entry.second[2],
+            entry.second[0],entry.second[1],entry.second[2]}));
+        out={2,1,{255,100,1,255,100,1}};
+        paint_rectangle(out,{1,0,1,1},{0,0,0},entry.first);
+        require(out.rgb==std::vector<Byte>({255,100,1,entry.second[0],entry.second[1],entry.second[2]}));
+    }
+    out={1,1,{10,120,250}};paint_rectangle(out,{0,0,1,1},{200,40,0},50);
+    require(out.rgb==std::vector<Byte>({105,80,125}));
 }
 void chart_layer_tests() {
     Layers layers(3,2);
@@ -1331,6 +1378,7 @@ void mask_presence_tests() {
 }
 }
 int main() {
+    picture_style_tests();
     chart_layer_tests();
     chart_composite_tests();
     {
