@@ -18,7 +18,6 @@ final class GameUiAssets {
         private final GameTextDecoder decoder;
         private Config(Map<String,String> values,GameTextDecoder decoder) { this.values=Collections.unmodifiableMap(values);this.decoder=decoder; }
         static Config empty() { return EMPTY; }
-        Config withValues(Map<String,String> fields) { return new Config(new HashMap<>(fields),decoder); }
         String value(String name,String fallback) {
             String result=values.get(key(name));
             return result==null ? fallback : result;
