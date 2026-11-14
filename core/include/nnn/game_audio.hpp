@@ -62,6 +62,7 @@ struct PcAudioState {
     int music_number=-1,music_plays=0,music_volume=0;
     std::array<std::array<Value,16>,8> sounds{},voices{};
     std::array<std::string,4> voice_names;
+    std::array<std::uint8_t,4> voice_exist_count{};
 };
 // command and effect follow the PC's F4, F5 and skip-to-film-end flags.
 // Ctrl is evaluated separately so CANNOTSKIP can block text while audio sees the key.
@@ -132,6 +133,9 @@ public:
     Statistics stats() const;
     PlaybackState state() const;
     PcAudioState pc_state() const;
+    void message_started();
+    void restore_pc_voice_state(const PcAudioState& state);
+    bool has_pc_voice_state() const;
     void save_snapshot(snapshot::Writer& out) const;
     // The audio payload ends the session snapshot. When requested, an already
     // playing loop of the same program keeps its current sample position.

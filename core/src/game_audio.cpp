@@ -207,6 +207,26 @@ struct Meter {
     std::uint64_t frames=0,nonzero=0,clipped=0,bgm=0,speech=0,se=0,multi=0,changes=0,loops=0;
     int peak=0;
 };
+struct PcVoices {
+    std::array<std::string,4> names;
+    std::array<std::array<Value,16>,4> work{};
+    std::array<std::uint8_t,4> count{};
+};
+constexpr std::uint32_t pc_voice_snapshot_tag=0x31564e4eU;
+void pc_sample(const Track& track,std::array<Value,16>& work,unsigned sample_rate) {
+    work[0]=track.remaining==0?1:0;
+    work[1]=track.source_number;
+    const auto& gain=track.gain;
+    work[2]=gain.to[gain.index(0)]==1 && gain.to[gain.index(100)]==1 ? -101 :
+        static_cast<int>(std::lround(gain.to[gain.index(gain.base)]))-gain.base;
+    work[3]=static_cast<int>(std::lround(track.pan.now()*127));
+    work[6]=0;work[7]=0;
+    if (track.pan.time<track.pan.total) {
+        const auto tenths=(track.pan.total-track.pan.time)/std::max(1U,sample_rate/10U);
+        work[6]=static_cast<Value>(std::min<std::uint64_t>(tenths,INT32_MAX));
+        work[7]=static_cast<int>(std::lround(track.pan.to*127));
+    }
+}
 enum class SampleOrigin {
     Script, PcVoice, PcMusic, MenuMusic, SystemSound, SystemSoundAtVoiceVolume, ButtonVoice,
     ConfigSound, ConfigVoice, ConfigMovieSound, BacklogVoice, MenuVoice
@@ -251,6 +271,7 @@ struct GameAudio::Impl {
     bool continue_voice=false,must_play_se_in_skip=false,not_play_same_music=false;
     bool keep_effect_voice_during_skip=false,skip_looping_effect_voice=false,skip_nonlooping_effect_voice=false;
     std::optional<std::pair<int,int>> last_music; // Original table number and loop count, not script gain/fade overrides.
+    PcVoices pc_voices; // Current-message replay state outlives the PCM track.
     int current_music=0; // One-based cue set by PlayMusic, even after a finite track has ended.
     std::optional<int> muted_music_volume;
     int fade_se=0,fade_voice=0;
@@ -258,6 +279,19 @@ struct GameAudio::Impl {
     mutable std::mutex commands,mixer;
     Statistics totals;
     Meter meter;
+    PcVoices saved_voices() const {
+        auto saved=pc_voices;
+        for (std::size_t i=0;i<voices.size();++i) {
+            const auto& track=voices[i];
+            const bool faded=track.stop_after_ramp && track.gain.time==track.gain.total;
+            if (track.program && track.program->name==saved.names[i] &&
+                ((track.active && track.volume_allowed) || faded)) {
+                pc_sample(track,saved.work[i],settings.sample_rate);
+                saved.work[i][0]=faded ? 0 : pc_voices.work[i][0];
+            }
+        }
+        return saved;
+    }
     Impl(const std::filesystem::path& root,Settings config,const resource::FilenameEncoder& encode)
         :settings(std::move(config)),files(settings.enabled ? AudioAssets(root,settings.cache_bytes,encode) : AudioAssets{}) {
         if (settings.sample_rate<8000 || settings.sample_rate>192000) throw std::invalid_argument("Invalid output sample rate");
@@ -493,6 +527,8 @@ struct GameAudio::Impl {
         }
         if (id==-1 || (skipping && !system)) {
             std::lock_guard<std::mutex> lock(mixer);
+            if (speech && !system && (id==-1 || (tr.active && tr.remaining==0)))
+                pc_voices.work[static_cast<std::size_t>(ch)][0]=0;
             if (id==-1 || (tr.active && tr.remaining==0)) tr.stop(duration);
             info.action=bus+(id==-1 ? ".stop" : ".skipped"); return;
         }
@@ -524,11 +560,15 @@ struct GameAudio::Impl {
         }
         auto clip=button_voice || config_sound ? files.system_wave(name) : speech ? files.speech(name) : files.se(id,system);
         auto p=std::make_shared<Program>(); p->name=clip->info.name; p->parts.push_back(clip);
-        info.action=bus+".play"; info.clips.push_back(clip->info);
-        if (!allowed) {
-            std::lock_guard<std::mutex> lock(mixer);
-            tr.program=std::move(p); info.action=bus+".disabled"; return;
+        if (speech && !system) {
+            const auto channel=static_cast<std::size_t>(ch);
+            pc_voices.names[channel]=p->name;pc_voices.count[channel]=2;
+            auto& work=pc_voices.work[channel];work={};
+            work[0]=parameter(a,3)!=0?1:0;work[1]=id;
+            work[2]=parameter(a,2);work[3]=parameter(a,4);
+            for (std::size_t i=4;i<11;++i) work[i]=parameter(a,i+1);
         }
+        info.action=bus+".play"; info.clips.push_back(clip->info);
         const int base=button_voice ? settings.voice_volume : speech ? (ch<2 ? settings.voice_volume : settings.effect_voice_volume)
                               : system_category ? ui_volume(ui_gain) : settings.sound_volume;
         const auto steps=role>=0 ? character_steps(static_cast<std::size_t>(role)) : 0;
@@ -546,6 +586,11 @@ struct GameAudio::Impl {
         target.pan.set(pan_value(parameter(a,4)),0);
         if (parameter(a,7)>0)
             target.pan.set(pan_value(parameter(a,8)),fade(a[7]));
+        if (speech && !system) pc_sample(target,pc_voices.work[static_cast<std::size_t>(ch)],settings.sample_rate);
+        if (!allowed) {
+            target.active=false;target.volume_allowed=false;
+            info.action=bus+".disabled";return;
+        }
         ++totals.plays;
     }
     std::string submit(const SystemEvent& e,const std::string& script,Word pc,AudioGate gate,
@@ -558,6 +603,8 @@ struct GameAudio::Impl {
         {
             std::array<std::shared_ptr<const Program>,25> retired;
             std::lock_guard<std::mutex> lock(mixer);
+            // Persist fade-to-zero loop stops before reclaiming their PCM.
+            pc_voices=saved_voices();
             std::size_t i=0;
             auto retire=[&](Track& t){ if (!t.active && t.program) retired[i++]=std::move(t.program); };
             retire(song); retire(outgoing);
@@ -586,6 +633,7 @@ struct GameAudio::Impl {
                 auto& tr=v ? channel(voices,a[0]) : channel(sounds,a[0]);
                 if (!gate.command && tr.active && tr.volume_allowed) {
                     tr.volume(gain_curve(a[1],v ? adjustment(tr.program->name) : 0,false,characters.slider_delta,v && tr.character>=0),duration);
+                    if (v) pc_sample(tr,pc_voices.work[static_cast<std::size_t>(a[0])],settings.sample_rate);
                 }
             } else if (e.opcode==next_fade_voice || e.opcode==next_fade_se) {
                 (e.opcode==next_fade_voice ? fade_voice : fade_se)=std::max(0,a[0]);
@@ -657,6 +705,7 @@ void GameAudio::stop_script_audio() {
     std::lock_guard<std::mutex> command(impl_->commands);
     std::lock_guard<std::mutex> lock(impl_->mixer);
     for (auto& voice:impl_->voices) voice.stop(0);
+    impl_->pc_voices={};
     for (auto& sound:impl_->sounds) sound.stop(0);
     impl_->backlog_voice.stop(0);
     impl_->script_audio_suspended=false;
@@ -800,31 +849,13 @@ PcAudioState GameAudio::pc_state() const {
         state.music_plays=impl_->last_music->second;
         state.music_volume=impl_->muted_music_volume.value_or(impl_->loaded_music_volume(impl_->song));
     }
-    const auto sample=[&](const Track& track,std::array<Value,16>& work) {
-        work[0]=track.remaining==0?1:0;
-        work[1]=track.source_number;
-        const auto& gain=track.gain;
-        work[2]=gain.to[gain.index(0)]==1 && gain.to[gain.index(100)]==1 ? -101 :
-            static_cast<int>(std::lround(gain.to[gain.index(gain.base)]))-gain.base;
-        work[3]=static_cast<int>(std::lround(track.pan.now()*127));
-        if (track.pan.time<track.pan.total) {
-            const auto remaining=track.pan.total-track.pan.time;
-            const auto tenths=remaining/std::max(1U,impl_->settings.sample_rate/10U);
-            work[6]=static_cast<Value>(std::min<std::uint64_t>(tenths,INT32_MAX));
-            work[7]=static_cast<int>(std::lround(track.pan.to*127));
-        }
-    };
     for (std::size_t i=0;i<impl_->sounds.size();++i) {
         const auto& track=impl_->sounds[i];
-        if (track.active && track.volume_allowed && track.remaining==0) sample(track,state.sounds[i]);
+        if (track.active && track.volume_allowed && track.remaining==0) pc_sample(track,state.sounds[i],impl_->settings.sample_rate);
     }
-    for (std::size_t i=0;i<impl_->voices.size();++i) {
-        const auto& track=impl_->voices[i];
-        if (track.active && track.volume_allowed) {
-            sample(track,state.voices[i]);
-            state.voice_names[i]=track.program->name;
-        }
-    }
+    const auto voices=impl_->saved_voices();
+    state.voice_names=voices.names;state.voice_exist_count=voices.count;
+    std::copy(voices.work.begin(),voices.work.end(),state.voices.begin());
     return state;
 }
 
@@ -832,6 +863,7 @@ void GameAudio::save_snapshot(snapshot::Writer& out) const {
     auto tracks=std::make_unique<ScriptTracks>();
     std::lock_guard<std::mutex> command(impl_->commands);
     bool paused;
+    PcVoices voices;
     {
         std::lock_guard<std::mutex> mix(impl_->mixer);
         tracks->song=impl_->song;
@@ -839,6 +871,7 @@ void GameAudio::save_snapshot(snapshot::Writer& out) const {
         tracks->voices=impl_->voices;
         tracks->sounds=impl_->sounds;
         paused=impl_->song_paused;
+        voices=impl_->saved_voices();
     }
     out(impl_->settings.sample_rate,paused,impl_->fade_se,impl_->fade_voice,
         impl_->last_music.has_value(),impl_->next_music.has_value());
@@ -855,6 +888,22 @@ void GameAudio::save_snapshot(snapshot::Writer& out) const {
     track(tracks->song);track(tracks->outgoing);
     for (const auto& t:tracks->voices) track(t);
     for (const auto& t:tracks->sounds) track(t);
+    if (std::any_of(voices.names.begin(),voices.names.end(),[](const auto& name){return !name.empty();}))
+        out(pc_voice_snapshot_tag,voices.names,voices.work,voices.count);
+}
+
+void GameAudio::message_started() {
+    std::lock_guard<std::mutex> command(impl_->commands);
+    for (auto& count:impl_->pc_voices.count) if (count) --count;
+}
+void GameAudio::restore_pc_voice_state(const PcAudioState& state) {
+    std::lock_guard<std::mutex> command(impl_->commands);
+    impl_->pc_voices.names=state.voice_names;impl_->pc_voices.count=state.voice_exist_count;
+    std::copy_n(state.voices.begin(),impl_->pc_voices.work.size(),impl_->pc_voices.work.begin());
+}
+bool GameAudio::has_pc_voice_state() const {
+    std::lock_guard<std::mutex> command(impl_->commands);
+    return std::any_of(impl_->pc_voices.names.begin(),impl_->pc_voices.names.end(),[](const auto& name){return !name.empty();});
 }
 
 void GameAudio::load_snapshot(snapshot::Reader& in,bool keep_music_position,
@@ -931,6 +980,18 @@ void GameAudio::read_snapshot(snapshot::Reader& in,bool keep_music_position,
     track(tracks->song,0);track(tracks->outgoing,0);
     for (auto& t:tracks->voices) track(t,1);
     for (auto& t:tracks->sounds) track(t,2);
+    PcVoices voices;
+    for (std::size_t i=0;i<tracks->voices.size();++i) if (tracks->voices[i].active) {
+        if (!inspect) voices.names[i]=tracks->voices[i].program->name;
+        pc_sample(tracks->voices[i],voices.work[i],rate);voices.count[i]=1;
+    }
+    if (in.remaining()) {
+        std::uint32_t tag=0;in(tag);
+        if (tag!=pc_voice_snapshot_tag) invalid("Invalid snapshot voice metadata");
+        in(voices.names,voices.work,voices.count);
+        for (const auto& name:voices.names)
+            if (name.size()>255 || name.find('\0')!=std::string::npos) invalid("Invalid snapshot voice name");
+    }
     if (in.remaining()) invalid("Unexpected data at end of snapshot");
     if (inspect) return;
     // PC quick load starts the saved BGM at its intro, even when the same
@@ -991,6 +1052,7 @@ void GameAudio::read_snapshot(snapshot::Reader& in,bool keep_music_position,
         impl_->current_music=impl_->song.active && impl_->files.has_bgm(impl_->song.source_number) ?
             impl_->song.source_number : last_music ? last_music->first : 0;
         impl_->voices.swap(tracks->voices);impl_->sounds.swap(tracks->sounds);
+        impl_->pc_voices=std::move(voices);
         impl_->script_audio_suspended=false;
         impl_->backlog_voice.stop(0);
         impl_->last_music=last_music;impl_->next_music=next_music;impl_->fade_se=se_fade;impl_->fade_voice=voice_fade;

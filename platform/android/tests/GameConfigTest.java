@@ -480,6 +480,17 @@ public final class GameConfigTest {
             int[] pairs=RuntimeSettingsAdapter.changedParameter(preferences,null,"fullscreen");
             check(Arrays.equals(pairs,new int[]{4,fullscreen?1:0}),"window mode uses the PC screen parameter");
         }
+        File game=new File(".");
+        String prefix=RuntimeSettingsAdapter.ownerKey(game,0).replace("owner.0","");
+        for(int auto:new int[]{0,1}){
+            SharedPreferences preferences=(SharedPreferences)Proxy.newProxyInstance(
+                SharedPreferences.class.getClassLoader(),new Class<?>[]{SharedPreferences.class},
+                (p,m,a)->Map.of(prefix+6,auto,prefix+105,72));
+            check(Arrays.equals(RuntimeSettingsAdapter.persistedOverrides(preferences,game),new int[]{6,auto,105,72}),
+                "ordinary startup retains the persisted Auto preference");
+            check(Arrays.equals(RuntimeSettingsAdapter.persistedOverrides(preferences,game,false),new int[]{105,72}),
+                "PC load must retain its runtime Auto decision independently of persisted settings");
+        }
     }
 
     private static void verifyWave25ConfigAlignment(File root) throws Exception {

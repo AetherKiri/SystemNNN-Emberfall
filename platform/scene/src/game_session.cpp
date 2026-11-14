@@ -45,7 +45,7 @@ constexpr nnn::Word cutin_mode=0x3333005bU, cutin_click=0x3333005cU, face_type=0
 constexpr nnn::Word set_term=0x3333006dU;
 constexpr unsigned variable_count=32768;
 constexpr unsigned first_system_variable=200;
-constexpr std::uint32_t snapshot_magic=0x31534e4eU, snapshot_version=16;
+constexpr std::uint32_t snapshot_magic=0x31534e4eU, snapshot_version=17;
 constexpr int default_next_message_type=3;
 constexpr int heroine_limit=12,object_limit=1024;
 constexpr std::size_t backlog_capacity=100;
@@ -795,6 +795,7 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         pc_dialogue_thumbnail_without_message=config_int(init,"messageMiniCGNoMessageFlag",0)!=0;
         pc_choice_thumbnail_without_message=config_int(init,"selectMiniCGNoMessageFlag",0)!=0;
         one_byte_text=config_int(init,"codeByte",2)==1;
+        if (!decorative_preview) initialize_backlog(log_config);
         sync_runtime_names();
         standalone_script=options.standalone_script;
         scene_list_enabled=config_int(init,"noSceneListFlag",0)==0;
@@ -1302,6 +1303,39 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
             backlog.pop_front();
         }
         backlog.push_back(std::move(entry));
+    }
+    void initialize_backlog(const std::string& setup) {
+        // CCommonBackLog::Clear adds the game's opening line and separator.
+        const std::string default_first=one_byte_text ? "#R#c#W start #R#c" :
+            "\x23\x90\xd4\x23\x94\x4c\x23\x94\x92\x81\x40\x89\xdf\x8b\x8e\x81\x41"
+            "\x82\xbb\x82\xea\x82\xcd\x92\x50\x82\xc8\x82\xe9\x92\xca\x89\xdf\x93\x5f"
+            "\x82\xcc\x8f\x57\x82\xdc\x82\xe8\x81\x45\x81\x45\x81\x45\x81\x40\x23\x90\xd4\x23\x94\x4c";
+        if (config_int(setup,"firstMessagePrintFlag",1)!=0) {
+            const int count=std::clamp(config_int(setup,"firstMessageNumber",0),0,100);
+            std::string first=count==0 ? default_first : std::string{};
+            std::string part=default_first;
+            for (int i=1;i<=count;++i) {
+                part=config_text(setup,"firstMessage"+std::to_string(i),part);
+                if (part.size()>16384U-first.size()) { warn("Backlog opening message exceeds text limit");break; }
+                first+=part;
+            }
+            remember({{},std::move(first),{},0xffffff,true});
+        }
+        if (config_int(setup,"firstBarPrintFlag",1)!=0) {
+            std::string bar;
+            for (unsigned i=0;i<23;++i) bar+="\x81\x5c";
+            remember({{},config_text(setup,"barMessage",bar),{},0xffffff,true});
+        }
+    }
+    void inherit_backlog(const Impl& previous) {
+        // Each jump owns its complete native checkpoint. Keep IDs, original
+        // journal cursors and voice names together; no references to the old owner.
+        backlog=previous.backlog;
+        jumps=previous.jumps;
+        next_jump_id=previous.next_jump_id;
+        jump_bytes=previous.jump_bytes;
+        jump_pending=false;
+        backlog_voices={};
     }
     auto find_jump(std::uint64_t id) const {
         return std::find_if(jumps.cbegin(),jumps.cend(),[id](const JumpPoint& point){return point.line.jump_id==id;});
@@ -3364,6 +3398,7 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
                 jump_pending=jump_enabled && replay_films.empty() && (e.opcode!=append || append_jump);
             }
             backlog_voices={};
+            if (!ui_mode) playback.message_started();
             const bool retain_visible=appending && (d.layout_command==print || append_prefix_bytes!=0);
             begin_line(message_has_voice,message_voice_ms,next_message_speed,retain_visible);
             next_message_speed=0;
@@ -3846,8 +3881,13 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
             if (status.loop_sound[i][0]) sample(status.loop_sound[i],i,false,{});
         for (std::size_t i=0;i<status.voice_exist_count.size();++i)
             if (!status.loop_voice_names[i].empty() &&
-                (status.loop_voice[i][0] || (status.voice_exist_count[i] && (jump_voice_mask&(1U<<i)))))
+                (status.loop_voice[i][0] || (status.game_mode==static_cast<int>(nnn::RuntimeMode::PrintMessage) &&
+                 status.voice_exist_count[i] && (jump_voice_mask&(1U<<i)))))
                 sample(status.loop_voice[i],i,true,status.loop_voice_names[i]);
+        nnn::audio::PcAudioState restored;
+        restored.voices=status.loop_voice;restored.voice_exist_count=status.voice_exist_count;
+        std::copy_n(status.loop_voice_names.begin(),restored.voice_names.size(),restored.voice_names.begin());
+        playback.restore_pc_voice_state(restored);
     }
     std::array<nnn::PcScriptSlot,nnn::script_mode_count> pc_positions(const pc::Status& status) const {
         std::array<nnn::PcScriptSlot,nnn::script_mode_count> positions;
@@ -3912,7 +3952,7 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         status.loop_sound=audio.sounds;status.loop_voice=audio.voices;
         for (std::size_t i=0;i<audio.voice_names.size();++i) {
             status.loop_voice_names[i]=audio.voice_names[i];
-            status.voice_exist_count[i]=audio.voice_names[i].empty()?0:1;
+            status.voice_exist_count[i]=audio.voice_exist_count[i];
         }
         for (unsigned i=0;i<layer_limit;++i) {
             const auto binding=layer_variables[i];
@@ -4147,7 +4187,7 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         }
     }
 
-    void load_pc_save(const std::vector<nnn::Byte>& bytes) {
+    void load_pc_save(const std::vector<nnn::Byte>& bytes,const Impl* previous=nullptr) {
         const auto saved=pc::parse_save(bytes,pc_save_header);
         loaded_save_message_width=saved.message_width;
         if (saved.log) { pc_log_layout=saved.log->layout;pc_log_voices=saved.log->voice_count; }
@@ -4227,6 +4267,9 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         frame.script_cursor=status.cursor_number;frame.script_mouse=status.mouse_number;
         auto_message=status.auto_message;cannot_click=status.cannot_click;cannot_skip=status.cannot_skip;
         surname=status.surname;given_name=status.given_name;
+        if (saved.log) {
+            backlog.clear();clear_jumps();
+        }
         if (saved.log) for (const auto& old:saved.log->entries) {
             BacklogEntry line;
             line.text=replace_dialogue(old.text);
@@ -4317,8 +4360,10 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         if (!place && !chart) begin_line(message_has_voice,message_voice_ms,0);
         set_mode(mode);
         pacing.clear();
-        shared_runtime->set_skip_active(false);
-        shared_runtime->set_system_parameter(nnn::NNNPARAM_AUTOMODE,0);
+        if (clear_auto_after_load) {
+            shared_runtime->set_skip_active(false);
+            shared_runtime->set_system_parameter(nnn::NNNPARAM_AUTOMODE,0);
+        }
         initial_calendar=false;
         renderer->surface();
         const auto global=shared_runtime->runtime_text();
@@ -4327,6 +4372,7 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
             system_save_requested=true;
         }
         publish_preview_story();
+        if (!saved.log && previous) inherit_backlog(*previous);
     }
 
     GameSession::PcSaveLayout pc_save_layout() const {
@@ -4517,14 +4563,15 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         if (ui_mode || !replay_films.empty() || (wait>Wait::Choice && wait!=Wait::Place && !pending_modal))
             nnn::snapshot::invalid("Cannot snapshot this game mode");
         const bool decorated_overlap=renderer->has_overlap_decoration();
-        const bool script_mouse_format=frame.script_mouse!=0;
+        const bool voice_format=playback.has_pc_voice_state();
+        const bool script_mouse_format=frame.script_mouse!=0 || voice_format;
         const bool script_controls=rename_layers || film_skip_enabled || next_message_effect || frame.dialogue.effect_type ||
             script_mouse_format;
         const bool optional_classes=faces.enabled() || cutins.enabled() || omake.has_value() || script_controls;
         const bool draw_message_format=decorated_overlap || optional_classes || next_message_type!=default_next_message_type;
         const bool cursor_format=frame.script_cursor!=0 || draw_message_format;
         const bool chart_format=chart_available || cursor_format;
-        out(snapshot_magic,script_mouse_format ? snapshot_version : script_controls ? 15U : optional_classes ? 14U : decorated_overlap ? 13U :
+        out(snapshot_magic,voice_format ? snapshot_version : script_mouse_format ? 16U : script_controls ? 15U : optional_classes ? 14U : decorated_overlap ? 13U :
             draw_message_format ? 12U : cursor_format ? 11U : chart_format ? 10U : 9U,
             static_cast<std::uint8_t>(last_heroine));
         if (cursor_format) out(frame.script_cursor);
@@ -5300,13 +5347,16 @@ void GameSession::restore_pc_save(const std::vector<nnn::Byte>& bytes) {
     options.filename_encoder=data_->filename_encoder;
     auto candidate=std::make_unique<Impl>(options.runtime->root(),options,false,data_->shared_assets);
     candidate->chart_private_root=data_->chart_private_root;
-    candidate->load_pc_save(bytes);
+    candidate->load_pc_save(bytes,data_.get());
     data_.swap(candidate);
 }
-void GameSession::load_pc_save_candidate(const std::vector<nnn::Byte>& bytes) {
+void GameSession::load_pc_save_candidate(const std::vector<nnn::Byte>& bytes,const GameSession* previous) {
     if (data_->ui_mode || !data_->replay_films.empty() || data_->frame.wait!=Wait::Running || data_->frame.word!=0)
         nnn::snapshot::invalid("PC save candidate must be a fresh story session");
-    data_->load_pc_save(bytes);
+    if (previous && (previous==this || previous->data_->ui_mode || !previous->data_->replay_films.empty() ||
+        previous->data_->shared_runtime->root().lexically_normal()!=data_->shared_runtime->root().lexically_normal()))
+        nnn::snapshot::invalid("PC backlog source must be another story session for the same game");
+    data_->load_pc_save(bytes,previous ? previous->data_.get() : nullptr);
 }
 GameSession::PcSavePreview GameSession::inspect_pc_save(const std::vector<nnn::Byte>& bytes, std::size_t picture_budget) {
     if (bytes.size()<32) throw std::runtime_error("Incomplete PC save header");

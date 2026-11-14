@@ -52,6 +52,15 @@ public final class DialogueMarkupTest {
         Map<String,String> fields=new HashMap<>();
         fields.put("rubiflag","1");fields.put("rubipercent","35");fields.put("rubideltay","-4");fields.put("rubisukima","2");fields.put("rubicolorg","199");
         DialogueMarkup.Style style=new DialogueMarkup.Style(fields);
+        DialogueMarkup log=style.backlog("#白開幕#赤𠀀終");
+        check(log.text.equals("開幕𠀀終")&&log.colors.size()==2&&log.colors.get(0).color==0xffffffff&&
+            log.colors.get(1).start==2&&log.colors.get(1).color==0xffff0000,"original backlog color commands style text without becoming glyphs");
+        DialogueMarkup tail=log.slice(2,5);
+        check(tail.colors.size()==1&&tail.colors.get(0).start==0&&tail.colors.get(0).end==3,
+            "wrapped backlog color ranges retain UTF-16 boundaries");
+        DialogueMarkup symbol=style.backlog("#赤#猫#白開始#赤#猫");
+        check(symbol.text.equals("開始")&&symbol.omittedSymbol&&symbol.colors.get(0).color==0xffffffff,
+            "unavailable decorative glyphs retain original text and report a fallback");
         check(style.percent==35&&style.offsetY==-4&&style.spacing==2&&style.color==0xffffc7ff,"game annotation style is parsed");
         if(args.length==2){
             DialogueMarkup dea=style.parse(message(Paths.get(args[0]),"DEA_test.spt",597));

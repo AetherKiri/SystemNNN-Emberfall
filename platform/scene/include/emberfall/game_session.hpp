@@ -259,7 +259,7 @@ public:
     void restore_pc_save(const std::vector<nnn::Byte>& bytes);
     // A host that already constructed a private load candidate can use it
     // directly. Discard that candidate if loading throws.
-    void load_pc_save_candidate(const std::vector<nnn::Byte>& bytes);
+    void load_pc_save_candidate(const std::vector<nnn::Byte>& bytes,const GameSession* previous=nullptr);
     struct PcSaveLayout {
         enum class Source { GameFiles=0, Executable=2 }; // Values used by Android debug metadata.
         unsigned render_layers=0, layer_limit=0, layer_records=0;
