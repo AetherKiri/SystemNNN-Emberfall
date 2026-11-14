@@ -71,6 +71,8 @@ public:
     PlaneKey presented_plane_key() const noexcept { return presented_key_; }
     std::uint64_t presented_revision() const noexcept { return presented_revision_; }
     unsigned skipped_ticks() const noexcept { return skip_ticks_; }
+    // A short DRAW must be presented with its own UI before its timer is consumed.
+    bool waiting_for_draw(const GameSession& game) const;
 
     void reset_present_state() noexcept;
 

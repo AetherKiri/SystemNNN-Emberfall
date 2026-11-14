@@ -112,6 +112,10 @@ void StoryCompositor::reset_present_state() noexcept {
     pending_retry_=false;
 }
 
+bool StoryCompositor::waiting_for_draw(const GameSession& game) const {
+    return pending_retry_ && mailbox_->attached() && game.state().wait==Wait::Draw && game.needs_message_plane();
+}
+
 StoryCompositor::PresentOutcome StoryCompositor::present(GameSession& game,bool force_repaint,bool story_mode,
                                                          const SubmitCallback& submit,
                                                          const render::Surface* override_surface) {

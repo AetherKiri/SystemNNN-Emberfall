@@ -491,6 +491,8 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
     bool overlap_message_window=true;
     int long_background_mode=0;
     std::string overlap_window_config,long_background_config;
+    std::string long_image_name;
+    bool long_image_off_with_window=false;
     int auto_message=0,cannot_click=0,cannot_skip=0;
     bool auto_message_kill_shift=false,cannot_skip_kill_shift=false,effect_gate=false;
     bool ctrl_skip=false;
@@ -764,6 +766,9 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
             if (overlap_message_window)
                 overlap_window_config=nnn::game_config::read(root,"init","messageWindow.xtx");
             long_background_mode=std::max(0,config_int(print_config,"LPrintBGMode",0));
+            if (config_int(print_config,"LPrintAddImageFlag",0))
+                long_image_name=config_text(print_config,"FilenameLPrintImage","lprintimage");
+            long_image_off_with_window=config_int(print_config,"addLPrintImageOffWithWindow",0)!=0;
         }
         const auto main_control=nnn::game_config::read(root,"init","mainControl.xtx");
         const int seed=config_int(main_control,"initRandomSeed",-1);
@@ -3310,7 +3315,7 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
     void select_dialogue_face() {
         if (!faces.enabled()) return;
         const auto& line=frame.dialogue;
-        if (!line.window_visible || line.layout_command!=print || cutins.active()) {
+        if (line.layout_command!=print || cutins.active()) {
             faces.hide();
             return;
         }
@@ -5045,7 +5050,7 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
                 // The host displayed this exit frame. Retain it until the next
                 // actual presentation, even if the resumed script yields first.
                 renderer->set_presented_solid(movie_exit_rgb[0],movie_exit_rgb[1],movie_exit_rgb[2]);
-            }
+            } else renderer->set_presented_solid(0,0,0);
             frame.wait=Wait::Running; frame.movie=0;
         } else input=in;
         if (ui_mode) {
@@ -5271,7 +5276,7 @@ DialogueVisuals GameSession::dialogue_visuals() const {
     const auto& game=*data_;
     if (game.ui_mode || (game.frame.wait!=Wait::Dialogue && draw_message()!=DrawMessage::RetainedMessage)) return result;
     if (game.cutins.active()) game.cutins.visuals(result,message_rows(game.frame.dialogue.display_bytes).size());
-    else if (game.frame.dialogue.window_visible) game.faces.visuals(result);
+    else game.faces.visuals(result);
     return result;
 }
 bool GameSession::modal_savable() const { return data_->modal_savable(); }
@@ -5535,11 +5540,20 @@ void GameSession::trim_replayed_backlog(unsigned keep) {
 const render::Surface& GameSession::surface() { return data_->renderer->surface(); }
 const render::Surface& GameSession::scene_surface() { return data_->renderer->scene_surface(); }
 void GameSession::set_message_plane(std::shared_ptr<const render::MessagePlane> plane) {
-    render::Layers::OverlapDecoration backdrop;
+    render::Layers::MessageDecoration backdrop;
     const bool long_dialogue=!data_->ui_mode && data_->frame.wait==Wait::Dialogue &&
-        data_->frame.dialogue.layout_command==lprint && !data_->cutins.active();
-    if (data_->long_background_mode && (draw_message()==DrawMessage::LongBackground || long_dialogue))
-        backdrop=[impl=data_.get()](render::Surface& out) { impl->paint_long_background(out); };
+        data_->frame.dialogue.layout_command==lprint;
+    const bool image=long_dialogue && !data_->long_image_name.empty();
+    const bool background=data_->long_background_mode &&
+        (draw_message()==DrawMessage::LongBackground || (long_dialogue && !data_->cutins.active()));
+    if (image || background) backdrop=[impl=data_.get(),image,background](render::Surface& out,bool visible) {
+        // CCommonPrintMessage draws the additional image before LPrintBG's filter/window.
+        if (image && (visible || !impl->long_image_off_with_window)) {
+            if (const auto art=impl->message_art(impl->long_image_name))
+                render::paint_texture(out,*art,{0,0,art->canvas_width,art->canvas_height},{0,0});
+        }
+        if (visible && background) impl->paint_long_background(out);
+    };
     const bool draw_screen_slot=!(data_->frame.wait==Wait::Choice && !data_->choice_draws_scene);
     data_->renderer->set_message_plane(std::move(plane),std::move(backdrop),draw_screen_slot);
 }
