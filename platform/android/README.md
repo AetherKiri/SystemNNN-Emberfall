@@ -1,6 +1,6 @@
 # SystemNNN-Emberfall
 
-当前源码版本为 **0.6.17（versionCode 78）**，要求 Android 8.0 及以上、ARM64。独立安装包的默认构建路径为 `build/tyranor/SystemNNN-Emberfall-0.6.17-arm64.apk`。
+当前源码版本为 **0.6.18（versionCode 79）**，要求 Android 8.0 及以上、ARM64。独立安装包的默认构建路径为 `build/tyranor/SystemNNN-Emberfall-0.6.18-arm64.apk`。
 
 文字平面的 JNI 句柄保留完整 64 位，兼容 ARM64 地址标记；仅零值代表无句柄。EXE 解析支持从较早赋值的局部变量追踪状态块长度。已有配置仍直接读取，需手动重新生成才能更新解析来源。
 
