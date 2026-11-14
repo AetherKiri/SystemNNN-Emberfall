@@ -202,6 +202,29 @@ int main() {
         truncated.resize(bytes.size()-8U); // One full padded row.
         dwq_failure(truncated);
     });
+    tests.run("runtime type-0 ignores bytes after complete rows without inferring a mask",[&] {
+        for (const unsigned depth : {24U, 8U}) {
+            const auto& source = depth == 24U ? basic24 : basic8;
+            const std::uint32_t row_payload = depth == 24U ? 16U : 8U;
+            const auto expected = nnn::dwq::decode(source);
+            require(static_cast<bool>(expected.status), "valid source image");
+            for (const std::size_t extra : {2U, 17U}) {
+                auto bytes = source;
+                bytes.insert(bytes.end(), extra, extra == 2U ? Byte{0} : Byte{0xA5});
+                // Some exporters include the unused footer in both BMP sizes.
+                put32(bytes, 66, static_cast<std::uint32_t>(bytes.size() - 64U));
+                put32(bytes, 98, row_payload + static_cast<std::uint32_t>(extra));
+                failure(nnn::image::decode_dwq(bytes), ErrorCode::InvalidFormat);
+                const auto decoded = nnn::dwq::decode(bytes);
+                require(decoded.status && !decoded.image.has_mask &&
+                            decoded.image.rgba == expected.image.rgba,
+                        "PC type-0 reader consumes only the padded pixel rows");
+            }
+            auto truncated = source;
+            truncated.pop_back();
+            dwq_failure(truncated);
+        }
+    });
     tests.run("text-only type-0 header takes dimensions from the indexed DIB",[&] {
         auto bytes=basic8;
         const std::string header="IF PACKTYPE==0  CUT THIS 64 BYTETHEN REMAKE BMP PACKTYPE=0      ";
