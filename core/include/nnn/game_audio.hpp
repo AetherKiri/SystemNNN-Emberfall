@@ -85,6 +85,7 @@ public:
     // A PC load is allowed to start the same BGM again, independently of script de-duplication.
     std::string submit_pc_music(const SystemEvent& event,const std::string& script={},Word word=0);
     void pull(std::int16_t* stereo,std::size_t frames);
+    void advance_script_voices();
     // Advance sources without generating output while reconstructing a saved session.
     void skip_frames(std::uint64_t frames);
     void set_character_slider(const std::string& prefix,int steps);

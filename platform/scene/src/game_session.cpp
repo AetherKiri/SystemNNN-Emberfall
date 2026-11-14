@@ -5503,6 +5503,8 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         }
         sync_skip();
         const bool skip_film_wait=GetSkipFlags().skip_to_film_end;
+        if (!ui_mode && (frame.wait==Wait::Dialogue || frame.wait==Wait::Choice || frame.wait==Wait::Draw || frame.wait==Wait::Overlap))
+            playback.advance_script_voices();
         const auto time=static_cast<std::uint64_t>(remainder)+(resume_movie?0U:timing.animation_ms);
         const auto ticks=static_cast<unsigned>(time/period);
         remainder=static_cast<unsigned>(time%period);
