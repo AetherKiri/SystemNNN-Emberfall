@@ -155,6 +155,7 @@ def run_suite(main_class, *args):
 
 run_suite("com.tyranor.runtime.systemnnn.PcSaveInteropTest")
 run_suite("com.tyranor.runtime.systemnnn.MessagePlaneTokenTest")
+run_suite("com.tyranor.runtime.systemnnn.MovieContinuationTest")
 run_suite("com.tyranor.runtime.systemnnn.DialogueLayoutTest", *([dea_zh] if dea_zh.is_dir() else []))
 run_suite("com.tyranor.runtime.systemnnn.ChartViewTest")
 run_suite(
