@@ -121,6 +121,58 @@ public final class GameSaveTest {
             }
         }
     }
+    private static void titleLoadAvailability() throws Exception {
+        Path game=Files.createTempDirectory("nnn-title-saves-");
+        try{
+            Path init=Files.createDirectory(game.resolve("init"));
+            Files.write(init.resolve("load.xtx"),"blockNumberX 2\nblockNumberY 5\npage 10\n".getBytes(StandardCharsets.UTF_8));
+            Files.write(init.resolve("save.xtx"),"blockNumberX 2\nblockNumberY 5\npage 12\n".getBytes(StandardCharsets.UTF_8));
+            Files.write(init.resolve("dataFile.xtx"),"quickSlotNumber 1\n".getBytes(StandardCharsets.UTF_8));
+            GameSavePaths paths=GameSavePaths.forGame(game.toFile());
+            Path saves=Files.createDirectory(paths.directory().toPath());
+            GameTextDecoder decoder=GameTextDecoder.load(game.toFile());
+            SaveSlots slots=new SaveSlots(paths);
+            slots.preload(game.toFile(),decoder);
+            check(!slots.hasAnyLoadData()&&slots.lastSelectedSlot()==null,"empty saves disable LOAD and last-load actions");
+            Files.write(saves.resolve("tdata7.sav"),new byte[]{1});
+            Files.write(paths.file(".resume").toPath(),new byte[]{1});
+            Files.write(paths.file(".quick.sav").toPath(),new byte[]{1});
+            Files.write(saves.resolve("sysfile3.sav"),new byte[]{1});
+            slots.preload(game.toFile(),decoder);
+            check(!slots.hasAnyLoadData(),"trial, old phone resume/quick and global files do not enable retail LOAD");
+            Files.delete(saves.resolve("tdata7.sav"));
+            PcStorySave.Preview preview=new PcStorySave.Preview(1,0,"PC slot",null);
+            slots.savedPc(100,preview);slots.savedPc(SaveSlots.MAX_MANUAL_SLOTS-1,preview);
+            check(!slots.hasAnyLoadData(),"save-only pages and retained high slots are outside the LOAD grid");
+            slots.savedPc(99,preview);
+            check(slots.hasAnyLoadData()&&slots.lastSelectedSlot()==null,"last LOAD slot enables browsing without a last-selection pointer");
+            slots.preload(game.toFile(),decoder);
+            slots.savedPc(slots.quickNumber(),preview);
+            check(slots.quickNumber()==0&&slots.hasAnyLoadData()&&slots.lastSelectedSlot()==null,
+                "quick save is the configured physical PC slot, independent of the last selection");
+            Files.write(saves.resolve("data0.sav"),new byte[]{1});
+            // The invalid pending entry makes preview validation fail before any graphics/JNI call.
+            Files.createDirectory(saves.resolve("data0.sav.new"));
+            slots.preload(game.toFile(),decoder);
+            check(slots.entry(0).corrupt&&slots.hasAnyLoadData()&&slots.lastSelectedSlot()==null,
+                "an existing unreadable PC slot still enables browsing, as CheckExistSaveData does");
+            Files.move(saves.resolve("data0.sav"),saves.resolve("data0.sav.bak"));
+            slots.preload(game.toFile(),decoder);
+            check(slots.entry(0).exists&&slots.hasAnyLoadData(),"an existing PC backup keeps its recoverable slot visible");
+            Files.write(init.resolve("game.xtx"),"taikenflag 1\n".getBytes(StandardCharsets.UTF_8));
+            slots.preload(game.toFile(),decoder);
+            check(!slots.hasAnyLoadData(),"trial LOAD ignores retail slots and their backups");
+            Files.write(saves.resolve("tdata0.sav"),new byte[]{1});
+            Files.createDirectory(saves.resolve("tdata0.sav.new"));
+            slots.preload(game.toFile(),decoder);
+            check(slots.hasAnyLoadData()&&slots.pcFile(0).getName().equals("tdata0.sav"),
+                "trial LOAD uses only its own physical slot namespace");
+        }finally{
+            Path[] files;
+            try(java.util.stream.Stream<Path> walk=Files.walk(game)){files=walk.sorted(Comparator.reverseOrder()).toArray(Path[]::new);}
+            for(Path file:files)Files.deleteIfExists(file);
+        }
+    }
     private static void highSlotsAndLastSelection() throws Exception {
         Path game=Files.createTempDirectory("nnn-save-slots-");
         GameSavePaths paths=GameSavePaths.forGame(game.toFile());
@@ -205,6 +257,7 @@ public final class GameSaveTest {
     }
     public static void main(String[] games) throws Exception {
         PcSystemSaveTest.chartLayouts();
+        titleLoadAvailability();
         choiceAppearanceReplay();
         GameSave history=new GameSave();
         history.append(0,12,34,false,0);

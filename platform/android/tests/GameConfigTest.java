@@ -60,6 +60,24 @@ public final class GameConfigTest {
         {"sampleText1","81a18ddd948797a189c291aa8e8e95b68e9ae8fb8ea691ac93788143","■在這裡可測試文字顯示速度，"},
         {"sampleText2","814090bf92b290ae939e95fb95d68ea98cc88524e6a4934991ac93788142","　請調整到方便自己閱讀的速度。"}
     };
+    private static void titleSaveActions(File root)throws Exception{
+        GameUiAssets.Config defaults=GameUiAssets.readConfig(root,"title");
+        check(TitleMenu.saveActionEnabled(defaults,TitleMenu.Action.LOAD,false,false),"absent title mask keeps LOAD enabled");
+        write(new File(root,"init/title.xtx"),"noSaveDataToMaskMenu 0\n",false);
+        GameUiAssets.Config unmasked=GameUiAssets.readConfig(root,"title");
+        check(TitleMenu.saveActionEnabled(unmasked,TitleMenu.Action.LOAD,false,false),"zero title mask keeps LOAD enabled");
+        write(new File(root,"init2/title.fxf"),"noSaveDataToMaskMenu 1\n",true);
+        GameUiAssets.Config masked=GameUiAssets.readConfig(root,"title");
+        check(!TitleMenu.saveActionEnabled(masked,TitleMenu.Action.LOAD,false,false)&&
+            !TitleMenu.saveActionEnabled(masked,TitleMenu.Action.LOAD,false,true),
+            "encrypted title mask requires a slot in the LOAD grid, independently of last selection");
+        check(TitleMenu.saveActionEnabled(masked,TitleMenu.Action.LOAD,true,false),"any PC slot enables LOAD without a last-selection pointer");
+        for(TitleMenu.Action action:new TitleMenu.Action[]{TitleMenu.Action.CONTINUE,TitleMenu.Action.LAST_LOAD}){
+            check(!TitleMenu.saveActionEnabled(masked,action,true,false),"any PC slot cannot enable "+action);
+            check(TitleMenu.saveActionEnabled(masked,action,false,true),"last selection enables "+action);
+        }
+        check(TitleMenu.saveActionEnabled(masked,TitleMenu.Action.START,false,false),"title load mask leaves START available");
+    }
     public static void main(String[] args)throws Exception{
         check(GameUiAssets.systemImageKey("TA_Load_Slot01.DWQ").equals("sys/ta_load_slot01")&&
             GameUiAssets.imageKey("TA\\TA_Load_Slot01.DWQ").equals("ta/ta_load_slot01"),"system and script sprites retain distinct routes");
@@ -71,6 +89,7 @@ public final class GameConfigTest {
             "unrepresentable filenames do not produce question-mark aliases");
         File root=Files.createTempDirectory("systemnnn-config-").toFile();
         try{
+            titleSaveActions(new File(root,"title-save-actions"));
             write(new File(root,"SpT/SyS.SpT"),"test",false);
             File script=GameResourcePaths.file(root,"spt","sys.spt");
             check(script!=null&&script.isFile(),"mixed-case script directory and filename");
