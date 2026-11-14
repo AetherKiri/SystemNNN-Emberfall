@@ -224,10 +224,9 @@ Status read_status(View view) {
         auto& voice=status.loop_voice[i];
         view.words(736+i*64,voice);
         const bool active=i<status.voice_exist_count.size() && (voice[0]!=0 || status.voice_exist_count[i]!=0);
+        // The PC records failed VOICE requests too, including an explicitly empty name.
         auto& name=status.loop_voice_names[i];
         name=resource(view,1248+i*64,64,active);
-        if (i<status.voice_exist_count.size() && voice[0]!=0 && name.empty())
-            invalid("missing active looping voice filename");
     }
     status.mini_comment=view.text(1760,32);
     status.surname=view.text(1792,16); status.given_name=view.text(1808,16);
