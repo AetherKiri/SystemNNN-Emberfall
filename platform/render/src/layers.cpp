@@ -30,7 +30,6 @@ template<class A,class S> void effect_fields(A& a,S& s,bool once_state,bool part
     });
 }
 using Color = std::array<int,3>;
-constexpr double pi=3.14159265358979323846;
 int arg(const Layer& l,std::size_t i,int def=0) { return i<l.parameters.size() ? l.parameters[i] : def; }
 int duration_of(const Layer& l) {
     if (effects::known(l.effect)) return static_cast<int>(effects::duration(l));
@@ -76,13 +75,6 @@ double curve(double tick, int length, int type=0, int delay=0) {
     default: break;
     }
     return ((type/100)%2) ? 1-t : t;
-}
-Rect destination_of(const Layer& layer) {
-    const auto time=curve(layer.count,duration_of(layer));
-    auto result=time>=1 ? layer.to : layer.from;
-    result.x=mix(layer.from.x,layer.to.x,time);
-    result.y=mix(layer.from.y,layer.to.y,time);
-    return result;
 }
 Color color(const Layer& l,std::size_t i,int def=0) {
     const int r=arg(l,i,def),g=arg(l,i+1,r);
@@ -248,13 +240,22 @@ double phase(const Layer& l,int loop,int length,int type,int delay) {
     const double n=std::max(1,length),c=l.count;
     return curve(loop ? std::fmod(c,n) : c,length,type,delay);
 }
+int movement_offset(int from,int to,int progress,int type) {
+    const auto delta=static_cast<std::int64_t>(to)-from;
+    if (type==0) return static_cast<int>(std::clamp<std::int64_t>(from+delta*progress/1000,-10000000,10000000));
+    const double t=progress*0.001;
+    const auto truncate=[](double value) { return static_cast<int>(std::clamp(value,-10000000.0,10000000.0)); };
+    if (type==1) return truncate(from+std::trunc(static_cast<double>(delta)*(1-std::cos(t*3.14159))*0.5+0.5));
+    if (type==2) return truncate(2*t*(1-t)*from+t*t*to+0.5);
+    return 0;
+}
 void scale_about(Rect& dst,double sx,double sy,double anchor_x,double anchor_y,double center_x,double center_y) {
     dst.x=extent(center_x-anchor_x*sx); dst.y=extent(center_y-anchor_y*sy);
     dst.width=extent(dst.width*sx); dst.height=extent(dst.height*sy);
 }
 void draw_capture_picture(Surface& out,const Layer& layer) {
     if (!layer.texture) return;
-    Rect dst=destination_of(layer),src=layer.source;
+    Rect dst=effects::destination(layer),src=layer.source;
     dst.width=src.width=std::min(src.width,dst.width);
     dst.height=src.height=std::min(src.height,dst.height);
     picture(out,*layer.texture,src,dst,100,{},!layer.opaque);
@@ -282,7 +283,7 @@ void draw(Surface& out,const std::array<Layer,32>& slots,unsigned slot,unsigned 
     if (l.effect==54) { tint(out,color(l,1),255); return; }
     if ((l.effect==10 || l.effect==11 || l.effect==17) && l.texture) {
         Rect src=l.source;
-        auto dst=destination_of(l);
+        auto dst=effects::destination(l);
         src.width=std::min(src.width,dst.width); src.height=std::min(src.height,dst.height);
         picture(out,*l.texture,src,{dst.x,dst.y,src.width,src.height},
                 100,{},!background && !l.opaque);
@@ -314,7 +315,7 @@ void draw(Surface& out,const std::array<Layer,32>& slots,unsigned slot,unsigned 
         return;
     }
     const auto& tex=*l.texture;
-    Rect dst=destination_of(l);
+    Rect dst=effects::destination(l);
     Rect src=l.source;
     src.width=std::min(src.width,dst.width); src.height=std::min(src.height,dst.height);
     dst.width=src.width; dst.height=src.height;
@@ -351,9 +352,9 @@ void draw(Surface& out,const std::array<Layer,32>& slots,unsigned slot,unsigned 
             for (unsigned j=0;j<3;++j) add[j]=mix(arg(l,18+j,arg(l,15+j)),arg(l,15+j),t);
         }
     } else if (l.effect==61) {
-        double f=phase(l,arg(l,3,1),arg(l,4,duration),arg(l,5),arg(l,6));
-        if (arg(l,1)==1) f=(1-std::cos(f*pi))*0.5;
-        dst.x+=mix(arg(l,7),arg(l,9),f); dst.y+=mix(arg(l,8),arg(l,10),f);
+        const int progress=extent(1000*phase(l,arg(l,3,1),arg(l,4,duration),arg(l,5),arg(l,6)));
+        dst.x+=movement_offset(arg(l,7),arg(l,9),progress,arg(l,1));
+        dst.y+=movement_offset(arg(l,8),arg(l,10),progress,arg(l,1));
         opacity=mix(arg(l,12,arg(l,11,100)),arg(l,11,100),phase(l,arg(l,13,arg(l,3,1)),arg(l,14,arg(l,4,duration)),arg(l,15,arg(l,5)),arg(l,16,arg(l,6))));
         const double z=phase(l,arg(l,19,arg(l,3,1)),arg(l,20,arg(l,4,duration)),arg(l,21,arg(l,5)),arg(l,22,arg(l,6)));
         const int ex=arg(l,23,100),ey=arg(l,24,100);
@@ -449,7 +450,7 @@ bool Layers::restore_layer(unsigned slot,Layer layer,const FragmentMesh* mesh) {
     return known(number) || effects::known(number);
 }
 unsigned Layers::duration(unsigned slot) const { return static_cast<unsigned>(duration_of(slots_.at(slot))); }
-Rect Layers::destination(unsigned slot) const { return destination_of(slots_.at(slot)); }
+Rect Layers::destination(unsigned slot) const { return effects::destination(slots_.at(slot)); }
 std::vector<std::int32_t> Layers::save_parameters(unsigned slot) const {
     const auto& layer=slots_.at(slot);
     auto parameters=layer.parameters;

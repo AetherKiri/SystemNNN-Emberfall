@@ -1334,6 +1334,40 @@ int main() {
     chart_layer_tests();
     chart_composite_tests();
     {
+        // CCalcuSpeed first quantizes SPECIALMOVE to thousandths. Check all
+        // 320 positions of the opening camera, including its easing endpoints.
+        Layers camera(1,321);
+        const auto marker=pattern(1,1);
+        camera.bind(4,marker,false);
+        camera.rectangle(4,{0,320,1,1},{0,320,1,1});
+        camera.effect(4,61,{320,1,0,0,320,60,0,0,-320,0,0});
+        for(unsigned count=0;count<=320;++count){
+            if(count)camera.advance(1);
+            const int u=static_cast<int>(1000*std::sqrt(count/320.0)+0.5);
+            const int y=static_cast<int>(160*(1-std::cos(u*3.14159/1000))+0.5);
+            std::vector<Byte> expected(321*3,0);
+            std::copy_n(marker->pixels.rgba.data(),3,expected.data()+y*3);
+            equal_frame(camera,expected,61,static_cast<int>(count));
+        }
+        for(const auto& sample:std::array<std::array<int,5>,4>{{
+            {{0,0,5,1,2}},{{1,0,-6,2,-5}},{{2,20,0,0,0}},{{2,20,0,1,10}}
+        }}){
+            Layers movement(40,1);
+            movement.bind(4,marker,false);
+            movement.rectangle(4,{10,0,1,1},{10,0,1,1});
+            movement.effect(4,61,{2,sample[0],0,0,2,0,0,sample[1],0,sample[2],0});
+            movement.advance(static_cast<unsigned>(sample[3]));
+            std::vector<Byte> expected(40*3,0);
+            std::copy_n(marker->pixels.rgba.data(),3,expected.data()+(10+sample[4])*3);
+            equal_frame(movement,expected,61,sample[3]);
+        }
+        Layers movement(2,1);
+        movement.bind(4,marker,false);movement.rectangle(4,{-1,0,1,1},{0,0,1,1});
+        movement.effect(4,52,{2});movement.advance(1);
+        require(movement.destination(4).x==0);
+        require(movement.surface().rgb==std::vector<Byte>({20,40,60,0,0,0}));
+    }
+    {
         Layers layers(2,1);
         layers.effect(0,54,{0,12,34,56});
         auto masked=pattern(2,1);
