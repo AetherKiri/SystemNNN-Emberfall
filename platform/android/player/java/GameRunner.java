@@ -843,6 +843,12 @@ final class GameRunner {
             data=new GameUiAssets.ModeAssets(GameUiAssets.Config.empty(),java.util.Collections.emptyMap());
         }
         movieError=new MovieError(this,data,capability,startup);
+        if(!GameCodecErrorPanel.available(uiAssets,data)){
+            Log.w("SystemNNN","Movie error interface resources unavailable; skipping movies");
+            ui.notice("动画播放失败，已跳过影片");
+            resolveMovieError(movieError,false);
+            return;
+        }
         ui.movieError(movieError);
         schedule();
     }
