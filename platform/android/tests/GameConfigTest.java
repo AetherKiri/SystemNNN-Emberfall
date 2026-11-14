@@ -1,9 +1,12 @@
 package com.tyranor.runtime.systemnnn;
 
+import android.content.SharedPreferences;
 import java.io.*;
+import java.lang.reflect.Proxy;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.Arrays;
+import java.util.Map;
 
 /** The production configuration reader runs without graphics/JNI calls. */
 public final class GameConfigTest {
@@ -252,6 +255,7 @@ public final class GameConfigTest {
             verifyGameDateLayout(root);
             verifySharedConfigSnapshot(new File(root,"shared-cfg"));
             verifyWave25ConfigAlignment(new File(root,"wave25-cfg"));
+            verifySettingsRadio();
         }finally{remove(root);}
         if(args.length>0){
             root=new File(args[0]);GameUiAssets.Config title=GameUiAssets.readConfig(root,"title");
@@ -453,6 +457,21 @@ public final class GameConfigTest {
             fb.windowPercentRaw==0&&fb.windowOpacityPercent==100&&fb.titleBgmNumber==4&&
             fb.yearVarIndex==3&&fb.dateVarIndex==1,
             "SharedConfig pure-Java fallback computes exesetup/game/printmessage/title/var2 defaults when native handle is absent");
+    }
+
+    private static void verifySettingsRadio() {
+        int[] changes={0};
+        Runnable select=()->changes[0]++;
+        check(GameSettingsPanel.radioAction(true,select)==null,"selected configuration radio has no click action");
+        GameSettingsPanel.radioAction(false,select).run();
+        check(changes[0]==1,"unselected configuration radio can apply its choice");
+        for(boolean fullscreen:new boolean[]{false,true}){
+            SharedPreferences preferences=(SharedPreferences)Proxy.newProxyInstance(
+                SharedPreferences.class.getClassLoader(),new Class<?>[]{SharedPreferences.class},
+                (p,m,a)->Map.of("fullscreen",fullscreen));
+            int[] pairs=RuntimeSettingsAdapter.changedParameter(preferences,null,"fullscreen");
+            check(Arrays.equals(pairs,new int[]{4,fullscreen?1:0}),"window mode uses the PC screen parameter");
+        }
     }
 
     private static void verifyWave25ConfigAlignment(File root) throws Exception {

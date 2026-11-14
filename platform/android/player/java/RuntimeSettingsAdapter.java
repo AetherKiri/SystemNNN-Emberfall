@@ -128,6 +128,10 @@ final class RuntimeSettingsAdapter {
                 return extended(id)&&value!=null?new int[]{id,value}:EMPTY;
             }catch(NumberFormatException e){return EMPTY;}
         }
+        for(int i=0;i<BOOLEAN_KEYS.length;i++)if(key.equals(BOOLEAN_KEYS[i])){
+            Boolean value=bool(values,key);if(value==null)return EMPTY;
+            return new int[]{BOOLEAN_IDS[i],i==0?(value?0:1):(value?1:0)};
+        }
         OriginalSettingsModel model=assets.settingsModel(1280,720);
         for(int i=0;i<OriginalSettingsModel.KEYS.length;i++){
             String display=OriginalSettingsModel.KEYS[i],exact="originalSlider."+OriginalSettingsModel.VOLUMES[i];
@@ -150,10 +154,6 @@ final class RuntimeSettingsAdapter {
             if(SWITCH_IDS[i]>=0&&key.equals("enabled."+display)){
                 Boolean value=bool(values,key);return value==null?EMPTY:new int[]{SWITCH_IDS[i],value?1:0};
             }
-        }
-        for(int i=0;i<BOOLEAN_KEYS.length;i++)if(key.equals(BOOLEAN_KEYS[i])){
-            Boolean value=bool(values,key);if(value==null)return EMPTY;
-            return new int[]{BOOLEAN_IDS[i],i==0?(value?0:1):(value?1:0)};
         }
         if(key.startsWith("character.")&&key.endsWith(".steps")){
             Integer value=integer(values,key);if(value==null)return EMPTY;

@@ -27,7 +27,7 @@ final class GameSettingsPanel extends GameUiPanel {
     private boolean[] characterVoiceChanges;
     private GameRunner.SettingsCharacterArt[] characterArt;
     private int page,backgroundPage=-1;
-    private boolean writingPreferences,watchingPreferences;
+    private boolean writingPreferences,watchingPreferences,ignoreTouch;
     private final ArrayList<TextView> sampleRows=new ArrayList<>();
     private final ArrayList<DialogueMarkup> sampleLines=new ArrayList<>();
     private int sampleSpeed,sampleLine;
@@ -37,7 +37,7 @@ final class GameSettingsPanel extends GameUiPanel {
         @Override public void run(){
             // A worker parameter echo must not detach a pressed button or a
             // captured slider before its action has committed.
-            if(controlsBusy()||isAdjusting())postDelayed(this,frameMs);
+            if(isAdjusting())postDelayed(this,frameMs);
             else showPage(page);
         }
     };
@@ -100,6 +100,10 @@ final class GameSettingsPanel extends GameUiPanel {
         // A blank tap belongs to this panel. Controls handle their own press.
         if(!pressed)super.dispatchSetPressed(false);
     }
+    @Override public boolean dispatchTouchEvent(MotionEvent event){
+        if(event.getActionMasked()==MotionEvent.ACTION_DOWN)ignoreTouch=controlsBusy();
+        return ignoreTouch||super.dispatchTouchEvent(event);
+    }
     private void write(Runnable change){writingPreferences=true;try{change.run();}finally{writingPreferences=false;}}
     private void writeInt(String key,int value){write(()->preferences.edit().putInt(key,value).apply());}
     private void writeBoolean(String key,boolean value){write(()->preferences.edit().putBoolean(key,value).apply());}
@@ -117,7 +121,10 @@ final class GameSettingsPanel extends GameUiPanel {
         background(model.background(page+1));
         if(!model.original){fallback();return;}
         if(backgroundPage!=page){uiBackground(assets.config,12,page+1);backgroundPage=page;}
-        if(model.pageMode==2)for(int i=0;i<model.tabs.size();i++){final int target=i;drawButton(model.tabs.get(i),page==i,"设置第 "+(i+1)+" 页",()->selectPage(target));}
+        if(model.pageMode==2)for(int i=0;i<model.tabs.size();i++){
+            final int target=i;boolean active=page==i;
+            drawButton(model.tabs.get(i),active,"设置第 "+(i+1)+" 页",radioAction(active,()->selectPage(target)));
+        }
         else if(model.pageMode==1)pageArrows(assets.config,page,model.pages,616,16,646,this::selectPage);
         for(OriginalSettingsModel.Slider s:model.sliders)if(s.page==page+1)volume(s);
         for(OriginalSettingsModel.CharacterControl c:model.characters)if(c.page==page+1)character(c);
@@ -130,7 +137,8 @@ final class GameSettingsPanel extends GameUiPanel {
         preview();
         returnButton=back(assets.config,close);
     }
-    @Override boolean backOverlay(){return pageChanging()||returnButton!=null&&returnButton.performClick();}
+    @Override boolean backOverlay(){return controlsBusy()||returnButton!=null&&returnButton.performClick();}
+    static Runnable radioAction(boolean selected,Runnable select){return selected?null:select;}
     private void systemVoices(){
         int selected=preferences.getInt("systemVoiceSelection",0);
         for(int i=0;i<model.systemVoices.size();i++){
@@ -144,12 +152,11 @@ final class GameSettingsPanel extends GameUiPanel {
             Runnable cue=()->play(setup,false,previewMutedVoice);
             // STARTCLICK sounds before NUMBER changes the radio selection. An
             // immediate button combines both events and uses the new theme.
-            GameButton button=drawButton(art,active,"系统语音主题 "+theme,()->{
+            drawButton(art,active,"系统语音主题 "+theme,radioAction(active,()->{
                 writeInt("systemVoiceSelection",theme);
                 if(setup.clickTime==0)cue.run();
                 showPage(page);
-            },setup.clickTime==0?()->{}:cue);
-            if(active){button.setOnClickListener(null);button.setClickable(false);}
+            }),setup.clickTime==0?()->{}:cue);
         }
     }
     private String checkLabel(String key){switch(key){case "continueVoice":return "阅读文本时的语音播放";case "autoContinue":return "确认选项后关闭自动播放";
@@ -221,10 +228,11 @@ final class GameSettingsPanel extends GameUiPanel {
                 case "autoEnabled": label=i==0?"手动":"自动";break;
                 default: label=Integer.toString(i+1);
             }
-            drawButton(c.buttons[i],selected==i,c.label+" · "+label,()->{
+            boolean active=selected==i;
+            drawButton(c.buttons[i],active,c.label+" · "+label,radioAction(active,()->{
                 writeBoolean(c.key,c.key.equals("skipReadOnly")?option==0:option!=0);
                 showPage(page);
-            });
+            }));
         }
     }
     private void extended(OriginalSettingsModel.Extended group){
@@ -238,10 +246,10 @@ final class GameSettingsPanel extends GameUiPanel {
         }
         for(int i=0;i<group.buttons.length;i++){
             final int option=i;
-            GameButton button=drawButton(group.buttons[i],value==i,label+" · "+(i+1),
-                ()->{writeInt(key,option);showPage(page);});
+            boolean active=value==i;
+            GameButton button=drawButton(group.buttons[i],active,label+" · "+(i+1),
+                radioAction(active,()->{writeInt(key,option);showPage(page);}));
             button.setEnabled(!group.locked(configMask));
-            if(value==i){button.setOnClickListener(null);button.setClickable(false);}
         }
     }
     private void play(ButtonArt.Setup setup,boolean ignoreSwitch,boolean ignoreRole){
@@ -364,8 +372,15 @@ final class GameSettingsPanel extends GameUiPanel {
     private GameButton drawButton(OriginalSettingsModel.Button b,boolean state,String label,Runnable action,Runnable cue,Bitmap alternateImage){
         ButtonArt.Setup setup=b.state(state);
         GameButton.Spec spec=new GameButton.Spec(setup);
-        GameButton button=animatedButton(spec,alternateImage==null?assets.image(spec.image):alternateImage,label,cue,
-            action,b.x(state),b.y(state),setup.width,setup.height);
+        Bitmap image=alternateImage==null?assets.image(spec.image):alternateImage;
+        GameButton button;
+        if(action==null){
+            button=new GameButton(getContext(),spec,image,label,frameMs);
+            button.setFocusable(false);
+            put(button,b.x(state),b.y(state),setup.width,setup.height);
+        }else{
+            button=animatedButton(spec,image,label,cue,action,b.x(state),b.y(state),setup.width,setup.height);
+        }
         button.setSelected(state);
         return button;
     }
@@ -391,6 +406,7 @@ final class GameSettingsPanel extends GameUiPanel {
         return new ValueBar(getContext(),assets.image(image),label,min,max,value,w,h,20,click,change);
     }
     @Override boolean isAdjusting(){
+        if(controlsBusy())return true;
         for(int i=0;i<getChildCount();i++){
             View control=getChildAt(i);
             if(control instanceof ValueBar&&((ValueBar)control).tracking||control instanceof GameButton&&control.isPressed())return true;
