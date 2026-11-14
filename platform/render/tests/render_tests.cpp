@@ -1333,6 +1333,36 @@ void mask_presence_tests() {
 int main() {
     chart_layer_tests();
     chart_composite_tests();
+    {
+        Layers layers(2,1);
+        layers.effect(0,54,{0,12,34,56});
+        auto masked=pattern(2,1);
+        masked->pixels.rgba={255,9,9,0,80,100,120,255};
+        layers.bind(8,masked,false);
+        layers.effect(8,99,{20,10,-10,-30,10,-10,-30});
+        require(layers.surface().rgb==std::vector<Byte>({12,34,56,90,90,90}));
+        layers.effect(8,99,{20,10,-10,-30,10,-10,-30,0});
+        require(layers.surface().rgb==std::vector<Byte>({255,0,0,90,90,90}));
+        layers.effect(8,61,{});
+        layers.advance(5);
+        require(layers.surface().rgb==std::vector<Byte>({12,34,56,80,100,120}));
+    }
+    {
+        Layers original(4,4),restored(4,4);
+        original.bind(4,pattern(4,4),false);
+        original.effect(4,94,{3,1,-1,1});
+        original.advance(9999);
+        require(original.slots()[4].count==0);
+        auto record=original.slots()[4];
+        record.parameters=original.save_parameters(4);
+        record.parameters.resize(224,0);
+        record.effect_state.reset();
+        require(record.parameters[14]==3 && record.parameters[15]==-3);
+        restored.restore_layer(4,std::move(record));
+        require(restored.surface().rgb==original.surface().rgb);
+        original.advance(1);restored.advance(1);
+        require(restored.surface().rgb==original.surface().rgb);
+    }
     const auto image = source();
     auto dst = surface();
     require(blit(image, dst, {0, 0, 3, 2}, {0, 0}, BlendProfile::Source32Mmx) == Status::Ok);

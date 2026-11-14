@@ -77,6 +77,13 @@ double curve(double tick, int length, int type=0, int delay=0) {
     }
     return ((type/100)%2) ? 1-t : t;
 }
+Rect destination_of(const Layer& layer) {
+    const auto time=curve(layer.count,duration_of(layer));
+    auto result=time>=1 ? layer.to : layer.from;
+    result.x=mix(layer.from.x,layer.to.x,time);
+    result.y=mix(layer.from.y,layer.to.y,time);
+    return result;
+}
 Color color(const Layer& l,std::size_t i,int def=0) {
     const int r=arg(l,i,def),g=arg(l,i+1,r);
     return {r,g,arg(l,i+2,g)};
@@ -194,6 +201,48 @@ bool known(int e) {
     default: return false;
     }
 }
+void configure_basic(Layer& layer,int width,int height) {
+    if (!known(layer.effect) || layer.effect<=1) return;
+    auto& p=layer.parameters;
+    const auto given=p.size();
+    p.resize(std::max<std::size_t>(given,37),0);
+    const auto def=[&](std::size_t i,int value) { if (i>=given) p[i]=value; };
+    const auto rgb=[&](std::size_t i,int value=0) {
+        def(i,value);def(i+1,p[i]);def(i+2,p[i+1]);
+    };
+    // SETEFFECT accepts omitted arguments; EFFECT in a PC slot does not carry
+    // their original count. Store the effective defaults before zero padding
+    // the fixed-size save record, keeping explicitly supplied zeroes intact.
+    def(0,20);
+    switch (layer.effect) {
+    case 2: case 10: case 11: case 54: rgb(1);break;
+    case 8: def(1,50);break;
+    case 9:
+        def(1,50);def(2,100);def(8,width);def(9,height);
+        for (unsigned i=0;i<4;++i) def(10+i,p[6+i]);
+        for (unsigned i=0;i<3;++i) def(18+i,p[15+i]);
+        break;
+    case 17: def(1,1);def(2,p[1]);rgb(3,255);break;
+    case 61:
+        def(2,1);def(3,1);def(4,std::max(1,p[0]));
+        def(11,100);def(12,p[11]);
+        for (unsigned base:{13U,19U,27U})
+            for (unsigned i=0;i<4;++i) def(base+i,p[3+i]);
+        def(23,100);def(24,100);def(25,p[23]);def(26,p[24]);
+        for (unsigned i=0;i<3;++i) def(34+i,p[31+i]);
+        break;
+    case 65:
+        def(3,100);def(4,p[3]);def(5,p[3]);def(6,p[4]);
+        def(10,100);def(11,100);
+        for (unsigned i=0;i<3;++i) def(18+i,p[15+i]);
+        break;
+    case 99:
+        rgb(1);for (unsigned i=0;i<3;++i) def(4+i,p[1+i]);
+        def(7,1);break;
+    case 100: def(1,20);def(3,25);def(4,25);rgb(8);break;
+    default:break;
+    }
+}
 bool animated(int e) { return e==9 || e==10 || e==11 || e==17 || e==52 || e==61 || e==65 || e==99 || e==100; }
 double phase(const Layer& l,int loop,int length,int type,int delay) {
     const double n=std::max(1,length),c=l.count;
@@ -205,9 +254,7 @@ void scale_about(Rect& dst,double sx,double sy,double anchor_x,double anchor_y,d
 }
 void draw_capture_picture(Surface& out,const Layer& layer) {
     if (!layer.texture) return;
-    const double time=curve(layer.count,duration_of(layer));
-    Rect dst=time>=1 ? layer.to : layer.from,src=layer.source;
-    dst.x=mix(layer.from.x,layer.to.x,time);dst.y=mix(layer.from.y,layer.to.y,time);
+    Rect dst=destination_of(layer),src=layer.source;
     dst.width=src.width=std::min(src.width,dst.width);
     dst.height=src.height=std::min(src.height,dst.height);
     picture(out,*layer.texture,src,dst,100,{},!layer.opaque);
@@ -231,14 +278,13 @@ void draw(Surface& out,const std::array<Layer,32>& slots,unsigned slot,unsigned 
         effects::draw(out,slots,slot,saved,background,animation,animation_off,speaking); return;
     }
     const int duration=duration_of(l);
-    const double time=curve(l.count,duration);
     if (l.effect==73) { draw_capture_picture(out,l); save_target=out; return; }
     if (l.effect==54) { tint(out,color(l,1),255); return; }
     if ((l.effect==10 || l.effect==11 || l.effect==17) && l.texture) {
         Rect src=l.source;
-        const auto& size=time>=1.0 ? l.to : l.from;
-        src.width=std::min(src.width,size.width); src.height=std::min(src.height,size.height);
-        picture(out,*l.texture,src,{mix(l.from.x,l.to.x,time),mix(l.from.y,l.to.y,time),src.width,src.height},
+        auto dst=destination_of(l);
+        src.width=std::min(src.width,dst.width); src.height=std::min(src.height,dst.height);
+        picture(out,*l.texture,src,{dst.x,dst.y,src.width,src.height},
                 100,{},!background && !l.opaque);
     }
     if (l.effect==10 || l.effect==11) {
@@ -268,9 +314,7 @@ void draw(Surface& out,const std::array<Layer,32>& slots,unsigned slot,unsigned 
         return;
     }
     const auto& tex=*l.texture;
-    Rect dst=l.from;
-    dst.x=mix(l.from.x,l.to.x,time); dst.y=mix(l.from.y,l.to.y,time);
-    if (time>=1.0) { dst.width=l.to.width; dst.height=l.to.height; }
+    Rect dst=destination_of(l);
     Rect src=l.source;
     src.width=std::min(src.width,dst.width); src.height=std::min(src.height,dst.height);
     dst.width=src.width; dst.height=src.height;
@@ -386,6 +430,7 @@ bool Layers::effect(unsigned slot,int number,std::vector<std::int32_t> parameter
     l.effect=number; l.parameters=std::move(parameters); l.enabled=true; l.opaque=false; l.count=0; invalidate();
     l.effect_state=std::move(state);
     if (effects::known(number)) effects::configure(l,slot,static_cast<int>(output_.width),static_cast<int>(output_.height),mesh);
+    else configure_basic(l,static_cast<int>(width()),static_cast<int>(height()));
     if (continues_animation) { l.parameters[13]=1;l.parameters[15]=previous_animation; }
     return known(number) || effects::known(number);
 }
@@ -393,11 +438,32 @@ bool Layers::restore_layer(unsigned slot,Layer layer,const FragmentMesh* mesh) {
     auto& l=slots_.at(slot);
     l=std::move(layer);
     const auto number=l.effect;
+    const bool has_state=static_cast<bool>(l.effect_state);
     if (l.enabled && effects::known(number)) effects::configure(l,slot,static_cast<int>(width()),static_cast<int>(height()),mesh);
+    else if (l.enabled) configure_basic(l,static_cast<int>(width()),static_cast<int>(height()));
+    if (l.enabled && number==94 && !has_state) {
+        l.effect_state->offset_x=arg(l,14)%static_cast<int>(width());
+        l.effect_state->offset_y=arg(l,15)%static_cast<int>(height());
+    }
     invalidate();
     return known(number) || effects::known(number);
 }
 unsigned Layers::duration(unsigned slot) const { return static_cast<unsigned>(duration_of(slots_.at(slot))); }
+Rect Layers::destination(unsigned slot) const { return destination_of(slots_.at(slot)); }
+std::vector<std::int32_t> Layers::save_parameters(unsigned slot) const {
+    const auto& layer=slots_.at(slot);
+    auto parameters=layer.parameters;
+    if (layer.effect==94 && layer.effect_state) {
+        parameters.resize(std::max<std::size_t>(parameters.size(),16),0);
+        // The PC keeps POLESCROLL's accumulated displacement in EFFECT.para.
+        // Its counter can wrap independently, so count * velocity is insufficient.
+        parameters[12]=static_cast<std::int32_t>(layer.count);
+        parameters[13]=0;
+        parameters[14]=layer.effect_state->offset_x;
+        parameters[15]=layer.effect_state->offset_y;
+    }
+    return parameters;
+}
 void Layers::set_speaking(bool value) noexcept {
     if (speaking_==value) return;
     speaking_=value;
@@ -1015,6 +1081,7 @@ void Layers::load_snapshot(nnn::snapshot::Reader& in,const std::function<std::sh
             effects::configure(l,slot,static_cast<int>(width),static_cast<int>(height));
             l.count=count;
         }
+        if (!inspect && !effects::known(l.effect)) configure_basic(l,static_cast<int>(width),static_cast<int>(height));
     }
     overlap_display_={};
     if (decorated_overlap) read_surface(overlap_display_,false,false);

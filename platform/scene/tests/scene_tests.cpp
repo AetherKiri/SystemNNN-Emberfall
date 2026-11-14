@@ -1539,6 +1539,66 @@ int main(){
         preview->reset_ui_background("quiet_back",12,game.runtime());
         require(preview->step_ui_background({},false).script_cursor==0,"reused preview retained the previous script cursor");
     });
+    suite.test("PC effect records preserve omitted arguments and explicit transparency",[]{
+        const std::vector<std::pair<Word,std::vector<Word>>> cases{
+            {2,{20,30}},{8,{20}},{9,{20}},{9,{20,50,100,0,0,1}},
+            {10,{20,30}},{11,{20,30}},{17,{20}},{52,{}},{54,{20,30}},
+            {61,{320,1,0,0,320,60,0,0,bits(-320),0,0}},{61,{}},
+            {65,{20}},{66,{}},{73,{}},{94,{99999,1,bits(-1),1}},
+            {99,{20,10,bits(-10),bits(-30),10,bits(-10),bits(-30)}},
+            {99,{20,10,bits(-10),bits(-30),10,bits(-10),bits(-30),0}},
+            {100,{20}}
+        };
+        for (const auto& [number,arguments]:cases) {
+            Model model;model.message=true;
+            model.code.image(0,1);model.code.image(8,3);
+            std::vector<Word> command{8,number};command.insert(command.end(),arguments.begin(),arguments.end());
+            model.code.number(effect,command);model.code.print(1);model.code.end();
+            TempGame temp(model);temp.write("dwq/red.dwq",asset("tiny_red"));temp.write("dwq/alpha.dwq",asset("tiny_alpha"));
+            auto options=test_options();if(number==94){options.width=4;options.height=4;}
+            scene::GameSession game(temp.root,options);
+            require(game.step_frame(0).wait==scene::Wait::Dialogue,"effect fixture did not reach its message");
+            game.step_frame(100);
+            const auto before=game.surface().rgb;
+            const auto saved=game.export_pc_save();
+            const auto effect_state=scene::pc::parse_save(saved).effects[8];
+            if (number==94) require(effect_state.parameters[14]==1 && effect_state.parameters[15]==-1,
+                "scroll displacement is missing from the PC effect work fields");
+            if (number==99) require(effect_state.parameters[7]==(arguments.size()>7?0:1),
+                "color adjustment lost the default or explicit alpha flag");
+            if (number==61) require(effect_state.parameters[11]==100 && effect_state.parameters[12]==100 &&
+                effect_state.parameters[23]==100 && effect_state.parameters[24]==100 &&
+                effect_state.parameters[25]==100 && effect_state.parameters[26]==100,
+                "special movement lost its default opacity or scale");
+            game.restore_pc_save(saved);
+            require(game.surface().rgb==before,"PC effect restore changed pixels for effect "+std::to_string(number));
+            const auto repeated=scene::pc::parse_save(game.export_pc_save()).effects[8];
+            require(repeated.parameters==effect_state.parameters && repeated.count==effect_state.count,
+                "re-saving changed the effective effect parameters or animation position");
+        }
+    });
+    suite.test("PC MOVE restores its independent duration and exports the current rectangle",[]{
+        Model model;model.message=true;model.code.image(8,2);
+        model.code.number(effect,{8,52,500});model.code.print(1);model.code.end();
+        TempGame temp(model);temp.write("dwq/green.dwq",asset("tiny_green"));
+        auto options=test_options();options.width=8;
+        scene::GameSession game(temp.root,options);game.step_frame(0);
+        auto saved=scene::pc::parse_save(game.export_pc_save());
+        auto& movement=saved.effects[8];
+        movement.count=212;movement.count_max=500;movement.parameters[0]=20;
+        movement.src=movement.src_from=movement.src_to={0,0,1,1};
+        movement.dst_from={0,0,1,1};movement.dst_to={5,0,1,1};movement.dst={2,0,1,1};
+        game.restore_pc_save(scene::pc::write_save(saved));
+        Bytes expected(8*3,0);expected[2*3+1]=255;
+        require(game.surface().rgb==expected,"PC MOVE jumped to its endpoint after load");
+        const auto mid=scene::pc::parse_save(game.export_pc_save()).effects[8];
+        require(mid.count==212 && mid.count_max==500 && mid.dst.left==2,
+            "PC MOVE re-save lost the current position or independent duration");
+        game.step_frame(288*game.frame_ms());
+        expected.assign(8*3,0);expected[5*3+1]=255;
+        require(game.surface().rgb==expected && game.layers()[8].effect==0,
+            "PC MOVE did not finish after its remaining 288 frames");
+    });
     suite.test("PC slot loading is atomic and both slot formats preserve global progress",[]{
         Model model;model.message=true;model.code.print(1);model.code.print(2);model.code.end();
         TempGame temp(model);

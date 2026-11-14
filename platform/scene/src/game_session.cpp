@@ -4209,6 +4209,8 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
             if (layer.enabled && !saved.filenames[i].empty()) layer.texture=assets.image(saved.filenames[i],true);
             if (!layer.enabled) inactive_pc_layers[i]=InactivePcLayer{source,saved.filenames[i]};
             layer.parameters.assign(source.parameters.begin(),source.parameters.end());
+            // PC MOVE stores its duration in countMax without assigning para[0].
+            if (layer.effect==52) layer.parameters[0]=source.count_max;
             const auto mesh=source.flag && layer.effect==81 ? fragment_mesh(layer.parameters) : std::optional<render::FragmentMesh>{};
             const auto effect=layer.effect;
             if (!renderer->restore_layer(i,std::move(layer),mesh ? &*mesh : nullptr) && source.flag)
@@ -4433,9 +4435,10 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
             const auto rectangle=[](const render::Rect& r){return pc::Rect{r.x,r.y,r.width,r.height};};
             effect.src=effect.src_from=effect.src_to=rectangle(layer.source);
             effect.dst_from=rectangle(layer.from);effect.dst_to=rectangle(layer.to);
-            effect.dst=effect.count>=effect.count_max?effect.dst_to:effect.dst_from;
-            if (layer.parameters.size()>effect.parameters.size()) throw std::runtime_error("Layer parameters exceed the PC save layout");
-            std::copy(layer.parameters.begin(),layer.parameters.end(),effect.parameters.begin());
+            effect.dst=rectangle(renderer->destination(i));
+            const auto parameters=renderer->save_parameters(i);
+            if (parameters.size()>effect.parameters.size()) throw std::runtime_error("Layer parameters exceed the PC save layout");
+            std::copy(parameters.begin(),parameters.end(),effect.parameters.begin());
             if (layer.texture) {
                 saved.filenames[i]=assets.pc_reference(*layer.texture);
                 if (saved.filenames[i].empty()) throw std::runtime_error("Layer texture has no equivalent PC resource path");

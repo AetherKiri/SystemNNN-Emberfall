@@ -154,6 +154,8 @@ public:
     std::uint32_t hidden_layers() const noexcept { return hidden_; }
     const std::array<Layer,32>& slots() const noexcept { return slots_; }
     unsigned duration(unsigned slot) const;
+    Rect destination(unsigned slot) const;
+    std::vector<std::int32_t> save_parameters(unsigned slot) const;
     void save_snapshot(nnn::snapshot::Writer& out,bool decorated_overlap=false) const;
     void load_snapshot(nnn::snapshot::Reader& in,const std::function<std::shared_ptr<const Texture>(const std::string&)>& texture,
                        bool compact_output=true,bool typed_overlap=true,bool opacity_field=true,bool once_state=true,
