@@ -765,7 +765,8 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
                 overlap_window_config=nnn::game_config::read(root,"init","messageWindow.xtx");
             long_background_mode=std::max(0,config_int(print_config,"LPrintBGMode",0));
         }
-        const int seed=config_int(nnn::game_config::read(root,"init","mainControl.xtx"),"initRandomSeed",-1);
+        const auto main_control=nnn::game_config::read(root,"init","mainControl.xtx");
+        const int seed=config_int(main_control,"initRandomSeed",-1);
         legacy_random_state=options.random_seed.value_or(seed>0 ? static_cast<std::uint32_t>(seed) : 1U);
         seed_from_clock=!options.random_seed && seed==-1;
         random_state=seed_from_clock ? static_cast<std::uint32_t>(std::time(nullptr)) : legacy_random_state;
@@ -844,8 +845,9 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         skip_voice_roles=config_int(init,"mustSetVoiceFlag",1)!=0;
         ignore_hidden_cg=config_int(init,"offLayerDontSetCG",0)!=0;
         auto setup=file_text(assets.config("exesetup.xtx"));
-        const int configured_width=config_int(setup,"mainScreenWindowSizeX1",1280);
-        const int configured_height=config_int(setup,"mainScreenWindowSizeY1",720);
+        // Older games configure the logical buffer in mainControl; realWindowSize is only presentation.
+        const int configured_width=config_int(setup,"mainScreenWindowSizeX1",config_int(main_control,"windowSizeX",800));
+        const int configured_height=config_int(setup,"mainScreenWindowSizeY1",config_int(main_control,"windowSizeY",600));
         const int width=options.width ? options.width : configured_width;
         const int height=options.height ? options.height : configured_height;
         layout_width=options.width>=200 ? options.width : configured_width;

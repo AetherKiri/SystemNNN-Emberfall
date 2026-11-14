@@ -3423,6 +3423,31 @@ int main(){
                 "invalid or out-of-range year/date variable indices must return !valid");
         }
     });
+    suite.test("logical canvas uses old mainControl defaults without depending on render layers",[]{
+        Model model;model.code.present();model.code.end();
+        TempGame temp(model);
+        auto check=[&](int w,int h) {
+            auto options=test_options();options.width=options.height=0;
+            scene::GameSession game(temp.root,options);
+            const auto cfg=game.shared_config_snapshot();
+            require(cfg.screen_width==w && cfg.screen_height==h,"logical canvas configuration mismatch");
+            require(game.surface().width==static_cast<unsigned>(w) && game.surface().height==static_cast<unsigned>(h),
+                "scene buffer differs from the layout canvas");
+            auto preview=scene::GameSession::create_ui_preview(temp.root,options);
+            require(preview->surface().width==static_cast<unsigned>(w) && preview->surface().height==static_cast<unsigned>(h),
+                "menu background buffer differs from the scene canvas");
+        };
+        check(800,600);
+        temp.text("init/mainControl.xtx","windowSizeX 960\nwindowSizeY 540\nrealWindowSizeX1 1920\nrealWindowSizeY1 1080\n");
+        check(960,540);
+        const std::string encrypted="windowSizeX 1024\nwindowSizeY 768\n";
+        Bytes bytes(encrypted.begin(),encrypted.end());
+        for (auto& byte:bytes) byte^=0xffU;
+        temp.write("init2/mainControl.fxf",bytes);
+        check(1024,768);
+        temp.text("spt/exesetup.xtx","mainScreenWindowSizeX1 1280\nmainScreenWindowSizeY1 720\n");
+        check(1280,720);
+    });
     suite.test("shared_config_snapshot locks cross-layer fields and WINDOWPERCENT transparency contract",[]{
         Model model;model.message=true;
         model.code.number(effect,{0,54,0,0,0,0});
