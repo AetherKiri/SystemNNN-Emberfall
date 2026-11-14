@@ -54,15 +54,6 @@ int spline(float t,float a,float b,float c,float d,bool cubic) {
                           (u*u)*a+2.0F*(t*u)*b+(t*t)*c;
     return static_cast<int>(std::clamp(static_cast<double>(v+0.5F),-10000000.0,10000000.0));
 }
-Rect destination(const Layer& layer) {
-    const auto length=known(layer.effect)?duration(layer):layer.effect==0?99999U:layer.effect==8?1U:
-        layer.effect==54?9999U:static_cast<unsigned>(std::max(1,layer.parameters.empty()?20:layer.parameters[0]));
-    Rect dst=layer.from;
-    dst.x=position(layer.from.x,layer.to.x,layer.count,length);
-    dst.y=position(layer.from.y,layer.to.y,layer.count,length);
-    if (layer.count>=length) { dst.width=layer.to.width;dst.height=layer.to.height; }
-    return dst;
-}
 Point window_origin(const Surface& out,const Layer& layer,const Texture& texture) {
     const auto dst=destination(layer);
     return {static_cast<int>(std::clamp(-static_cast<std::int64_t>(dst.x),std::int64_t{0},
@@ -3566,6 +3557,16 @@ void rain4(Surface& out,const Layer& layer) {
         }
     }
 }
+}
+
+Rect destination(const Layer& layer) {
+    const auto length=known(layer.effect)?duration(layer):layer.effect==0?99999U:layer.effect==8?1U:
+        layer.effect==54?9999U:static_cast<unsigned>(std::max(1,layer.parameters.empty()?20:layer.parameters[0]));
+    Rect dst=layer.from;
+    dst.x=position(layer.from.x,layer.to.x,layer.count,length);
+    dst.y=position(layer.from.y,layer.to.y,layer.count,length);
+    if (layer.count>=length) { dst.width=layer.to.width;dst.height=layer.to.height; }
+    return dst;
 }
 
 bool known_v5(int number) {

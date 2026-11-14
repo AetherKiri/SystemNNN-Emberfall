@@ -82,6 +82,7 @@ bool known_v5(int number);
 bool continuous(int number);
 void configure(Layer& layer,unsigned slot,int width,int height,const FragmentMesh* mesh=nullptr);
 unsigned duration(const Layer& layer);
+Rect destination(const Layer& layer);
 void advance(Layer& layer,int width,int height,Point cursor={-1,-1});
 int animation_frame(const Layer& layer,bool off);
 void draw(Surface& out,const std::array<Layer,32>& layers,unsigned slot,const Surface& saved,
