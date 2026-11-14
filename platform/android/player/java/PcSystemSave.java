@@ -46,8 +46,15 @@ final class PcSystemSave {
     private final int version, variables, scripts, albums, messageStride, filmStride, cgStride, movieStride;
     private boolean damaged,damagedResult;
 
+    static PcSystemSave open(File root,File directory,GameUiAssets.Config game,int[] format) throws IOException {
+        return open(root,directory,game,null,format,false);
+    }
     static PcSystemSave open(File root,File directory,GameUiAssets.Config game,GameUiAssets.Config chart,
                              int[] format) throws IOException {
+        return open(root,directory,game,chart,format,false);
+    }
+    static PcSystemSave open(File root,File directory,GameUiAssets.Config game,GameUiAssets.Config chart,
+                             int[] format,boolean legacyChart) throws IOException {
         if(format==null || format.length!=2 || format[0]<1 || format[0]>3 || (format[1]!=0 && format[1]!=1))
             throw new IOException("Invalid cached PC system save format");
         int version=format[0];
@@ -65,13 +72,17 @@ final class PcSystemSave {
         }
         ChartFiles chartFiles=null;
         int chartDefault=game.number("SelectChartIsDefault",0)!=0?0:1;
-        if(chart!=null && game.number("SelectChartClassDisable",chartDefault)==0 &&
+        if(legacyChart){
+            if(chart==null)throw new IOException("Missing legacy chart configuration");
+            File folder=GameResourcePaths.directory(directory,"mushiex");
+            chartFiles=new ChartFiles(folder==null?new File(directory,"mushiex"):folder,10000,true);
+        }else if(chart!=null && game.number("SelectChartClassDisable",chartDefault)==0 &&
            (GameResourcePaths.file(root,"init","selectChart.xtx")!=null ||
             GameResourcePaths.file(root,"init2","selectChart.fxf")!=null)){
             int pages=chart.number("chartListNumber",1),block=chart.number("chartBlockSize",1000);
             long slots=(long)pages*block;
             if(pages>=1&&pages<=32&&block>=1&&slots<=MAX_CHART_NODES)
-                chartFiles=new ChartFiles(directory,(int)slots);
+                chartFiles=new ChartFiles(directory,(int)slots,false);
         }
         return new PcSystemSave(path(directory,stem+".sav"),path(directory,stem+".org"),
             game.number("resultFlag",0)==0?null:path(directory,"result.sav"),version,scripts,albums,chartFiles);
@@ -519,9 +530,9 @@ final class PcSystemSave {
     private static final class ChartFiles {
         private final Path seen,roads;
         private final int seenBytes,roadBytes;
-        ChartFiles(File directory,int slots){
+        ChartFiles(File directory,int slots,boolean legacy){
             seen=path(directory,"mita.dat");roads=path(directory,"tsuka.dat");
-            seenBytes=(slots+3)&~3;roadBytes=slots;
+            seenBytes=legacy?10004:(slots+3)&~3;roadBytes=slots;
         }
         private boolean matches(byte[] flags){
             if(flags==null||flags.length!=8+seenBytes+roadBytes)return false;
@@ -554,6 +565,7 @@ final class PcSystemSave {
         }
         void write(byte[] flags) throws IOException {
             if(!matches(flags))return;
+            Files.createDirectories(seen.getParent());
             writeFlags(seen,Arrays.copyOfRange(flags,8,8+seenBytes));
             writeFlags(roads,Arrays.copyOfRange(flags,8+seenBytes,flags.length));
         }

@@ -81,6 +81,17 @@ public final class GameConfigTest {
             check(config.number("fontSize",0)==24&&config.number("menu1Button1PrintX",0)==128,"FXF numbers and disabled lines");
             write(new File(root,"init/title.xtx"),"backScriptName plain_title\n",false);
             check(GameUiAssets.readConfig(root,"title").value("backScriptName","").equals("encrypted_title"),"PC init2 priority");
+            write(new File(root,"init/chart.xtx"),"backScriptFlag 1\nbackScriptName old_plain\n",false);
+            write(new File(root,"init2/chart.fxf"),"backScriptFlag 1\nbackScriptName old_chart\npageNumberVarName old_page\nchangePageRestartScriptFlag 1\n",true);
+            write(new File(root,"init/selectChart.xtx"),"backScriptFlag 1\nbackScriptName modern_chart\npageNumberVarName modern_page\n",false);
+            GameTextDecoder chartDecoder=GameTextDecoder.load(root);
+            UiPreviewPool.Request oldChart=UiPreviewPool.Request.read(GameUiAssets.readChartConfig(root,chartDecoder,true),GameRunner.Modal.SELECT_CHART,2);
+            UiPreviewPool.Request modernChart=UiPreviewPool.Request.read(GameUiAssets.readChartConfig(root,chartDecoder,false),GameRunner.Modal.SELECT_CHART,2);
+            check(oldChart!=null&&oldChart.script.equals("old_chart")&&oldChart.variable.equals("old_page")&&oldChart.restartOnPage,
+                "detected legacy chart routes its encrypted original setup into the background request");
+            check(modernChart!=null&&modernChart.script.equals("modern_chart")&&modernChart.variable.equals("modern_page")&&
+                !modernChart.restartOnPage&&oldChart.mode==34&&modernChart.mode==34&&oldChart.page==2&&!oldChart.sameScript(modernChart),
+                "modern chart stays separate while preview mode remains internal and page stays one-based");
             write(new File(root,"init2/messageWindow.fxf"),"filenameWindow1 game_window\nnamePrintX 46\n",true);
             check(GameUiAssets.readConfig(root,"messageWindow").number("namePrintX",0)==46,"message FXF");
             write(new File(root,"init/extended.xtx"),"modePageMax 2\nexpRadioNumber 17\nexpCheckNumber 9\n"+

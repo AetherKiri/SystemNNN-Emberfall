@@ -162,6 +162,11 @@ public:
     std::vector<ScriptModal> status_overlays(nnn::RuntimeMode mode,bool prefer_story=false);
     DialogueVisuals dialogue_visuals() const;
     void set_chart_storage(const std::filesystem::path& private_root);
+    bool legacy_chart() const noexcept;
+    static bool uses_legacy_chart(const std::filesystem::path& root,const nnn::resource::FilenameEncoder& encode={});
+    static bool validate_chart_file(const std::filesystem::path& root,const std::filesystem::path& relative_sav_path,
+        const std::vector<nnn::Byte>& bytes,const nnn::resource::FilenameEncoder& encode={});
+    bool restore_chart_progress(nnn::chart::Progress progress);
     // A preparation failure returns -1 for a stale request, 0 to resume the script, or its external caller mode.
     int abort_modal(int request,const std::string& reason,unsigned elapsed_frames=0);
     void sync_runtime_names(); // Apply global names at initial startup, before any slot is restored.

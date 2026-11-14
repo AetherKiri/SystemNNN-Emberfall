@@ -1,5 +1,6 @@
 #include "emberfall/game_session.hpp"
 #include "chart_node_store.hpp"
+#include "legacy_chart.hpp"
 #include "chart_view_model.hpp"
 #include "dialogue_features.hpp"
 #include "game_assets.hpp"
@@ -663,7 +664,7 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
     std::optional<nnn::status_party::Visit> status_visit;
     std::array<ModalMusic,2> status_music;
     std::array<bool,2> status_available{};
-    bool chart_available=false,chart_failed=false;
+    bool chart_available=false,chart_failed=false,legacy_chart_active=false;
     std::unique_ptr<nnn::chart::Graph> chart_graph;
     std::optional<nnn::chart::RunState> chart_run;
     std::optional<ChartNodeStore> chart_store;
@@ -942,12 +943,15 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         }
         movie_count=std::min<std::size_t>(4096,fields(file_text(assets.config("movielist.xtx"))).size()/2);
         const auto commands=file_text(assets.config("command.xtx"));
-        const auto command_id=[&](const std::string& name) -> std::optional<nnn::Word> {
-            if (!config_int(init,name+"IsDefault",0) || !optional_class_created(init,name)) return {};
+        const auto registered_command_id=[&](const std::string& name) -> std::optional<nnn::Word> {
             std::size_t cursor=0;
             for (nnn::Word index=0;const auto token=nnn::game_config::name_token(commands,cursor);++index)
                 if (fold_cp932(std::string(*token))==name) return index/2;
             return {};
+        };
+        const auto command_id=[&](const std::string& name) -> std::optional<nnn::Word> {
+            if (!config_int(init,name+"IsDefault",0) || !optional_class_created(init,name)) return {};
+            return registered_command_id(name);
         };
         if (movie_count) {
             movie_command=command_id("printmovie");
@@ -981,7 +985,10 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         item_available=optional_class_created(init,"printitem");
         shop_available=optional_class_created(init,"shop");
         status_available={optional_class_created(init,"printstatus"),optional_class_created(init,"printparty")};
-        chart_available=optional_class_created(init,"selectchart");
+        legacy_chart_active=legacy_chart::recognizes(root,filename_encoder);
+        chart_available=legacy_chart_active || optional_class_created(init,"selectchart");
+        if (legacy_chart_active)
+            if (const auto command=registered_command_id("chartmap")) modal_commands.emplace(*command,nnn::RuntimeMode::SelectChart);
         for (const auto& [name,mode]:{
                 std::make_pair("selecthint",nnn::RuntimeMode::SelectHint),
                 std::make_pair("printhint",nnn::RuntimeMode::PrintHint),
@@ -2466,9 +2473,10 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         try {
             const auto& root=shared_runtime->root();
             auto graph=std::make_unique<nnn::chart::Graph>(root,static_cast<int>(renderer->width()),
-                static_cast<int>(renderer->height()),filename_encoder);
+                static_cast<int>(renderer->height()),filename_encoder,legacy_chart_active ?
+                    nnn::chart::Variant::LegacyChart : nnn::chart::Variant::SelectChart);
             if (!graph->configured()) throw std::runtime_error("Missing chart setup");
-            chart_music=modal_music(read_optional_setup(root,"selectChart.xtx"));
+            chart_music=modal_music(read_optional_setup(root,legacy_chart_active ? "chart.xtx" : "selectChart.xtx"));
             chart_store.emplace(nnn::resource::find_directory(root,"sav",filename_encoder));
             chart_store->private_root(chart_private_root);
             const auto& commands=graph->setup().commands;
@@ -2505,12 +2513,27 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         }
         return chart_legacy_progress;
     }
+    nnn::chart::StorageLayout chart_storage_layout() const noexcept {
+        return legacy_chart_active ? nnn::chart::StorageLayout::LegacyChart : nnn::chart::StorageLayout::Standard;
+    }
+    nnn::RuntimeMode chart_pc_mode() const noexcept {
+        return legacy_chart_active ? static_cast<nnn::RuntimeMode>(51) : nnn::RuntimeMode::SelectChart;
+    }
+    nnn::RuntimeMode internal_pc_mode(int mode) const noexcept {
+        return legacy_chart_active && mode==51 ? nnn::RuntimeMode::SelectChart : static_cast<nnn::RuntimeMode>(mode);
+    }
+    nnn::Value script_mode(nnn::Value mode) const noexcept {
+        return legacy_chart_active && mode==static_cast<nnn::Value>(nnn::RuntimeMode::SelectChart) ? 51 : mode;
+    }
     nnn::chart::RunState& current_chart_run() {
         if (!chart_run) {
             chart_run=chart_graph->run_defaults();
             const auto inherited=shared_runtime->chart_selection();
-            if (inherited && inherited->slots==chart_graph->slot_capacity())
+            if (!legacy_chart_active && inherited && inherited->slots==chart_graph->slot_capacity() &&
+                inherited->enabled.size()==chart_run->can_select.size())
                 chart_run->can_select=inherited->enabled;
+            if (legacy_chart_active)
+                shared_runtime->set_chart_selection(chart_graph->slot_capacity(),chart_run->can_select,chart_storage_layout());
         }
         return *chart_run;
     }
@@ -2539,6 +2562,7 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         }
     }
     void set_chart_display_page(nnn::Value page) {
+        if (legacy_chart_active) ++page;
         const auto id=variable_id(chart_graph->setup().display_page_var);
         if (id>=variable_count) return;
         if (!chart_title_story || system_variable(id)) {
@@ -2551,7 +2575,7 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         }
     }
     void write_chart_progress(nnn::chart::Progress progress) {
-        if (shared_runtime->set_chart_progress(std::move(progress))) system_save_requested=true;
+        if (shared_runtime->set_chart_progress(std::move(progress),chart_storage_layout())) system_save_requested=true;
     }
     bool chart_checkpoint(const nnn::chart::Checkpoint& plan,const nnn::chart::Progress& progress,
                           std::optional<nnn::Value> restore_work={}) {
@@ -2584,6 +2608,29 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
     }
     bool chart_function(nnn::Word id,const std::string& name,const std::vector<nnn::Value>& args) {
         if (name.empty() || !configure_chart()) return false;
+        if (legacy_chart_active) {
+            const auto command=legacy_chart::function(name);
+            if (!command) return false;
+            const auto flags=chart_progress();
+            if (!flags) return true;
+            auto updated=*flags;
+            auto run=current_chart_run();
+            const auto action=legacy_chart::apply(*chart_graph,*command,args,updated,run,chart_variables());
+            for (const auto& write:action.writes) SetVarData(variable_id(write.name),write.value);
+            chart_run=std::move(run);
+            if (action.run_changed) shared_runtime->set_chart_selection(chart_graph->slot_capacity(),chart_run->can_select,chart_storage_layout());
+            if (action.progress_changed) write_chart_progress(std::move(updated));
+            if (action.save_node) {
+                try {
+                    ChartNodeSave saved;
+                    saved.status=make_pc_status(chart_pc_mode(),true,true);
+                    saved.vars=nnn::chart::capture_variables([&](std::size_t i){return GetVarData(static_cast<nnn::Word>(i));});
+                    saved.run=*chart_run;
+                    chart_store->write(*action.save_node,saved,*chart_graph);
+                } catch(const std::exception& e) {warn("Legacy chart checkpoint: "+std::string(e.what()));}
+            }
+            return action.handled;
+        }
         const auto function=chart_functions.find(id);
         if (function==chart_functions.end()) return false;
         const auto flags=chart_progress();
@@ -2592,13 +2639,14 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         const auto action=chart_graph->apply_function(function->second,args,updated,current_chart_run(),chart_variables());
         if (action.write) SetVarData(variable_id(std::string(action.write->name)),action.write->value);
         if (action.progress_changed) write_chart_progress(std::move(updated));
-        if (action.run_changed) shared_runtime->set_chart_selection(chart_graph->slot_capacity(),chart_run->can_select);
+        if (action.run_changed) shared_runtime->set_chart_selection(chart_graph->slot_capacity(),chart_run->can_select,chart_storage_layout());
         if (action.save_system) system_save_requested=true;
         if (action.open_slot) chart_checkpoint(action.open_slot->checkpoint,*flags,action.open_slot->restore_work);
         return true;
     }
     void save_chart_exit() {
         if (!configure_chart()) return;
+        if (legacy_chart_active) return; // genzaichi owns old-format node checkpoints.
         const auto progress=chart_progress();
         if (!progress) return;
         const auto read=chart_variables();
@@ -2627,12 +2675,19 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         if (!progress) return false;
         const auto read=chart_variables();
         const auto& setup=chart_graph->setup();
+        if (legacy_chart_active && !external) {
+            auto updated=*progress;
+            const auto action=legacy_chart::apply(*chart_graph,legacy_chart::Function::Refresh,{},
+                updated,current_chart_run(),read);
+            for (const auto& write:action.writes) SetVarData(variable_id(write.name),write.value);
+            if (action.progress_changed) {write_chart_progress(std::move(updated));progress=chart_progress();}
+        }
         auto current=read(setup.slot_var);
         if (!current) {
             warn("SELECTCHART has no bound current slot variable");
             return false;
         }
-        if (!external) {
+        if (!external && !legacy_chart_active) {
             const auto plan=chart_graph->enter_plan(*current,read(setup.work_var).value_or(0));
             if (plan.empty()) {
                 warn("SELECTCHART current slot is outside the chart");
@@ -2648,6 +2703,10 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
             if (!saved) return false;
         } else if (*current==0 && !chart_graph->node(*current) && chart_graph->node(1)) {
             current=1;
+        }
+        if (legacy_chart_active && !chart_graph->node(*current)) {
+            warn("Legacy chart current slot is outside the chart");
+            return false;
         }
         ChartInteraction next;
         next.visit=chart_graph->begin_visit(*current,chart_scroll,read);
@@ -2684,7 +2743,23 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
             set_chart_page(request,state,progress,*chart_run,read);
             return ModalResult::Updated;
         }
-        if (!rewind) {
+        if (legacy_chart_active) {
+            SetVarData(variable_id(setup.work_var),branch.to);
+            SetVarData(variable_id(setup.slot_var),branch.to);
+            const auto* selected=chart_graph->node(branch.to);
+            if (selected->routes==1)
+                SetVarData(variable_id("\x8c\xa9\x82\xbd\x97\x5c\x96\xf1"),branch.to);
+            if (const auto edge=chart_graph->edge_index(branch.from,branch.to)) {
+                if (chart_graph->record_edge(*chart_run,{branch.from,*edge}))
+                    shared_runtime->set_chart_selection(chart_graph->slot_capacity(),chart_run->can_select,chart_storage_layout());
+                if (*edge<8U) {
+                    auto updated=progress;
+                    auto& bits=updated.traversed[static_cast<std::size_t>(branch.from)];
+                    const auto next=static_cast<nnn::Byte>(bits|(1U<<*edge));
+                    if (bits!=next) {bits=next;write_chart_progress(std::move(updated));}
+                }
+            }
+        } else if (!rewind) {
             SetVarData(variable_id(setup.work_var),branch.from);
             SetVarData(variable_id(setup.slot_var),branch.to);
         }
@@ -2735,7 +2810,7 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
             state.pending=-1;
             request.request=new_modal_request();
         } else if (action==ModalAction::Scroll) {
-            state.visit.scroll_y=std::clamp(value,0,chart_graph->scroll_limit(state.visit.page));
+            state.visit.scroll_y=std::clamp(value,chart_graph->scroll_min(state.visit.page),chart_graph->scroll_limit(state.visit.page));
             state.hit={};
             state.pointer_y=-1;
         } else if (action==ModalAction::Page) {
@@ -3349,7 +3424,7 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
                 (cutins.active() && e.opcode==print && dialogue_connect(text,e.opcode)));
             d.command=e.opcode; d.script=frame.script; ++d.sequence;
             d.effect_type=std::exchange(next_message_effect,0);
-            if (!appending) d.layout_command=e.opcode==lprint ? lprint : print;
+            if (!appending) d.layout_command=e.opcode==lprint || e.opcode==append ? lprint : print;
             d.table_index=a.empty() ? 0 : static_cast<unsigned>(a.front());
             d.message_id=identity(e.primary);
             pending_voice_message.reset();
@@ -3798,7 +3873,7 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
     }
     nnn::Value calculated_variable(nnn::Word id,bool script,const nnn::PreviewStoryState* story=nullptr) {
         if (id&0x8000U) return static_cast<int>(id&0x7fffU);
-        if (id==mode_id) return ui_mode ? *ui_mode : shared_runtime->mode();
+        if (id==mode_id) return script_mode(ui_mode ? *ui_mode : shared_runtime->mode());
         if (id==x_id) return input.mouse_x;
         if (id==y_id) return input.mouse_y;
         if (id==trigger_id) return ui_mode ? input.held || input.advance : input.advance || input.choice!=0;
@@ -3841,6 +3916,7 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
     }
     void SetCalcuVarData(nnn::Word id,nnn::Value value) override {
         if (id==mode_id) {
+            if (legacy_chart_active && value==51) value=static_cast<nnn::Value>(nnn::RuntimeMode::SelectChart);
             if (ui_mode) ui_mode=value;
             else shared_runtime->set_mode(value);
         }
@@ -3965,11 +4041,11 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
             status.layer_variables[i%16]|=static_cast<std::uint16_t>(static_cast<unsigned>(binding)<<(i>=16?8U:0U));
         }
     }
-    pc::Status make_pc_status(nnn::RuntimeMode mode,bool allow_raw_position=false) const {
+    pc::Status make_pc_status(nnn::RuntimeMode mode,bool allow_raw_position=false,bool force_raw_position=false) const {
         pc::Status status;
         capture_pc_status(status,mode);
         status.save_count=1;
-        bool adjusted=vm->pc_adjustment_ids();
+        bool adjusted=!force_raw_position && vm->pc_adjustment_ids();
         auto wait=nnn::PcScriptWait::Command;
         if (mode==nnn::RuntimeMode::Title) wait=nnn::PcScriptWait::Raw;
         else if (mode==nnn::RuntimeMode::PrintMessage) wait=nnn::PcScriptWait::Dialogue;
@@ -4016,7 +4092,7 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
             node=chart_store->read(checkpoint,*chart_graph);
             if (!node) throw std::runtime_error("Node checkpoint is missing");
             const auto& status=node->status;
-            const auto mode=static_cast<nnn::RuntimeMode>(status.game_mode);
+            const auto mode=internal_pc_mode(status.game_mode);
             if (mode!=nnn::RuntimeMode::SelectChart && mode!=nnn::RuntimeMode::Title)
                 throw std::runtime_error("Invalid chart checkpoint mode");
             if ((nnn::chart::restores_variable(slot) && node->vars[slot]!=checkpoint) ||
@@ -4026,7 +4102,7 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
                 !nnn::valid_runtime_text(status.surname,nnn::runtime_name_bytes) ||
                 !nnn::valid_runtime_text(status.given_name,nnn::runtime_name_bytes))
                 throw std::runtime_error("Invalid chart checkpoint values");
-            const auto wait=mode==nnn::RuntimeMode::Title ? nnn::PcScriptWait::Raw : nnn::PcScriptWait::Command;
+            const auto wait=legacy_chart_active || mode==nnn::RuntimeMode::Title ? nnn::PcScriptWait::Raw : nnn::PcScriptWait::Command;
             next_vm=make_scheduler();
             const auto restored=next_vm->restore_pc_positions(static_cast<nnn::ScriptMode>(status.run_mode),
                 pc_positions(status),status.adjust_version!=0,wait,0,false);
@@ -4068,7 +4144,7 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         vm.swap(next_vm);
         location();
         chart_run=std::move(node->run);
-        shared_runtime->set_chart_selection(chart_graph->slot_capacity(),chart_run->can_select);
+        shared_runtime->set_chart_selection(chart_graph->slot_capacity(),chart_run->can_select,chart_storage_layout());
         renderer->hide_layers(status.layer_off);
         for (unsigned i=0;i<layer_limit;++i) {
             const auto packed=static_cast<unsigned>(status.layer_variables[i%16]);
@@ -4133,6 +4209,7 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
             order=pc_extension_order(okikae);
         }
         if (order.size()!=payloads.size()) throw std::runtime_error("PC extension count differs from this game");
+        std::size_t game_index=0;
         for (std::size_t i=0;i<order.size();++i) {
             const auto& payload=payloads[i];
             switch (order[i]) {
@@ -4150,19 +4227,25 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
                 nnn::snapshot::Reader input(payload);
                 for (auto& word:run.can_select) input(word);
                 std::copy_n(input.raw(run.move_road.size()),run.move_road.size(),run.move_road.begin());
-                shared_runtime->set_chart_selection(chart_graph->slot_capacity(),run.can_select);
+                shared_runtime->set_chart_selection(chart_graph->slot_capacity(),run.can_select,chart_storage_layout());
                 chart_run=std::move(run);
                 break;
             }
             case PcExtension::Face:
                 faces.restore_pc(payload);
                 break;
-            case PcExtension::Game: throw std::runtime_error("Unsupported game-defined PC extension");
+            case PcExtension::Game:
+                if (!legacy_chart_active || game_index++!=0 || !configure_chart())
+                    throw std::runtime_error("Unsupported game-defined PC extension");
+                chart_run=legacy_chart::parse_extension(payload,*chart_graph);
+                shared_runtime->set_chart_selection(chart_graph->slot_capacity(),chart_run->can_select,chart_storage_layout());
+                break;
             }
         }
     }
 
     void save_pc_extensions(pc::Save& saved) {
+        std::size_t game_index=0;
         for (auto extension:pc_extension_order(save_layout->registers_okikae())) {
             switch (extension) {
             case PcExtension::Empty:
@@ -4187,7 +4270,11 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
             case PcExtension::Face:
                 saved.extensions.push_back(faces.pc_payload());
                 break;
-            case PcExtension::Game: throw std::runtime_error("Unsupported game-defined PC extension");
+            case PcExtension::Game:
+                if (!legacy_chart_active || game_index++!=0 || !configure_chart())
+                    throw std::runtime_error("Unsupported game-defined PC extension");
+                saved.extensions.push_back(legacy_chart::write_extension(current_chart_run(),*chart_graph));
+                break;
             }
         }
     }
@@ -4208,7 +4295,7 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         }
         const bool relocate=static_cast<unsigned>(saved.info.version)<game_version;
         const auto& status=saved.status;
-        const auto mode=static_cast<nnn::RuntimeMode>(status.game_mode);
+        const auto mode=internal_pc_mode(status.game_mode);
         const auto* place=place_config(status.game_mode);
         const bool chart=mode==nnn::RuntimeMode::SelectChart;
         if (!place && !chart && mode!=nnn::RuntimeMode::PrintMessage && mode!=nnn::RuntimeMode::SelectMessage)
@@ -4418,7 +4505,7 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
                 throw std::runtime_error("No exportable place at the current script position");
             status=make_pc_status(static_cast<nnn::RuntimeMode>(mode),true);
         } else if (chart) {
-            status=make_pc_status(nnn::RuntimeMode::SelectChart,true);
+            status=make_pc_status(chart_pc_mode(),true);
         } else {
             status=make_pc_status(frame.wait==Wait::Dialogue ? nnn::RuntimeMode::PrintMessage : nnn::RuntimeMode::SelectMessage);
         }
@@ -4775,7 +4862,8 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
                 in.records(run.move_road,nnn::chart::max_progress_slots,[](auto& reader,nnn::Byte& edge){reader(edge);});
                 in.records(run.can_select,nnn::chart::max_selection_words,
                     [](auto& reader,nnn::Word& word){reader(word);});
-                if (next.chart_scroll<0 || next.chart_scroll>16*1024*1024 ||
+                const int minimum=game && !game->legacy_chart_active ? 0 : -300;
+                if (next.chart_scroll<minimum || next.chart_scroll>16*1024*1024 ||
                     (game && (!game->configure_chart() || !game->chart_graph->valid(run))))
                     invalid("Invalid chart run state in snapshot");
             }
@@ -4913,7 +5001,7 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
                     return id==-1 || (node && node->page==visit.page);
                 };
                 if (!chart_graph->node(visit.current) || !chart_graph->page(visit.page) ||
-                    visit.scroll_y<0 || visit.scroll_y>chart_graph->scroll_limit(visit.page) ||
+                    visit.scroll_y<chart_graph->scroll_min(visit.page) || visit.scroll_y>chart_graph->scroll_limit(visit.page) ||
                     state.pointer_y< -1 || state.pointer_y>=chart_graph->setup().height ||
                     !belongs(state.hit.candidate) || !belongs(state.hit.description))
                     invalid("Invalid chart visit in snapshot");
@@ -4999,7 +5087,7 @@ struct GameSession::Impl final : nnn::CScriptCallBack {
         result_visit.reset();shop_visit.reset();status_visit.reset();modal_caller.reset();suspended_modal.reset();
         chart_run=std::move(next.chart_run);chart_visit=std::move(next.chart_visit);chart_scroll=next.chart_scroll;
         chart_title_story.reset();
-        if (chart_run) shared_runtime->set_chart_selection(chart_graph->slot_capacity(),chart_run->can_select);
+        if (chart_run) shared_runtime->set_chart_selection(chart_graph->slot_capacity(),chart_run->can_select,chart_storage_layout());
         mode_before_modal=next.suspended_mode;wait_before_modal=Wait::Running;
         sampled_clock.reset();
         backlog_voices=std::move(next.backlog_voices);backlog.swap(next.backlog);
@@ -5262,6 +5350,48 @@ void GameSession::advance_modal(int request,unsigned frames) { data_->advance_mo
 void GameSession::set_chart_storage(const fs::path& private_root) {
     data_->chart_private_root=private_root;
     if (data_->chart_store) data_->chart_store->private_root(private_root);
+}
+bool GameSession::legacy_chart() const noexcept { return data_->legacy_chart_active; }
+bool GameSession::uses_legacy_chart(const fs::path& root,const nnn::resource::FilenameEncoder& encode) {
+    return legacy_chart::recognizes(root,encode);
+}
+bool GameSession::validate_chart_file(const fs::path& root,const fs::path& relative_sav_path,
+        const std::vector<nnn::Byte>& bytes,const nnn::resource::FilenameEncoder& encode) {
+    if (relative_sav_path.empty() || relative_sav_path.has_root_path() || bytes.size()>2U*1024U*1024U) return false;
+    auto path=nnn::game_config::ascii_lower(relative_sav_path.generic_string());
+    if (path.find('\\')!=std::string::npos || path.find(':')!=std::string::npos) return false;
+    for (const auto& component:relative_sav_path)
+        if (component.empty() || component=="." || component=="..") return false;
+    try {
+        const bool old=uses_legacy_chart(root,encode);
+        const nnn::chart::Graph graph(root,800,600,encode,old ?
+            nnn::chart::Variant::LegacyChart : nnn::chart::Variant::SelectChart);
+        if (!graph.configured()) return false;
+        const std::string prefix=old ? "mushiex/" : std::string{};
+        const auto progress=graph.global_defaults();
+        if (path==prefix+"mita.dat") return bytes.size()==progress.seen.size();
+        if (path==prefix+"tsuka.dat") return bytes.size()==progress.traversed.size();
+        const auto slash=path.rfind('/');
+        if (slash==std::string::npos) return false;
+        const auto file=std::string_view(path).substr(slash+1);
+        if (file.size()<9 || file.substr(0,4)!="slot" || file.substr(file.size()-4)!=".dat") return false;
+        const auto number=file.substr(4,file.size()-8);
+        if (number.empty() || (number.size()>1 && number.front()=='0') || number.front()<'0' || number.front()>'9') return false;
+        nnn::Value slot=0;
+        const auto parsed=std::from_chars(number.data(),number.data()+number.size(),slot);
+        if (parsed.ec!=std::errc{} || parsed.ptr!=number.data()+number.size() || !graph.node(slot)) return false;
+        const auto expected=(old ? std::string("mushiex/") : std::string("emberfall.chart/"))+graph.legacy_slot_path(slot);
+        if (path!=expected) return false;
+        const auto node=old ? legacy_chart::parse_node(bytes,graph) : parse_chart_node(bytes,graph);
+        return old ? node.status.game_mode==51 :
+            node.status.game_mode==static_cast<int>(nnn::RuntimeMode::SelectChart) ||
+            node.status.game_mode==static_cast<int>(nnn::RuntimeMode::Title);
+    } catch (const std::exception&) {return false;}
+}
+bool GameSession::restore_chart_progress(nnn::chart::Progress progress) {
+    if (!data_->configure_chart() || !data_->chart_graph->valid(progress)) return false;
+    data_->shared_runtime->set_chart_progress(std::move(progress),data_->chart_storage_layout());
+    return true;
 }
 std::optional<ScriptModal> GameSession::status_overlay(nnn::RuntimeMode type,nnn::RuntimeMode mode,bool prefer_story) {
     auto overlays=status_overlays(mode,prefer_story);

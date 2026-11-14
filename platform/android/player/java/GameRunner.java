@@ -302,7 +302,8 @@ final class GameRunner {
             long candidate=token==0?NativeGame.open(path,rate):NativeGame.openWithRuntime(path,rate,token);
             if(candidate==0)throw new IllegalStateException("原生引擎未创建游戏会话");
             try{
-                NativeGame.setChartStorage(candidate,chartDirectory.getPath().getBytes(StandardCharsets.UTF_8));
+                File storage=NativeGame.legacyChart(candidate)?savePaths.directory():chartDirectory;
+                NativeGame.setChartStorage(candidate,storage.getPath().getBytes(StandardCharsets.UTF_8));
                 return candidate;
             }catch(RuntimeException|LinkageError e){
                 NativeGame.close(candidate);
@@ -352,13 +353,14 @@ final class GameRunner {
         try{
             int[] format=NativeGame.currentPcSystemSaveFormat(candidate);
             int[] rawShared=NativeGame.sharedConfigSnapshot(candidate);
+            boolean legacyChart=NativeGame.legacyChartDirectory(root.getPath().getBytes(StandardCharsets.UTF_8));
             saveResult(SAVE_FILES.submit(()->{
                 GameUiAssets.Config game=GameUiAssets.readConfig(root,"game",codec),chart=null;
                 int chartDefault=game.number("SelectChartIsDefault",0)!=0?0:1;
-                if(game.number("SelectChartClassDisable",chartDefault)==0)try{
-                    chart=GameUiAssets.readConfig(root,"selectChart",codec);
+                if(legacyChart||game.number("SelectChartClassDisable",chartDefault)==0)try{
+                    chart=GameUiAssets.readChartConfig(root,codec,legacyChart);
                 }catch(IOException invalid){Log.w("SystemNNN","Unable to read PC chart configuration",invalid);}
-                pcSystemSave=PcSystemSave.open(root,savePaths.directory(),game,chart,format);
+                pcSystemSave=PcSystemSave.open(root,savePaths.directory(),game,chart,format,legacyChart);
                 if(pending==null)readReadLines();else recoverProgress(previousProgress,pending);
                 slots.preload(root,codec,GameUiAssets.SharedConfig.from(rawShared,root,game,null));
                 return null;
@@ -2125,11 +2127,13 @@ final class GameRunner {
         }
         GameUiAssets.ModeAssets data=null;
         ChartView chart=null;
+        boolean legacyChart=false;
         String problem=null;
         Modal previous=onTitle?menuModal:current==null?null:current.modal;
         int mode=info[1];
         try{
             if(mode==Modal.SELECT_CHART){
+                legacyChart=NativeGame.legacyChart(handle);
                 chart=new ChartView(NativeGame.chartGeometry(handle),NativeGame.chartText(handle),rawText->decode(rawText,true));
             }
             boolean sameArt=previous!=null&&previous.mode==mode&&previous.assets!=null&&mode!=Modal.PRINT_HINT&&
@@ -2182,7 +2186,7 @@ final class GameRunner {
                 data=uiAssets.statusAssets(handle,codec,mode==Modal.PRINT_PARTY);
                 break;
             case Modal.SELECT_CHART:
-                data=uiAssets.chartAssets(handle,codec,chart,previous!=null&&previous.mode==mode?previous.assets:null);
+                data=uiAssets.chartAssets(handle,codec,chart,legacyChart,previous!=null&&previous.mode==mode?previous.assets:null);
                 break;
             case Modal.SELECT_PLACE2:
                 data=new GameUiAssets.ModeAssets(uiAssets.place(mode),java.util.Collections.emptyMap());

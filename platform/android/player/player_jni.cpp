@@ -816,6 +816,35 @@ API jobjectArray JNICALL FN(modalRows)(JNIEnv* env,jclass,jlong handle) {
     }
     return out;
 }
+API jboolean JNICALL FN(legacyChart)(JNIEnv* env,jclass,jlong handle) {
+    try { return player(handle).game->legacy_chart() ? JNI_TRUE : JNI_FALSE; }
+    catch (const std::exception& e) { fail(env,e.what());return JNI_FALSE; }
+}
+API jboolean JNICALL FN(legacyChartDirectory)(JNIEnv* env,jclass,jbyteArray path) {
+    try {
+        const auto root=directory_path(env,path);
+        if (env->ExceptionCheck()) return JNI_FALSE;
+        if (root.empty() || root.find('\0')!=std::string::npos) throw std::invalid_argument("Invalid game directory");
+        return GameSession::uses_legacy_chart(std::filesystem::u8path(root),emberfall::android::filename_encoder(env))
+            ? JNI_TRUE : JNI_FALSE;
+    } catch (const std::exception& e) { fail(env,e.what());return JNI_FALSE; }
+}
+API jboolean JNICALL FN(validateChartFile)(JNIEnv* env,jclass,jbyteArray path,jbyteArray relative,jbyteArray raw) {
+    try {
+        if (!raw) return JNI_FALSE;
+        const auto size=env->GetArrayLength(raw);
+        if (size<0 || size>2*1024*1024) return JNI_FALSE;
+        const auto root=directory_path(env,path),name=directory_path(env,relative);
+        if (env->ExceptionCheck()) return JNI_FALSE;
+        if (root.empty() || root.find('\0')!=std::string::npos || name.empty() || name.find('\0')!=std::string::npos)
+            return JNI_FALSE;
+        std::vector<nnn::Byte> data(static_cast<std::size_t>(size));
+        if (size) env->GetByteArrayRegion(raw,0,size,reinterpret_cast<jbyte*>(data.data()));
+        if (env->ExceptionCheck()) return JNI_FALSE;
+        return GameSession::validate_chart_file(std::filesystem::u8path(root),std::filesystem::u8path(name),data,
+            emberfall::android::filename_encoder(env)) ? JNI_TRUE : JNI_FALSE;
+    } catch (const std::exception&) { return JNI_FALSE; }
+}
 API jintArray JNICALL FN(chartGeometry)(JNIEnv* env,jclass,jlong handle) {
     try {
         const auto& modal=player(handle).game->state().modal;
@@ -833,6 +862,7 @@ API jintArray JNICALL FN(chartGeometry)(JNIEnv* env,jclass,jlong handle) {
         for (const auto& node:v.nodes)
             fields.insert(fields.end(),{node.id,node.x,node.y,node.style,node.access,node.sx,node.sy,node.sw,node.sh,node.routes,node.seen});
         for (const auto& road:v.roads) fields.insert(fields.end(),{road.x1,road.y1,road.x2,road.y2,road.style});
+        fields.insert(fields.end(),{v.min_scroll,v.current_page});
         return int_array(env,fields);
     } catch (const std::exception& e) { fail(env,e.what());return nullptr; }
 }
@@ -1380,7 +1410,7 @@ API void JNICALL FN(restoreChartProgress)(JNIEnv* env,jclass,jlong handle,jbyteA
         const auto* traversed_data=in.raw(traversed);
         flags.seen.assign(seen_data,seen_data+seen);
         flags.traversed.assign(traversed_data,traversed_data+traversed);
-        if (!player(handle).game->runtime()->set_chart_progress(std::move(flags)))
+        if (!player(handle).game->restore_chart_progress(std::move(flags)))
             throw std::invalid_argument("Chart progress was rejected");
     } catch (const std::exception& e) { fail(env,e.what()); }
 }

@@ -391,9 +391,10 @@ Status parse_status_block(const nnn::Byte* bytes,std::size_t size) {
     return read_status(view);
 }
 
-std::vector<nnn::Byte> write_status_block(const Status& status) {
+std::vector<nnn::Byte> write_status_block(const Status& status,std::size_t status_bytes) {
+    if (!supported_status_size(status_bytes)) invalid("unsupported GAMESTATUS layout");
     std::vector<nnn::Byte> bytes;
-    append_status(bytes,status,preview_status_bytes);
+    append_status(bytes,status,status_bytes);
     (void)read_status(View(bytes.data(),bytes.size()));
     return bytes;
 }

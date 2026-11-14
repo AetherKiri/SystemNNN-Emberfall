@@ -29,6 +29,8 @@ public:
         auto result=std::make_shared<ChartView>();
         const auto& setup=graph.setup();
         result->scroll=visit.scroll_y;
+        result->min_scroll=graph.scroll_min(visit.page);
+        result->current_page=graph.node(visit.current)->page;
         result->limit=graph.scroll_limit(visit.page);
         result->extent=page->extent;
         result->back_extent=page->back_extent;

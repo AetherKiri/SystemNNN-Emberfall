@@ -204,6 +204,7 @@ public final class GameSaveTest {
         }
     }
     public static void main(String[] games) throws Exception {
+        PcSystemSaveTest.chartLayouts();
         choiceAppearanceReplay();
         GameSave history=new GameSave();
         history.append(0,12,34,false,0);
