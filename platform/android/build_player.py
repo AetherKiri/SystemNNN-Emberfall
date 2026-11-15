@@ -87,7 +87,7 @@ def main():
                              (ANDROID / "app/assets/licenses/VNTranslationTools-MIT.txt", "VNTranslationTools-MIT.txt")):
             shutil.copyfile(source, licenses / name)
         (licenses / "emberfall-source.txt").write_text(
-            "Copyright (c) 2026 PorisRora (Rooboko)\n"
+            "Copyright (c) 2026 PorisRora\n"
             "Emberfall original code: GPL-2.0-only.\n"
             "Source and build instructions: https://github.com/PorisRora/SystemNNN-Emberfall\n",
             encoding="utf-8")
