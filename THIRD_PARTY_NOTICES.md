@@ -2,7 +2,7 @@
 
 ## Emberfall
 
-Copyright © 2026 PorisRora（Rooboko）。Emberfall 自有代码按 GPL-2.0-only 提供，涵盖当前运行库所用的自有源码。第三方组件的许可见下表。 [GPL-2.0 许可证](LICENSE)
+Copyright © 2026 PorisRora。Emberfall 自有代码按 GPL-2.0-only 提供，涵盖当前运行库所用的自有源码。第三方组件的许可见下表。 [GPL-2.0 许可证](LICENSE)
 
 ## SystemNNN
 
