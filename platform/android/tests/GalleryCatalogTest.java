@@ -191,7 +191,28 @@ public final class GalleryCatalogTest {
                 "DeadEndAegis datafile.xtx overwrite cursor and anime parameters");
         }
     }
+    private static void checkMusicCatalog() throws Exception {
+        Path temp=Files.createTempDirectory("systemnnn-music-catalog");
+        try {
+            writeText(temp.resolve("nya/listenbgmlist.xtx"),
+                "first,track1,1,0,@,*,@,@\nlast,track2,2,59,@,*,@,@,unused\n");
+            File root=temp.toFile();
+            GameTextDecoder decoder=GameTextDecoder.load(root);
+            GalleryCatalog catalog=new GalleryCatalog(root,decoder,0,new GalleryCatalog.MovieList(root,decoder));
+            check(catalog.songCount()==2&&catalog.song(1).name.equals("track2")&&catalog.song(1).titleBytes==4,
+                "LISTENBGM keeps complete eight-field records before an extra tail field");
+        } finally {
+            deleteTree(temp);
+        }
+        check(GalleryCatalog.musicNameOffset(1,12,14,false,16)==30,
+            "LISTENBGM centers from the configured name origin using the original double-byte length");
+        check(GalleryCatalog.musicNameOffset(2,12,15,true,9)==22,
+            "LISTENBGM right alignment uses the original single-byte arithmetic");
+        check(GalleryCatalog.musicNameOffset(0,12,14,false,16)==0,
+            "LISTENBGM left alignment uses the configured name origin directly");
+    }
     public static void main(String[] args)throws Exception{
+        checkMusicCatalog();
         List<String> fields=GalleryCatalog.cgTokens("#42-4/cg_anim,*@!#46,3/[<2:90_5|3:75_8]cg_diff\r\nother");
         check(fields.equals(Arrays.asList("#42-4/cg_anim","*@!#46,3/[<2:90_5|3:75_8]cg_diff","other")),
             "ordinary delimiters and an unambiguous animation comma");
