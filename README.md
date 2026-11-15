@@ -6,7 +6,7 @@
 
 面向 Android 的 SystemNNN 引擎移植，让手机运行使用 SystemNNN 制作的视觉小说。支持独立 APK，也可作为 Tyranor-Next 的内置引擎。
 
-**移植作者：[PorisRora](https://github.com/PorisRora)（Rooboko）**
+**移植作者：[PorisRora](https://github.com/PorisRora)**
 
 - C++ 内核负责剧情脚本、图层、特效和音频。
 - 按游戏自身配置呈现标题、对话、菜单、存读档和鉴赏界面。
@@ -21,6 +21,22 @@
 安装后选择包含 `spt/sys.spt` 的已解压游戏目录即可。游戏资源需自行提供，兼容程度因游戏版本而异。
 
 [播放器说明](platform/android/README.md) · [构建说明](platform/android/BUILDING.md) · [TYN 接入说明](platform/android/tyn/README.md)
+
+## 移植测试游戏
+
+- 《魔法少女消耗战线 死终Ω神盾》（简体版、繁体版）
+- 《鏖殺ノ乙女》
+- 《獄淫の尖塔》
+- 《サイノガミ ～破滅も来るべき事柄も、望めば手中～》
+- 《劣等》
+- 《EXTRAVAGANZA ～蟲狂編～》
+- 《ク・リトル・リトル ～魔女の使役る、蟲神の触手～》
+- 《魔法美少女まじかる☆萌えりんS》
+- 《鎖のカンケイ》
+- 《MinDeaD BlooD ～支配者の為の狂死曲～》
+- 《EXTRAVAGANZA ～蟲愛でる少女～》（虫爱少女 Ver 1.10）
+
+以上 12 套安装均在桌面测试工具中至少运行过一条路线至原版脚本结束。Android 专项抽测覆盖启动、菜单、存读档、影片和鉴赏。MinDeaD BlooD 与虫爱少女使用原版脚本作为测试输入。
 
 ## 来源
 
