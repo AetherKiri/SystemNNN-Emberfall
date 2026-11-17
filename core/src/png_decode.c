@@ -8,7 +8,13 @@
 
 union allocation_header {
     size_t size;
+    /* MSVC exposes max_align_t only to C++, where it is a double. Keep the
+     * C error boundary aligned for the same fundamental types on that ABI. */
+#ifdef _MSC_VER
+    double alignment;
+#else
     max_align_t alignment;
+#endif
 };
 
 struct decode_state {
