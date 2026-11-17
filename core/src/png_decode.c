@@ -8,10 +8,10 @@
 
 union allocation_header {
     size_t size;
-    /* MSVC exposes max_align_t only to C++, where it is a double. Keep the
-     * C error boundary aligned for the same fundamental types on that ABI. */
+    /* MSVC does not expose max_align_t in C. Preserve malloc's 16-byte
+     * alignment on Win64 (png_struct contains an aligned jmp_buf). */
 #ifdef _MSC_VER
-    double alignment;
+    double alignment[2];
 #else
     max_align_t alignment;
 #endif
