@@ -64,8 +64,15 @@ const char* error_name(ErrorCode code) noexcept {
 }
 
 ReadResult read_script_file(const std::string& filename) {
-    ReadResult result;
     if (filename.find('\0') != std::string::npos) {
+        return {failure(ErrorCode::ReadFailed, "NUL in file path"), {}, 0};
+    }
+    return read_script_path(std::filesystem::path(filename));
+}
+
+ReadResult read_script_path(const std::filesystem::path& filename) {
+    ReadResult result;
+    if (filename.native().find(std::filesystem::path::value_type{}) != std::filesystem::path::string_type::npos) {
         result.status = failure(ErrorCode::ReadFailed, "NUL in file path");
         return result;
     }

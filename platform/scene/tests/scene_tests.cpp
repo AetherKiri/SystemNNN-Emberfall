@@ -3073,6 +3073,44 @@ int main(){
         if(variant==0)require(error.find("Unsupported VAW PACKTYPE=1")!=std::string::npos,"pack type error");
         if(variant==3)require(error.find("Truncated VAW PCM data")!=std::string::npos,"truncated PCM error");
     });
+    suite.test("native asset paths preserve Unicode roots and filenames",[]{
+        Model m;m.code.end();TempGame temp(m);
+        // The emoji cannot round-trip through CP932, even on a Japanese Windows host.
+        const auto root=temp.root/std::filesystem::u8path(u8"game-\u5834\u9762-\U0001f320");
+        const auto write=[&](const std::filesystem::path& name,const Bytes& bytes) {
+            const auto path=root/name;std::filesystem::create_directories(path.parent_path());
+            std::ofstream out(path,std::ios::binary);
+            out.write(reinterpret_cast<const char*>(bytes.data()),static_cast<std::streamsize>(bytes.size()));
+            out.close();require(static_cast<bool>(out),"cannot write Unicode asset fixture");
+        };
+        const auto unicode=std::filesystem::u8path(u8"\u5834\u9762");
+        const std::string cp932="\x8f\xea\x96\xca";
+        const auto bytes=script(m);
+        write("spt/sys.spt",bytes);
+        write(std::filesystem::path("spt")/std::filesystem::u8path(unicode.u8string()+".spt"),bytes);
+        write(std::filesystem::path("dwq")/std::filesystem::u8path(unicode.u8string()+".dwq"),asset("tiny_red"));
+        Bytes gtb(12U,0);le32(gtb,0,1);
+        gtb.insert(gtb.end(),cp932.begin(),cp932.end());gtb.push_back(0);
+        write("dwq/sys0.gtb",gtb);write("dwq/sys0.gpk",asset("tiny_green"));
+        // Keep the key encoding separate from filesystem IO, including on Android hosts.
+        const nnn::resource::FilenameEncoder encode=[&](const std::string& name)->std::optional<std::string> {
+            if (name==unicode.u8string()+".spt") return cp932+".spt";
+            if (name==unicode.u8string()) return cp932;
+            return {};
+        };
+        scene::GameAssets assets(root,1024,encode);
+        const auto ascii=assets.script("spt/sys.spt"),named=assets.script("spt/"+cp932+".spt");
+        require(ascii.status && ascii.bytes==bytes && named.status && named.bytes==bytes,
+            "Unicode root or CP932-keyed Unicode script failed");
+        const auto loose=assets.image(cp932),packed=assets.image("sys/"+cp932);
+        require(loose->pixels.rgba!=packed->pixels.rgba && assets.stats().loose_reads==1 && assets.stats().packed_reads==1,
+            "Unicode loose or GTB/GPK native path read failed");
+        require(nnn::read_script_path(root/"missing.spt").status.code==nnn::ErrorCode::NotFound,
+            "native path adapter lost missing-file status");
+        auto nul=(root/"spt/sys.spt").native();nul.push_back(std::filesystem::path::value_type{});
+        require(nnn::read_script_path(std::filesystem::path(nul)).status.code==nnn::ErrorCode::ReadFailed,
+            "native path adapter accepted an embedded NUL");
+    });
     suite.test("DWQ routes select a pack and numeric patch level before caching",[]{
         Model m;m.code.end();TempGame temp(m);
         temp.text("init/game.xtx","dwqPackLevel 11\n");

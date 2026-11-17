@@ -70,10 +70,9 @@ struct NameSpan {
     std::size_t length;
 };
 
-Status open_file(const std::string& filename, std::ifstream& file, std::uint64_t& size) {
+Status open_file(const std::filesystem::path& path, std::ifstream& file, std::uint64_t& size) {
     namespace fs = std::filesystem;
     std::error_code error;
-    const fs::path path(filename);
     const auto state = fs::status(path, error);
     if (error) {
         const bool missing = error == std::errc::no_such_file_or_directory || error == std::errc::not_a_directory;
@@ -251,6 +250,18 @@ EntryResult find_entry(const Index& index, const std::string& raw_name) {
 
 IndexResult load_index(const std::string& gtb_filename, const std::string& gpk_filename) {
     try {
+        return load_index_paths(std::filesystem::path(gtb_filename), std::filesystem::path(gpk_filename));
+    } catch (const std::bad_alloc&) {
+        return index_failure(ErrorCode::LimitExceeded, no_byte, "Cannot allocate bounded GTB input");
+    } catch (const std::length_error&) {
+        return index_failure(ErrorCode::LimitExceeded, no_byte, "GTB input exceeds container limit");
+    } catch (const std::filesystem::filesystem_error&) {
+        return index_failure(ErrorCode::ReadFailed, no_byte, "Cannot inspect archive paths");
+    }
+}
+
+IndexResult load_index_paths(const std::filesystem::path& gtb_filename, const std::filesystem::path& gpk_filename) {
+    try {
         std::ifstream table;
         std::uint64_t table_size = 0;
         auto checked = open_file(gtb_filename, table, table_size);
@@ -289,6 +300,25 @@ IndexResult load_index(const std::string& gtb_filename, const std::string& gpk_f
 }
 
 MemberResult read_member(const std::string& gpk_filename, const Index& index, const std::string& raw_name) {
+    try {
+        // Preserve member validation before converting a legacy narrow path.
+        const auto found = find_entry(index, raw_name);
+        if (!found.status) return {found.status, {}, {}};
+        if (found.entry.length > max_member_bytes) return member_failure(ErrorCode::LimitExceeded, no_byte, "Member exceeds read byte limit");
+        if (found.entry.offset > static_cast<std::uint64_t>(std::numeric_limits<std::streamoff>::max())) {
+            return member_failure(ErrorCode::LimitExceeded, no_byte, "Member offset exceeds host seek domain");
+        }
+        return read_member_path(std::filesystem::path(gpk_filename), index, raw_name);
+    } catch (const std::bad_alloc&) {
+        return member_failure(ErrorCode::LimitExceeded, no_byte, "Cannot allocate bounded member storage");
+    } catch (const std::length_error&) {
+        return member_failure(ErrorCode::LimitExceeded, no_byte, "Member exceeds container limit");
+    } catch (const std::filesystem::filesystem_error&) {
+        return member_failure(ErrorCode::ReadFailed, no_byte, "Cannot inspect archive member path");
+    }
+}
+
+MemberResult read_member_path(const std::filesystem::path& gpk_filename, const Index& index, const std::string& raw_name) {
     try {
         auto found = find_entry(index, raw_name);
         if (!found.status) return {std::move(found.status), {}, {}};

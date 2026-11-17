@@ -150,7 +150,7 @@ GameAssets::GameAssets(const fs::path& root,std::size_t cache_limit,const resour
             break;
         }
         if (pack.level>=0 && pack.level>=levels) continue;
-        auto index=nnn::archive::load_index(item.second.string(),gpk->second.string());
+        auto index=nnn::archive::load_index_paths(item.second,gpk->second);
         if (!index.status) throw std::runtime_error(pack.stem+".gtb: "+index.status.detail);
         pack.file=gpk->second;
         pack.index=std::move(index.index);
@@ -185,7 +185,7 @@ nnn::ReadResult GameAssets::script(const std::string& relative) const {
     const auto key=resource::normalize_cp932_path(relative);
     const auto path=config(key.compare(0,prefix.size(),prefix)==0 ? key.substr(prefix.size()) : key);
     if (path.empty()) return {{nnn::ErrorCode::NotFound,nnn::no_word,"Missing game script: "+relative},{},0};
-    return nnn::read_script_file(path.string());
+    return nnn::read_script_path(path);
 }
 
 GameAssets::Graphic GameAssets::find_graphic(const std::string& name,bool pc_only) const {
@@ -264,12 +264,12 @@ std::shared_ptr<const render::Texture> GameAssets::image(const std::string& name
     }
     std::vector<nnn::Byte> bytes;
     if (graphic.pack) {
-        auto read=nnn::archive::read_member(graphic.file->string(),graphic.pack->index,*graphic.member);
+        auto read=nnn::archive::read_member_path(*graphic.file,graphic.pack->index,*graphic.member);
         if (!read.status) throw std::runtime_error(read.status.detail);
         bytes=std::move(read.bytes); ++stats_.packed_reads;
     } else {
         if (fs::file_size(*graphic.file)>nnn::image::max_input_bytes) throw std::runtime_error("Loose graphic exceeds image limit");
-        auto read=nnn::read_script_file(graphic.file->string());
+        auto read=nnn::read_script_path(*graphic.file);
         if (!read.status) throw std::runtime_error(read.status.detail);
         bytes=std::move(read.bytes); ++stats_.loose_reads;
     }

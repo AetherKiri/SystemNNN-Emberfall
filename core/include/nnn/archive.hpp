@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
 #include <limits>
 #include <string>
 #include <vector>
@@ -86,14 +87,18 @@ IndexResult parse_gtb(const std::vector<Byte>& bytes, std::uint64_t known_gpk_si
 // Exact original-byte lookup, without case folding, basename or encoding rules.
 EntryResult find_entry(const Index& index, const std::string& raw_name);
 
-// Ordinary-file adapters. Names are never turned into filesystem paths.
+// Ordinary-file adapters. Member names are never turned into filesystem paths.
+// String filenames retain native narrow encoding (not UTF-8 on Windows).
 // GPK is sized but never loaded wholesale by load_index.
 IndexResult load_index(const std::string& gtb_filename, const std::string& gpk_filename);
+// Native path entry points preserve Unicode filesystem names on Windows.
+IndexResult load_index_paths(const std::filesystem::path& gtb_filename, const std::filesystem::path& gpk_filename);
 
 // Read just the validated member interval, subject to max_member_bytes.
 // Checks GPK length before/after the read and reports short reads/length changes.
 // Length checks do not promise detection of same-size content replacement.
 // Every failed result has an empty Entry and no partial member bytes.
 MemberResult read_member(const std::string& gpk_filename, const Index& index, const std::string& raw_name);
+MemberResult read_member_path(const std::filesystem::path& gpk_filename, const Index& index, const std::string& raw_name);
 
 } // namespace nnn::archive

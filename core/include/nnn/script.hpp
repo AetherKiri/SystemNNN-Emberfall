@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <filesystem>
 #include <memory>
 #include <optional>
 #include <string>
@@ -67,7 +68,10 @@ struct ReadResult {
 // Success must return exactly declared_size bytes. A short successful reader is
 // converted to ReadFailed by LoadFile before any VM state is changed.
 using Reader = std::function<ReadResult(const std::string&)>;
+// Legacy narrow-native filename adapter (not UTF-8 on Windows).
 ReadResult read_script_file(const std::string& filename);
+// Native filesystem path adapter; preserves Unicode paths on Windows.
+ReadResult read_script_path(const std::filesystem::path& filename);
 
 struct DecodedWords {
     Status status;
