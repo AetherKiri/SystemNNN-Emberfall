@@ -1,0 +1,134 @@
+name: Portable CMake
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      android_compile:
+        description: Compile the scene libraries with the Android NDK
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  host:
+    name: ${{ matrix.os }} / ${{ matrix.project }} / system=${{ matrix.system }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        project: [core, platform/scene]
+        system: ['OFF', 'ON']
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux' && matrix.system == 'ON'
+        run: sudo apt-get update && sudo apt-get install -y zlib1g-dev libpng-dev
+      - name: Install macOS dependencies
+        if: runner.os == 'macOS' && matrix.system == 'ON'
+        run: brew install zlib libpng
+      - name: Install Windows dependencies
+        if: runner.os == 'Windows' && matrix.system == 'ON'
+        shell: pwsh
+        run: |
+          & "$env:VCPKG_INSTALLATION_ROOT/vcpkg.exe" install libpng:x64-windows
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "$env:VCPKG_INSTALLATION_ROOT/installed/x64-windows/bin" >> $env:GITHUB_PATH
+          "$env:VCPKG_INSTALLATION_ROOT/installed/x64-windows/debug/bin" >> $env:GITHUB_PATH
+      - name: Configure
+        shell: bash
+        run: |
+          args=()
+          if [[ "$RUNNER_OS" == Windows && "${{ matrix.system }}" == ON ]]; then
+            args+=("-DCMAKE_TOOLCHAIN_FILE=$VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=x64-windows)
+          elif [[ "$RUNNER_OS" == macOS && "${{ matrix.system }}" == ON ]]; then
+            args+=("-DCMAKE_PREFIX_PATH=$(brew --prefix zlib);$(brew --prefix libpng)")
+          fi
+          cmake -S "${{ matrix.project }}" -B build/ci -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON -DNNN_BUILD_TOOLS=ON -DNNN_USE_SYSTEM_DEPENDENCIES=${{ matrix.system }} "${args[@]}"
+      - name: Build libraries, tools and tests
+        run: cmake --build build/ci --config Debug --parallel 4
+      - name: Run portable fixture tests
+        # The optional JVM suite requires proprietary installed game data.
+        run: ctest --test-dir build/ci -C Debug --output-on-failure -E "^emberfall-android-jvm$" --no-tests=error
+
+  embedding:
+    name: Linux shared embedding / system=${{ matrix.system }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        system: ['OFF', 'ON']
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        if: matrix.system == 'ON'
+        run: sudo apt-get update && sudo apt-get install -y zlib1g-dev libpng-dev
+      - name: Generate parent CMake project
+        shell: python
+        run: |
+          import os
+          from pathlib import Path
+          root = Path.cwd().as_posix()
+          parent = Path('build/consumer')
+          parent.mkdir(parents=True)
+          cmake = r'''
+          cmake_minimum_required(VERSION 3.16)
+          project(aether_embedding_smoke LANGUAGES C CXX)
+          set(CMAKE_POSITION_INDEPENDENT_CODE OFF)
+          set(NNN_USE_SYSTEM_DEPENDENCIES @SYSTEM@ CACHE BOOL "")
+          # These unrelated parent cache entries must survive system mode.
+          set(PNG_SHARED parent-sentinel CACHE STRING "")
+          set(ZLIB_BUILD_SHARED parent-sentinel CACHE STRING "")
+          add_subdirectory("@ROOT@/platform/scene" nnn)
+          if(DEFINED BUILD_TESTING)
+              message(FATAL_ERROR "Embedded build created BUILD_TESTING")
+          endif()
+          if(NNN_BUILD_TOOLS OR TARGET nnn-script-probe OR TARGET nnn-image-probe
+             OR TARGET nnn-archive-probe OR TARGET nnn-png-probe
+             OR TARGET nnn-audio-check OR TARGET nnn-scene-player)
+              message(FATAL_ERROR "Embedded build enabled diagnostic tools")
+          endif()
+          if(NNN_USE_SYSTEM_DEPENDENCIES)
+              if(NOT PNG_SHARED STREQUAL "parent-sentinel" OR NOT ZLIB_BUILD_SHARED STREQUAL "parent-sentinel")
+                  message(FATAL_ERROR "System mode changed parent dependency options")
+              endif()
+          endif()
+          set(nnn_libraries nnn-script-core nnn-game-audio nnn-image-core nnn-archive-core
+              nnn-png-core nnn-dwq-core emberfall-render emberfall-scene)
+          if(NOT NNN_USE_SYSTEM_DEPENDENCIES)
+              list(APPEND nnn_libraries zlibstatic png_static)
+          endif()
+          add_library(aether-smoke SHARED smoke.cpp)
+          foreach(library IN LISTS nnn_libraries)
+              get_target_property(pic ${library} POSITION_INDEPENDENT_CODE)
+              if(NOT pic)
+                  message(FATAL_ERROR "${library} is not PIC")
+              endif()
+              # Include every object, so missing PIC cannot hide in unused members.
+              target_sources(aether-smoke PRIVATE $<TARGET_OBJECTS:${library}>)
+          endforeach()
+          target_link_libraries(aether-smoke PRIVATE emberfall-scene PNG::PNG ZLIB::ZLIB)
+          target_link_options(aether-smoke PRIVATE -Wl,--no-undefined)
+          '''
+          cmake = cmake.replace('@ROOT@', root).replace('@SYSTEM@', '${{ matrix.system }}')
+          (parent / 'CMakeLists.txt').write_text(cmake, encoding='utf-8')
+          (parent / 'smoke.cpp').write_text('extern "C" int aether_smoke() { return 0; }\n', encoding='utf-8')
+      - name: Configure and link shared consumer
+        run: |
+          cmake -S build/consumer -B build/consumer-build -DCMAKE_BUILD_TYPE=Debug
+          cmake --build build/consumer-build --parallel 4
+
+  android:
+    name: Optional Android arm64 scene compile
+    if: github.event_name == 'workflow_dispatch' && inputs.android_compile
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile portable libraries without host tools or tests
+        shell: bash
+        run: |
+          cmake -S platform/scene -B build/android -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-26 -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF -DNNN_BUILD_TOOLS=OFF -DNNN_USE_SYSTEM_DEPENDENCIES=OFF
+          cmake --build build/android --parallel 4
