@@ -82,18 +82,9 @@ Installed static packages must themselves have been built with PIC when the targ
 platform requires it; this project cannot recompile imported archives. These are
 build-tree targets, not an installed/exported SDK package.
 
-## Validation and CI
+## Fixture tests
 
-The [portable CMake workflow](../.github/workflows/cmake.yml) builds core and scene
-with bundled and installed dependencies on Linux, Windows/MSVC and macOS, including
-diagnostic programs and host fixture tests. Its Linux embedding jobs check the
-embedded defaults, parent option preservation and link every static-library object
-into a shared consumer. Windows/macOS jobs are CI coverage; a Linux development
-run does not establish that those platform jobs have passed.
-
-The optional Android dispatch compiles scene/core/render for arm64-v8a using the
-runner's Android NDK, bundled dependencies, and tools/tests disabled. It does not
-build the JNI player or FFmpeg, install an APK, or run device tests. The optional
-`emberfall-android-jvm` CTest needs a JDK, Android SDK and installed game data;
-the portable workflow excludes it explicitly. Existing C++ fixture tests and the
-Python configuration audit use repository data.
+The C++ fixture tests and Python configuration audit use repository data.
+The optional `emberfall-android-jvm` CTest requires a JDK, Android SDK and
+installed game data. To run the other tests, pass `-E '^emberfall-android-jvm$'`
+to CTest.
